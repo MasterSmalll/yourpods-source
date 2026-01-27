@@ -1,0 +1,73 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.buildlog/
+.history
+.svn/
+migrate_working_dir/
+
+
+# IntelliJ / IDE
+*.iml
+.idea/
+modules.xml
+workspace.xml
+.vscode/
+
+# Flutter/Dart/Pub
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+build/
+
+# Android
+android/local.properties
+android/key.properties
+android/**/*.jks
+android/**/*.keystore
+android/app/google-services.json
+
+# iOS
+ios/Flutter/App.framework
+ios/Flutter/Flutter.framework
+ios/Flutter/Generated.xcconfig
+ios/Flutter/app.flx
+ios/Flutter/app.zip
+ios/Flutter/flutter_assets/
+ios/ServiceDefinitions.json
+ios/Runner/GeneratedPluginRegistrant.*
+ios/Runner/Base.lproj/Main.storyboardc
+ios/Runner/Assets.xcassets/AppIcon.appiconset/Contents.json
+ios/*.mobileprovision
+ios/*.p12
+ios/*.sks
+ios/Pods/
+
+# Mac
+macos/Flutter/ephemeral/
+macos/Pods/
+
+# Web
+web/icons/
+web/favicon.png
+web/manifest.json
+
+# Windows
+windows/flutter/ephemeral/
+
+# Linux
+linux/flutter/ephemeral/
+
+# Secrets
+.env
+.env.*
+!.env.example
+secrets.json
+antigravity/
