@@ -1,17 +1,24 @@
 <div align="center">
 
-# YourPods
-
 <img src="assets/images/logo.png" width="128" height="128" alt="YourPods Logo" />
 
-**Privacy-first, self-hosted podcast player for iOS, macOS, and Apple Watch.**
+<h1>YourPods</h1>
 
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-[![Platform: iOS](https://img.shields.io/badge/Platform-iOS-000000.svg?style=flat&logo=apple)](https://apps.apple.com/us/app/yourpods/id6757721236)
-[![Platform: macOS](https://img.shields.io/badge/Platform-macOS-000000.svg?style=flat&logo=apple)](https://apps.apple.com/us/app/yourpods/id6757721236)
-[![Platform: watchOS](https://img.shields.io/badge/Platform-watchOS-000000.svg?style=flat&logo=apple)](https://apps.apple.com/us/app/yourpods/id6757721236)
+<p><strong>Privacy-first, self-hosted podcast player for iOS, macOS, and Apple Watch.</strong></p>
 
-[Feature Highlights](#feature-highlights) • [Installation](#installation) • [Technical Details](#technical) • [Contributing](#getting-started-for-developers)
+<p>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License: GPL v3"></a>
+  <a href="https://apps.apple.com/us/app/yourpods/id6757721236"><img src="https://img.shields.io/badge/Platform-iOS-000000.svg?style=flat&logo=apple" alt="Platform: iOS"></a>
+  <a href="https://apps.apple.com/us/app/yourpods/id6757721236"><img src="https://img.shields.io/badge/Platform-macOS-000000.svg?style=flat&logo=apple" alt="Platform: macOS"></a>
+  <a href="https://apps.apple.com/us/app/yourpods/id6757721236"><img src="https://img.shields.io/badge/Platform-watchOS-000000.svg?style=flat&logo=apple" alt="Platform: watchOS"></a>
+</p>
+
+<p>
+  <a href="#feature-highlights">Feature Highlights</a> •
+  <a href="#installation">Installation</a> •
+  <a href="#technical">Technical Details</a> •
+  <a href="#getting-started-for-developers">Contributing</a>
+</p>
 
 </div>
 
