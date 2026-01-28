@@ -1,0 +1,21 @@
+# YourPods
+
+> YourPods is a gPodder compatible, privacy-first and self-hosted podcast player for iOS, macOS, and Apple Watch. Sync your subscriptions and listening progress across all your devices using your own Nextcloud server.
+
+## Project Info
+
+- [README](README.md): Main documentation and feature overview
+- [Contributing](CONTRIBUTING.md): Developer guide and contribution rules
+- [License](LICENSE): GNU General Public License v3.0
+
+## Core Features
+
+- **Apple Ecosystem**: Optimized for iOS, macOS, watchOS, and CarPlay.
+- **Privacy**: No tracking, analytics, or ads. Self-hosted sync.
+- **Smart Queue**: Drag-and-drop management.
+- **Tech Stack**: Flutter, Provider, Just Audio, Hive/SQLite.
+
+## External Links
+
+- [Website](https://asecretcompany.com/yourpods/)
+- [App Store](https://apps.apple.com/us/app/yourpods/id6757721236)

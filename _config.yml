@@ -1,0 +1,4 @@
+theme: jekyll-theme-cayman
+title: YourPods
+description: Privacy-first, self-hosted podcast player for the Apple Ecosystem.
+show_downloads: true
