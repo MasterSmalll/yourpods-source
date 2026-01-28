@@ -32,7 +32,7 @@ The current code base corresponds to 1.2 release in the Apple App Store. You can
 
 ## Technical
 
-*   **Sync Backend:** Optimized for the `gpodder-sync` Nextcloud app. Standard `gpodder` services may work but are not the primary focus.
+*   **Sync Backend:** Optimized for the [gpodder-sync](https://apps.nextcloud.com/apps/gpoddersync) Nextcloud app. Standard `gpodder` services may work but are not the primary focus.
 *   **Protocol:** Implements the Open Podcast Sync protocol for subscriptions (`SubscriptionDelta`) and actions (`EpisodeAction`).
 *   **Architecture:** Built with `provider` for state management and `just_audio` for robust playback.
 *   **Storage:** Uses `flutter_secure_storage` for credentials and local database for offline capability.
