@@ -9,7 +9,9 @@ YourPods is a gPodder compatible, privacy-first and self-hosted podcast player f
 YourPods seamlessly integrates with gPodder-compatible servers (such as Nextcloud & NextPod) to keep your library in sync without relying on third-party clouds.
 
 ## Release Considerations
-The current code base corresponds to 1.2 release in the Apple App Store. You can use this same software with updates from the App Store or build it yourself from this repository. For the most up to date features check our website [https://asecretcompany.com/yourpods/](https://asecretcompany.com/yourpods/). YourPods is and always will be completely free and open source. The App Store version is identical to the GitHub  version. The advantage of the App Store version is that you get automatic updates and don't need to build device provisioning yourself (Apple's requirement). Purchasing the App Store version directly funds the development of YourPods and shows your support 🙏.
+The current code base corresponds to 1.2 release in the [Apple App Store] (https://apps.apple.com/us/app/yourpods/id6757721236). You can use this same software with updates from the App Store or build it yourself from this repository. For the most up to date features check our website [https://asecretcompany.com/yourpods/](https://asecretcompany.com/yourpods/) or join the [TestFlight Beta] (https://testflight.apple.com/join/jF18YknW) to test for free and help squash bugs! 
+
+YourPods is and always will be completely free and open source. The App Store/TestFlight version is identical to the GitHub version. The advantage of the App Store version is that you get automatic updates and don't need to build device provisioning yourself (Apple's requirement). Purchasing the App Store version directly funds the development of YourPods and shows your support 🙏.
 
 ## Feature Highlights
 
