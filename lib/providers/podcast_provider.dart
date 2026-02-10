@@ -9,6 +9,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 import 'settings_provider.dart';
+import '../services/log_service.dart';
 
 class PodcastProvider with ChangeNotifier {
   List<Podcast> _subscriptions = [];
@@ -20,7 +21,12 @@ class PodcastProvider with ChangeNotifier {
   String? get error => _error;
   
   int _lastSyncTimestamp = 0;
-  final _storage = const FlutterSecureStorage();
+  final _storage = const FlutterSecureStorage(
+    aOptions: AndroidOptions(
+      encryptedSharedPreferences: true,
+      resetOnError: true,
+    ),
+  );
   
   // Filter States
   final Set<String> _podcastsWithUnplayed = {};
@@ -60,7 +66,7 @@ class PodcastProvider with ChangeNotifier {
               notifyListeners();
           }
       } catch (e) {
-          print('PodcastProvider init failed: $e');
+          Log.e('PodcastProvider', 'init failed: $e');
       }
   }
 
@@ -96,7 +102,7 @@ class PodcastProvider with ChangeNotifier {
           final jsonString = json.encode(_subscriptions.map((p) => p.toJson()).toList());
           await file.writeAsString(jsonString);
       } catch (e) {
-          print('Error saving subscriptions: $e');
+          Log.e('PodcastProvider', 'Error saving subscriptions: $e');
       }
   }
 
@@ -132,7 +138,7 @@ class PodcastProvider with ChangeNotifier {
               notifyListeners();
           }
       } catch (e) {
-          print('Error loading local subscriptions: $e');
+          Log.e('PodcastProvider', 'Error loading local subscriptions: $e');
       }
   }
 
@@ -156,26 +162,15 @@ class PodcastProvider with ChangeNotifier {
   
   Set<String> get autoQueuePodcastUrls => _autoQueuePodcastUrls;
 
-  Future<void> _loadAutoQueueSettings() async {
-      final prefs = await SharedPreferences.getInstance();
-      final List<String>? stored = prefs.getStringList('auto_queue_subscriptions');
-      if (stored != null) {
-          _autoQueuePodcastUrls = stored.toSet();
-      }
-      notifyListeners();
-  }
 
-  Future<void> _saveAutoQueueSettings() async {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setStringList('auto_queue_subscriptions', _autoQueuePodcastUrls.toList());
-      notifyListeners();
-  }
 
   Future<void> toggleAutoQueue(String url) async {
       // Directly use the URL as stored in subscriptions
       
       if (_autoQueuePodcastUrls.contains(url)) {
           _autoQueuePodcastUrls.remove(url);
+          // If removing auto-queue, also remove priority? Or keep it as a setting?
+          // Keeping it is fine.
       } else {
           _autoQueuePodcastUrls.add(url);
       }
@@ -184,6 +179,61 @@ class PodcastProvider with ChangeNotifier {
 
   bool isAutoQueueEnabled(String url) {
       return _autoQueuePodcastUrls.contains(url);
+  }
+
+  // Auto-Queue Priority Logic
+  Set<String> _autoQueuePriorityUrls = {};
+  bool _showQueueHelpDialog = true; // Default to true
+
+  bool get showQueueHelpDialog => _showQueueHelpDialog;
+  
+  Future<void> _loadAutoQueueSettings() async {
+      final prefs = await SharedPreferences.getInstance();
+      
+      // Subscriptions
+      final List<String>? stored = prefs.getStringList('auto_queue_subscriptions');
+      if (stored != null) {
+          _autoQueuePodcastUrls = stored.toSet();
+      }
+      
+      // Priority
+      final List<String>? storedPriority = prefs.getStringList('auto_queue_priority_subscriptions');
+      if (storedPriority != null) {
+          _autoQueuePriorityUrls = storedPriority.toSet();
+      }
+
+      // Help Dialog
+      _showQueueHelpDialog = !(prefs.getBool('queue_help_dialog_shown') ?? false); // key stores if *shown*, so invert
+
+      notifyListeners();
+  }
+
+  Future<void> _saveAutoQueueSettings() async {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList('auto_queue_subscriptions', _autoQueuePodcastUrls.toList());
+      await prefs.setStringList('auto_queue_priority_subscriptions', _autoQueuePriorityUrls.toList());
+      notifyListeners();
+  }
+
+  Future<void> toggleAutoQueuePriority(String url) async {
+      if (_autoQueuePriorityUrls.contains(url)) {
+          _autoQueuePriorityUrls.remove(url);
+      } else {
+          _autoQueuePriorityUrls.add(url);
+      }
+      await _saveAutoQueueSettings();
+  }
+
+  bool isAutoQueuePriorityEnabled(String url) {
+      return _autoQueuePriorityUrls.contains(url);
+  }
+  
+  Future<void> setQueueHelpDialogShown(bool value) async {
+      // value = true means "Don't show again" basically (we record that it WAS shown/handled)
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('queue_help_dialog_shown', value);
+      _showQueueHelpDialog = !value;
+      notifyListeners();
   }
 
   // Groups Data
@@ -200,7 +250,7 @@ class PodcastProvider with ChangeNotifier {
               _groups = jsonMap.map((key, value) => MapEntry(key, List<String>.from(value)));
           }
       } catch (e) {
-          print('Error loading groups: $e');
+          Log.d('PodcastProvider', 'Error loading groups: $e');
       }
       notifyListeners();
   }
@@ -211,7 +261,7 @@ class PodcastProvider with ChangeNotifier {
           final jsonString = json.encode(_groups);
           await prefs.setString('podcast_groups', jsonString);
       } catch (e) {
-          print('Error saving groups: $e');
+          Log.e('PodcastProvider', 'Error saving groups: $e');
       }
       notifyListeners();
   }
@@ -286,7 +336,7 @@ class PodcastProvider with ChangeNotifier {
                    await fetchEpisodes(url, forceRefresh: true);
                }
            } catch (e) {
-               print('Feed refresh failed for $url: $e');
+               Log.e('PodcastProvider', 'Feed refresh failed for $url: $e');
            }
        }
        
@@ -330,7 +380,7 @@ class PodcastProvider with ChangeNotifier {
                   }
               }
           } catch (e) {
-              print('Auto-queue check failed for $url: $e');
+              Log.d('PodcastProvider', 'Auto-queue check failed for $url: $e');
           }
       }
       
@@ -357,10 +407,11 @@ class PodcastProvider with ChangeNotifier {
               'imageUrl': e.imageUrl,
               'duration': e.duration?.inSeconds,
               'link': e.link,
+              'chaptersUrl': e.chaptersUrl,
           }).toList());
           await file.writeAsString(jsonString);
       } catch (e) {
-          print('Error caching episodes for $url: $e');
+          Log.e('PodcastProvider', 'Error caching episodes for $url: $e');
       }
   }
 
@@ -379,10 +430,11 @@ class PodcastProvider with ChangeNotifier {
                   imageUrl: j['imageUrl'],
                   duration: j['duration'] != null ? Duration(seconds: j['duration']) : null,
                   link: j['link'],
+                  chaptersUrl: j['chaptersUrl'],
               )).toList();
           }
       } catch (e) {
-          print('Error loading episode cache for $url: $e');
+          Log.e('PodcastProvider', 'Error loading episode cache for $url: $e');
       }
       return [];
   }
@@ -406,7 +458,7 @@ class PodcastProvider with ChangeNotifier {
             }
         }
     } catch (e) {
-        print('Cache check failed for $rssUrl: $e');
+        Log.d('PodcastProvider', 'Cache check failed for $rssUrl: $e');
     }
 
     // 2. Network fetch
@@ -416,7 +468,7 @@ class PodcastProvider with ChangeNotifier {
         await _saveEpisodeCache(rssUrl, episodes);
         return episodes;
     } catch (e) {
-        print('Network fetch failed for $rssUrl, trying cache fallback. Error: $e');
+        Log.w('PodcastProvider', 'Network fetch failed for $rssUrl, trying cache fallback. Error: $e');
         // Fallback to cache even if stale (logic above handles success case, this handles failure case)
         final cached = await _loadEpisodeCache(rssUrl);
         if (cached.isNotEmpty) {
@@ -468,7 +520,7 @@ class PodcastProvider with ChangeNotifier {
                 try {
                   return await _rssService.getFeedMetadata(url);
                 } catch (e) {
-                  print('Failed to fetch metadata for $url: $e');
+                  Log.e('PodcastProvider', 'Failed to fetch metadata for $url: $e');
                   return Podcast(url: url, title: url);
                 }
               });
@@ -486,7 +538,7 @@ class PodcastProvider with ChangeNotifier {
       await _saveSyncTimestamp(delta.timestamp);
 
     } catch (e) {
-      print('Sync failed: $e');
+      Log.e('PodcastProvider', 'Sync failed: $e');
       _error = e.toString();
       rethrow;
     } finally {
@@ -603,7 +655,7 @@ class PodcastProvider with ChangeNotifier {
         final episodes = await fetchEpisodes(url); 
         return MapEntry(url, episodes);
       } catch (e) {
-        print('Failed to fetch feed $url: $e');
+        Log.e('PodcastProvider', 'Failed to fetch feed $url: $e');
         return MapEntry(url, <Episode>[]);
       }
     });
@@ -680,12 +732,12 @@ class PodcastProvider with ChangeNotifier {
                  'episode': episode,
                });
            } catch (e) {
-               print('Error processing in-progress item ${action.podcast}: $e');
+               Log.e('PodcastProvider', 'Error processing in-progress item ${action.podcast}: $e');
            }
       }
       return inProgress;
     } catch (e) {
-      print('Error fetching in-progress: $e');
+      Log.e('PodcastProvider', 'Error fetching in-progress: $e');
       return [];
     }
   }
@@ -721,7 +773,7 @@ class PodcastProvider with ChangeNotifier {
                'episode': episode,
              });
           } catch (e) {
-              print('Error processing history item: $e');
+              Log.e('PodcastProvider', 'Error processing history item: $e');
           }
       }
       
@@ -738,7 +790,7 @@ class PodcastProvider with ChangeNotifier {
       }
       return history;
     } catch (e) {
-      print('Error fetching history: $e');
+      Log.e('PodcastProvider', 'Error fetching history: $e');
       return [];
     }
   }
@@ -837,7 +889,7 @@ class PodcastProvider with ChangeNotifier {
           _interactedKeys.addAll(keys.where((k) => k.startsWith('interacted_')));
           _interactedKeysLoaded = true;
       } catch (e) {
-          print('Error loading interaction cache: $e');
+          Log.d('PodcastProvider', 'Error loading interaction cache: $e');
       }
   }
 
@@ -855,7 +907,7 @@ class PodcastProvider with ChangeNotifier {
           
           notifyListeners();
       } catch (e) {
-          print('Error marking all episodes as interacted: $e');
+          Log.e('PodcastProvider', 'Error marking all episodes as interacted: $e');
       }
   }
 
@@ -870,7 +922,7 @@ class PodcastProvider with ChangeNotifier {
           
           notifyListeners();
       } catch (e) {
-          print('Error marking episode as interacted: $e');
+          Log.e('PodcastProvider', 'Error marking episode as interacted: $e');
       }
   }
 
@@ -885,7 +937,7 @@ class PodcastProvider with ChangeNotifier {
           
           notifyListeners();
       } catch (e) {
-          print('Error marking episode as unplayed: $e');
+          Log.e('PodcastProvider', 'Error marking episode as unplayed: $e');
       }
   }
 
@@ -1022,7 +1074,7 @@ class PodcastProvider with ChangeNotifier {
           try {
              actions = await _api!.getEpisodeActions(deviceId);
           } catch(e) {
-             print('Error fetching actions for status: $e');
+             Log.d('PodcastProvider', 'Error fetching actions for status: $e');
              // Proceed with empty actions (offline/error)
           }
 
@@ -1076,7 +1128,7 @@ class PodcastProvider with ChangeNotifier {
           return statuses;
 
       } catch (e) {
-          print('Error getting statuses: $e');
+          Log.e('PodcastProvider', 'Error getting statuses: $e');
           return statuses;
       }
   }

@@ -2,7 +2,7 @@
 //  YourPodsWatch_Watch_AppTests.swift
 //  YourPodsWatch Watch AppTests
 //
-//  Created by aadmin on 1/21/26.
+//  Created by YourPods on 1/21/26.
 //
 
 import Testing

@@ -6,6 +6,7 @@ import 'package:audio_service/audio_service.dart';
 import '../providers/download_provider.dart';
 import '../providers/settings_provider.dart';
 import '../services/audio_handler.dart';
+import '../services/log_service.dart';
 
 class WatchService {
   final _watch = WatchConnectivity();
@@ -57,7 +58,7 @@ class WatchService {
       
       final List<Map<String, dynamic>> contextQueue = [];
       
-      print('WatchService: Syncing metadata for ${itemsToSync.length} items (Auto-download top $downloadLimit)...');
+      Log.d('WatchService', 'Syncing metadata for ${itemsToSync.length} items (Auto-download top $downloadLimit)...');
 
       for (int i = 0; i < itemsToSync.length; i++) {
          final item = itemsToSync[i];
@@ -81,6 +82,9 @@ class WatchService {
              'url': url,
              'artUri': item.artUri?.toString(),
              'isAvailableOnPhone': isDownloadedOnPhone,
+             // Include chapters if available in extras
+             if (item.extras?['chapters'] != null)
+               'chapters': item.extras!['chapters'],
          });
 
          // 2. Transfer File if needed (and valid)
@@ -91,20 +95,20 @@ class WatchService {
 
       // 3. Update Application Context
       await _watch.updateApplicationContext({'queue': contextQueue});
-      print('WatchService: Application Context updated');
+      Log.d('WatchService', 'Application Context updated');
       
     } catch (e) {
       if (e.toString().contains('Watch app is not installed')) {
-         print('WatchService: Sync skipped (Watch app not installed)');
+         Log.d('WatchService', 'Sync skipped (Watch app not installed)');
       } else {
-         print('WatchService: Sync failed: $e');
+         Log.e('WatchService', 'Sync failed: $e');
       }
     }
   }
   
   Future<void> _transferFileIfNeeded(String id, String url, DownloadProvider downloadProvider) async {
        // functionality not available in watch_connectivity 0.2.6
-       print('WatchService: File transfer not supported in this version of watch_connectivity');
+       Log.w('WatchService', 'File transfer not supported in this version of watch_connectivity');
        /*
        if (_sentEpisodeIds.contains(id) || _transferringIds.contains(id)) return;
        
@@ -112,7 +116,7 @@ class WatchService {
        if (path != null) {
            final file = File(path);
            if (await file.exists()) {
-               print('WatchService: Transferring file for episode $id');
+               Log.d('WatchService', 'Transferring file for episode $id');
                _transferringIds.add(id);
                
                // Transfer file with metadata so watch knows which episode it is
@@ -120,11 +124,11 @@ class WatchService {
                    'id': id,
                    'url': url, // Key used to match streamUrl in watch
                }).then((_) {
-                   print('WatchService: Transfer initiated for $id');
+                   Log.d('WatchService', 'Transfer initiated for $id');
                    _sentEpisodeIds.add(id);
                    _transferringIds.remove(id);
                }).catchError((e) {
-                   print('WatchService: Transfer failed for $id: $e');
+                   Log.e('WatchService', 'Transfer failed for $id: $e');
                    _transferringIds.remove(id);
                });
            }
@@ -160,9 +164,9 @@ class WatchService {
       } catch (e) {
           // Suppress redundant logs for "Watch app is not installed" to avoid noise/crashes
           if (e.toString().contains('Watch app is not installed')) {
-             print('WatchService: Skipping update (Watch app not installed)');
+             Log.d('WatchService', 'Skipping update (Watch app not installed)');
           } else {
-             print('WatchService: Failed to update playback state: $e');
+             Log.e('WatchService', 'Failed to update playback state: $e');
           }
       }
   }
@@ -182,7 +186,7 @@ class WatchService {
   
   void _handleMessage(Map<String, dynamic> message) {
       final command = message['command'];
-      print('WatchService: Received command $command');
+      Log.d('WatchService', 'Received command $command');
       
       switch (command) {
           case 'play':
@@ -204,23 +208,27 @@ class WatchService {
           case 'request_download':
               final episodeId = message['episodeId'] as String?;
               if (episodeId != null) {
-                  print('WatchService: Received manual download request for $episodeId');
+                  Log.d('WatchService', 'Received manual download request for $episodeId');
                   _handleManualDownloadRequest(episodeId);
               }
               break;
           case 'remove_from_queue':
               final episodeId = message['episodeId'] as String?;
               if (episodeId != null) {
-                  print('WatchService: Received remove_from_queue for $episodeId');
+                  Log.d('WatchService', 'Received remove_from_queue for $episodeId');
                   _onCustomCommand?.call('remove_from_queue', {'episodeId': episodeId});
               }
               break;
           case 'mark_as_played':
               final episodeId = message['episodeId'] as String?;
               if (episodeId != null) {
-                  print('WatchService: Received mark_as_played for $episodeId');
+                  Log.d('WatchService', 'Received mark_as_played for $episodeId');
                   _onCustomCommand?.call('mark_as_played', {'episodeId': episodeId});
               }
+              break;
+          case 'refresh_queue':
+              Log.d('WatchService', 'Received refresh_queue from watch background refresh');
+              _onCustomCommand?.call('refresh_queue', {});
               break;
       }
   }
@@ -247,7 +255,7 @@ class WatchService {
                if (isDownloaded) {
                    await _transferFileIfNeeded(episodeId, url, _downloadProvider!);
                } else {
-                   print('WatchService: Requested episode $episodeId is not downloaded on phone.');
+                   Log.w('WatchService', 'Requested episode $episodeId is not downloaded on phone.');
                    // Optionally trigger download on phone? For now, just ignore or log.
                }
            }

@@ -7,8 +7,8 @@ Thank you for your interest in contributing to YourPods! We welcome contribution
 1.  **Fork the repository** on GitHub.
 2.  **Clone your fork** locally:
     ```bash
-    git clone https://github.com/yourusername/podcast_player.git
-    cd podcast_player
+    git clone https://github.com/asecretcompany/yourpods-source.git
+    cd yourpods-source
     ```
 3.  **Install dependencies**:
     ```bash

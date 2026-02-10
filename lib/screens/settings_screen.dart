@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../services/background_refresh_service.dart';
 
 import '../api/gpodder_api.dart';
 import '../providers/podcast_provider.dart';
@@ -448,6 +449,76 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                         child: Text(
                                             'Number of top queue items to automatically download to the watch. The entire queue list will still be synced.',
                                             style: TextStyle(color: Colors.white38, fontSize: 12),
+                                        ),
+                                    ),
+                                ],
+                                const SizedBox(height: 24),
+                                const Divider(color: Colors.white24),
+                                const SizedBox(height: 16),
+                                const Text(
+                                  'Background Refresh',
+                                  style: TextStyle(fontSize: 16, color: Colors.white, fontWeight: FontWeight.bold),
+                                ),
+                                const SizedBox(height: 8),
+                                SwitchListTile(
+                                    title: const Text('Enable Background Refresh', style: TextStyle(color: Colors.white70)),
+                                    subtitle: const Text(
+                                      'Refresh podcast feeds in the background to detect new episodes',
+                                      style: TextStyle(color: Colors.white38, fontSize: 12),
+                                    ),
+                                    value: settings.backgroundRefreshEnabled,
+                                    onChanged: (val) {
+                                      settings.setBackgroundRefreshEnabled(val);
+                                      if (val) {
+                                        BackgroundRefreshService().start(
+                                          intervalMinutes: settings.backgroundRefreshInterval,
+                                        );
+                                      } else {
+                                        BackgroundRefreshService().stop();
+                                      }
+                                    },
+                                    activeColor: Colors.deepPurpleAccent,
+                                    contentPadding: EdgeInsets.zero,
+                                ),
+                                if (settings.backgroundRefreshEnabled) ...[
+                                    const SizedBox(height: 12),
+                                    const Text('Refresh Interval', style: TextStyle(color: Colors.white70)),
+                                    const SizedBox(height: 8),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                                      decoration: BoxDecoration(
+                                        color: Colors.white.withOpacity(0.05),
+                                        borderRadius: BorderRadius.circular(12),
+                                      ),
+                                      child: DropdownButtonHideUnderline(
+                                        child: DropdownButton<int>(
+                                          value: settings.backgroundRefreshInterval,
+                                          dropdownColor: const Color(0xFF1F1E27),
+                                          isExpanded: true,
+                                          style: const TextStyle(color: Colors.white),
+                                          icon: const Icon(Icons.arrow_drop_down, color: Colors.white70),
+                                          items: const [
+                                            DropdownMenuItem(value: 15, child: Text('Every 15 minutes')),
+                                            DropdownMenuItem(value: 30, child: Text('Every 30 minutes')),
+                                            DropdownMenuItem(value: 60, child: Text('Every hour')),
+                                            DropdownMenuItem(value: 360, child: Text('Every 6 hours')),
+                                            DropdownMenuItem(value: 720, child: Text('Every 12 hours')),
+                                            DropdownMenuItem(value: 1440, child: Text('Daily')),
+                                          ],
+                                          onChanged: (val) {
+                                            if (val != null) {
+                                              settings.setBackgroundRefreshInterval(val);
+                                              BackgroundRefreshService().updateInterval(val);
+                                            }
+                                          },
+                                        ),
+                                      ),
+                                    ),
+                                    const Padding(
+                                        padding: EdgeInsets.only(top: 4, left: 4),
+                                        child: Text(
+                                          'iOS may adjust the actual interval based on app usage patterns. Minimum 15 minutes.',
+                                          style: TextStyle(color: Colors.white38, fontSize: 12),
                                         ),
                                     ),
                                 ],

@@ -2,7 +2,7 @@
 //  YourPodsWatch_Watch_AppUITestsLaunchTests.swift
 //  YourPodsWatch Watch AppUITests
 //
-//  Created by aadmin on 1/21/26.
+//  Created by YourPods on 1/21/26.
 //
 
 import XCTest

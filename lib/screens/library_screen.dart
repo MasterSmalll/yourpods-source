@@ -159,35 +159,43 @@ class _LibraryScreenState extends State<LibraryScreen> {
                                   return;
                               }
                               
-                              // Confirm count
+                              // Show Episode Selection Dialog instead of simple Confirm
                               if (!context.mounted) return;
-                              final confirmed = await showDialog<bool>(
+                              final selectedEpisodes = await showDialog<List<Map<String, dynamic>>>(
                                   context: context,
-                                  builder: (ctx) => AlertDialog(
-                                      backgroundColor: const Color(0xFF1F1E27),
-                                      title: const Text('Confirm Queue', style: TextStyle(color: Colors.white)),
-                                      content: Text(
-                                          'Add ${episodesToAdd.length} episodes to queue?',
-                                          style: const TextStyle(color: Colors.white70),
-                                      ),
-                                      actions: [
-                                          TextButton(
-                                              onPressed: () => Navigator.pop(ctx, false),
-                                              child: const Text('Cancel', style: TextStyle(color: Colors.white60)),
-                                          ),
-                                          TextButton(
-                                              onPressed: () => Navigator.pop(ctx, true),
-                                              child: const Text('Add', style: TextStyle(color: Colors.deepPurpleAccent)),
-                                          ),
-                                      ],
-                                  ),
+                                  builder: (ctx) => _EpisodeSelectionDialog(episodes: episodesToAdd),
                               );
 
-                              if (confirmed == true) {
+                              if (selectedEpisodes != null && selectedEpisodes.isNotEmpty) {
                                   scaffold.showSnackBar(const SnackBar(content: Text('Adding to queue...'), duration: Duration(seconds: 1)));
-                                  await playerProvider.addEpisodesToQueue(episodesToAdd);
+                                  
+                                  // Split into Priority vs Standard
+                                  final priorityEpisodes = <Map<String, dynamic>>[];
+                                  final standardEpisodes = <Map<String, dynamic>>[];
+                                  
+                                  for (var item in selectedEpisodes) {
+                                      final podcast = item['podcast'] as Podcast;
+                                      if (podcastProvider.isAutoQueuePriorityEnabled(podcast.url)) {
+                                          priorityEpisodes.add(item);
+                                      } else {
+                                          standardEpisodes.add(item);
+                                      }
+                                  }
+
+                                  // Add Priority First (Play Next) - Reversed order if Play Next inserts at top? 
+                                  // insertAfterCurrent maintains order of list passed to it.
+                                  // but if we call it multiple times... just one call per batch.
+                                  if (priorityEpisodes.isNotEmpty) {
+                                      await playerProvider.addEpisodesToQueue(priorityEpisodes, playNext: true);
+                                  }
+                                  
+                                  // Add Standard (Bottom)
+                                  if (standardEpisodes.isNotEmpty) {
+                                      await playerProvider.addEpisodesToQueue(standardEpisodes, playNext: false);
+                                  }
+
                                   if (context.mounted) {
-                                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Added ${episodesToAdd.length} episodes to queue.')));
+                                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Added ${selectedEpisodes.length} episodes to queue.')));
                                   }
                               }
 
@@ -294,7 +302,26 @@ class _LibraryScreenState extends State<LibraryScreen> {
                           // 4. Queue if found
                           if (newEpisodes.isNotEmpty && context.mounted) {
                               final playerProvider = Provider.of<PlayerProvider>(context, listen: false);
-                              await playerProvider.addEpisodesToQueue(newEpisodes);
+                              // Split into Priority vs Standard
+                              final priorityEpisodes = <Map<String, dynamic>>[];
+                              final standardEpisodes = <Map<String, dynamic>>[];
+                              
+                              for (var item in newEpisodes) {
+                                  final podcast = item['podcast'] as Podcast;
+                                  if (provider.isAutoQueuePriorityEnabled(podcast.url)) {
+                                      priorityEpisodes.add(item);
+                                  } else {
+                                      standardEpisodes.add(item);
+                                  }
+                              }
+
+                              if (priorityEpisodes.isNotEmpty) {
+                                  await playerProvider.addEpisodesToQueue(priorityEpisodes, playNext: true);
+                              }
+                              
+                              if (standardEpisodes.isNotEmpty) {
+                                  await playerProvider.addEpisodesToQueue(standardEpisodes, playNext: false);
+                              }
                               
                               if (context.mounted) {
                                   ScaffoldMessenger.of(context).showSnackBar(
@@ -730,6 +757,26 @@ class _PodcastSelectionDialogState extends State<_PodcastSelectionDialog> {
       if (widget.initialSelection != null) {
           _selectedUrls.addAll(widget.initialSelection!);
       }
+      
+      // Check for help dialog after build
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+          _showHelpDialogIfNeeded();
+      });
+  }
+  
+  void _showHelpDialogIfNeeded() {
+      final provider = Provider.of<PodcastProvider>(context, listen: false);
+      if (provider.showQueueHelpDialog) {
+          showDialog(
+              context: context,
+              barrierDismissible: false,
+              builder: (ctx) => _QueueHelpDialog(),
+          ).then((value) {
+              if (value == true) {
+                  provider.setQueueHelpDialogShown(true);
+              }
+          });
+      }
   }
 
   @override
@@ -748,7 +795,13 @@ class _PodcastSelectionDialogState extends State<_PodcastSelectionDialog> {
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                        const Text("Select Podcast", style: TextStyle(color: Colors.white54, fontWeight: FontWeight.bold, fontSize: 12)),
-                       const Text("Auto Queue", style: TextStyle(color: Colors.white54, fontWeight: FontWeight.bold, fontSize: 12)),
+                       const Row(
+                           children: [
+                               Text("Auto", style: TextStyle(color: Colors.white54, fontWeight: FontWeight.bold, fontSize: 12)),
+                               SizedBox(width: 8),
+                               Text("Priority", style: TextStyle(color: Colors.white54, fontWeight: FontWeight.bold, fontSize: 12)),
+                           ]
+                       ),
                     ],
                   ),
                 ),
@@ -761,7 +814,9 @@ class _PodcastSelectionDialogState extends State<_PodcastSelectionDialog> {
                             itemBuilder: (context, index) {
                                 final podcast = widget.subscriptions[index];
                                 final isSelected = _selectedUrls.contains(podcast.url);
-                                final isAutoQueue = Provider.of<PodcastProvider>(context).isAutoQueueEnabled(podcast.url);
+                                final provider = Provider.of<PodcastProvider>(context);
+                                final isAutoQueue = provider.isAutoQueueEnabled(podcast.url);
+                                final isPriority = provider.isAutoQueuePriorityEnabled(podcast.url);
 
                                 return ListTile(
                                   contentPadding: EdgeInsets.zero,
@@ -780,16 +835,33 @@ class _PodcastSelectionDialogState extends State<_PodcastSelectionDialog> {
                                           });
                                       },
                                   ),
-                                  title: Text(podcast.title, style: const TextStyle(color: Colors.white)),
-                                  trailing: IconButton(
-                                      icon: Icon(
-                                          isAutoQueue ? Icons.autorenew : Icons.autorenew_outlined,
-                                          color: isAutoQueue ? Colors.blueAccent : Colors.white24,
-                                      ),
-                                      tooltip: isAutoQueue ? 'Auto-Queue Enabled' : 'Enable Auto-Queue',
-                                      onPressed: () {
-                                          Provider.of<PodcastProvider>(context, listen: false).toggleAutoQueue(podcast.url);
-                                      },
+                                  title: Text(podcast.title, style: const TextStyle(color: Colors.white, fontSize: 14), maxLines: 1, overflow: TextOverflow.ellipsis),
+                                  trailing: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                          IconButton(
+                                              icon: Icon(
+                                                  isAutoQueue ? Icons.autorenew : Icons.autorenew_outlined,
+                                                  color: isAutoQueue ? Colors.blueAccent : Colors.white24,
+                                                  size: 20,
+                                              ),
+                                              tooltip: isAutoQueue ? 'Auto-Queue Enabled' : 'Enable Auto-Queue',
+                                              onPressed: () {
+                                                  provider.toggleAutoQueue(podcast.url);
+                                              },
+                                          ),
+                                          IconButton(
+                                              icon: Icon(
+                                                  isPriority ? Icons.vertical_align_top : Icons.vertical_align_bottom,
+                                                  color: isPriority ? Colors.orangeAccent : Colors.white24,
+                                                   size: 20,
+                                              ),
+                                              tooltip: isPriority ? 'Priority: Play Next' : 'standard: Add to Bottom',
+                                              onPressed: () {
+                                                  provider.toggleAutoQueuePriority(podcast.url);
+                                              },
+                                          ),
+                                      ],
                                   ),
                                   onTap: () {
                                        setState(() {
@@ -798,7 +870,7 @@ class _PodcastSelectionDialogState extends State<_PodcastSelectionDialog> {
                                           } else {
                                               _selectedUrls.add(podcast.url);
                                           }
-                                      });
+                                       });
                                   },
                                 );
                             },
@@ -810,14 +882,189 @@ class _PodcastSelectionDialogState extends State<_PodcastSelectionDialog> {
           ),
           actions: [
               TextButton(
-                  onPressed: () => Navigator.pop(context),
+                  onPressed: () => Navigator.pop(context, null),
                   child: const Text('Cancel', style: TextStyle(color: Colors.white60)),
               ),
               TextButton(
                   onPressed: () => Navigator.pop(context, _selectedUrls),
-                  child: const Text('Add Selected', style: TextStyle(color: Colors.deepPurpleAccent)),
+                  child: const Text('Done', style: TextStyle(color: Colors.deepPurpleAccent)),
               ),
           ],
       );
   }
+}
+
+class _QueueHelpDialog extends StatefulWidget {
+    @override
+    State<_QueueHelpDialog> createState() => _QueueHelpDialogState();
+}
+
+class _QueueHelpDialogState extends State<_QueueHelpDialog> {
+    bool _dontShowAgain = false;
+
+    @override
+    Widget build(BuildContext context) {
+        return AlertDialog(
+            backgroundColor: const Color(0xFF2A2935),
+            title: const Text('Queue Settings', style: TextStyle(color: Colors.white)),
+            content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                    _buildFeatureRow(Icons.autorenew, Colors.blueAccent, "Auto Queue", "Automatically adds new episodes to the bottom of your queue."),
+                    const SizedBox(height: 16),
+                    _buildFeatureRow(Icons.vertical_align_top, Colors.orangeAccent, "Priority", "When checked, new episodes are added to the TOP of your queue (Play Next)."),
+                    const SizedBox(height: 24),
+                    Row(
+                        children: [
+                            Checkbox(
+                                value: _dontShowAgain, 
+                                onChanged: (v) => setState(() => _dontShowAgain = v ?? false),
+                                side: const BorderSide(color: Colors.white54),
+                                activeColor: Colors.deepPurpleAccent,
+                            ),
+                            const Text("Don't show this again", style: TextStyle(color: Colors.white70)),
+                        ],
+                    )
+                ],
+            ),
+            actions: [
+                TextButton(
+                    onPressed: () => Navigator.pop(context, _dontShowAgain),
+                    child: const Text('Got it', style: TextStyle(color: Colors.deepPurpleAccent)),
+                )
+            ],
+        );
+    }
+
+    Widget _buildFeatureRow(IconData icon, Color color, String title, String desc) {
+        return Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+                Icon(icon, color: color, size: 24),
+                const SizedBox(width: 12),
+                Expanded(
+                    child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                            Text(title, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                            const SizedBox(height: 4),
+                            Text(desc, style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                        ],
+                    ),
+                ),
+            ],
+        );
+    }
+}
+
+class _EpisodeSelectionDialog extends StatefulWidget {
+    final List<Map<String, dynamic>> episodes;
+    
+    const _EpisodeSelectionDialog({required this.episodes});
+    
+    @override
+    State<_EpisodeSelectionDialog> createState() => _EpisodeSelectionDialogState();
+}
+
+class _EpisodeSelectionDialogState extends State<_EpisodeSelectionDialog> {
+    // Stores indices of selected episodes
+    late Set<int> _selectedIndices;
+
+    @override
+    void initState() {
+        super.initState();
+        // Default select all
+        _selectedIndices = List.generate(widget.episodes.length, (index) => index).toSet();
+    }
+
+    @override
+    Widget build(BuildContext context) {
+        return AlertDialog(
+            backgroundColor: const Color(0xFF1F1E27),
+            title: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                    Text('Select Episodes (${_selectedIndices.length})', style: const TextStyle(color: Colors.white)),
+                    if (_selectedIndices.length != widget.episodes.length)
+                        TextButton(
+                            onPressed: () {
+                                setState(() {
+                                    _selectedIndices = List.generate(widget.episodes.length, (index) => index).toSet();
+                                });
+                            },
+                            child: const Text('Select All', style: TextStyle(fontSize: 12)),
+                        )
+                    else 
+                         TextButton(
+                            onPressed: () {
+                                setState(() {
+                                    _selectedIndices.clear();
+                                });
+                            },
+                            child: const Text('Clear All', style: TextStyle(fontSize: 12, color: Colors.white54)),
+                        )
+                ],
+            ),
+            content: SizedBox(
+                width: double.maxFinite,
+                child: widget.episodes.isEmpty 
+                    ? const Center(child: Text('No episodes found', style: TextStyle(color: Colors.white54)))
+                    : ListView.builder(
+                        shrinkWrap: true,
+                        itemCount: widget.episodes.length,
+                        itemBuilder: (context, index) {
+                            final item = widget.episodes[index];
+                            final podcast = item['podcast'] as Podcast;
+                            final episode = item['episode'] as Episode;
+                            final isSelected = _selectedIndices.contains(index);
+                            
+                            return ListTile(
+                                contentPadding: EdgeInsets.zero,
+                                leading: Checkbox(
+                                    value: isSelected,
+                                    activeColor: Colors.deepPurpleAccent,
+                                    checkColor: Colors.white,
+                                    side: const BorderSide(color: Colors.white54),
+                                    onChanged: (val) {
+                                        setState(() {
+                                            if (val == true) {
+                                                _selectedIndices.add(index);
+                                            } else {
+                                                _selectedIndices.remove(index);
+                                            }
+                                        });
+                                    },
+                                ),
+                                title: Text(episode.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 14)),
+                                subtitle: Text(podcast.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white54, fontSize: 12)),
+                                onTap: () {
+                                    setState(() {
+                                        if (isSelected) {
+                                            _selectedIndices.remove(index);
+                                        } else {
+                                            _selectedIndices.add(index);
+                                        }
+                                    });
+                                },
+                            );
+                        },
+                    ),
+            ),
+            actions: [
+                TextButton(
+                    onPressed: () => Navigator.pop(context, null),
+                    child: const Text('Cancel', style: TextStyle(color: Colors.white60)),
+                ),
+                TextButton(
+                    onPressed: () {
+                        // Return the selected items
+                        final selectedItems = _selectedIndices.map((i) => widget.episodes[i]).toList();
+                        Navigator.pop(context, selectedItems);
+                    },
+                    child: const Text('Add to Queue', style: TextStyle(color: Colors.deepPurpleAccent)),
+                ),
+            ],
+        );
+    }
 }

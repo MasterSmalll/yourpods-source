@@ -4,12 +4,18 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/server_profile.dart';
 import '../api/gpodder_api.dart';
+import '../services/log_service.dart';
 
 class ProfileProvider with ChangeNotifier {
   List<ServerProfile> _profiles = [];
   ServerProfile? _currentProfile;
   bool _isLoading = true;
-  final _storage = const FlutterSecureStorage();
+  final _storage = const FlutterSecureStorage(
+    aOptions: AndroidOptions(
+      encryptedSharedPreferences: true,
+      resetOnError: true,
+    ),
+  );
   
   static const String _storageKey = 'server_profiles';
   static const String _currentProfileKey = 'current_profile_id';
@@ -38,11 +44,11 @@ class ProfileProvider with ChangeNotifier {
              try {
                 _profiles.add(ServerProfile.fromJson(item));
              } catch (e) {
-                print('Error parsing profile: $e');
+                Log.e('ProfileProvider', 'Error parsing profile: $e');
              }
           }
         } catch (e) {
-             print('Error decoding profiles JSON: $e');
+             Log.e('ProfileProvider', 'Error decoding profiles JSON: $e');
              // If JSON is totally corrupt, we might lose profiles, but prevents crash loops.
              // Ideally we'd backup or alert, but for now we start fresh? 
              // Or maybe we just keep empty.
@@ -50,11 +56,24 @@ class ProfileProvider with ChangeNotifier {
       }
 
       
-      
       // Default launch screen is "Who is listening" (Profile Selection)
       // We do NOT auto-select a profile here.
+      
+      // EXCEPTION: IF there is only exactly ONE profile, we auto-select it.
+      // This allows single-user setups to bypass the selection screen.
+      if (_profiles.length == 1) {
+          try {
+              // We don't await this if we want it to be "fire and forget" but here we want
+              // to set the state before the UI potentially builds if possible, 
+              // though _loadProfiles is async called from constructor/init.
+              // We'll await it to ensure state consistency before final notifyListeners.
+              await selectProfile(_profiles.first.id);
+          } catch (e) {
+              Log.e('ProfileProvider', 'Error auto-selecting single profile: $e');
+          }
+      }
     } catch (e) {
-      print('Error loading profiles: $e');
+      Log.e('ProfileProvider', 'Error loading profiles: $e');
     } finally {
       _isLoading = false;
       notifyListeners();
@@ -111,7 +130,7 @@ class ProfileProvider with ChangeNotifier {
                 await api.updateSubscriptions(profile.deviceId, remove: urls);
             }
         } catch (e) {
-            print('Server deletion failed: $e');
+            Log.e('ProfileProvider', 'Server deletion failed: $e');
             // Re-throw to let UI know, or swallow if we want to proceed with local delete anyway?
             // Requirement said "should delete from server". If fail, maybe stop?
             // Let's rethrow so user knows.
@@ -155,7 +174,7 @@ class ProfileProvider with ChangeNotifier {
       
       notifyListeners();
     } catch (e) {
-      print('Profile not found: $id');
+      Log.w('ProfileProvider', 'Profile not found: $id');
     }
   }
   

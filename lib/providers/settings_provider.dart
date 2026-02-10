@@ -23,8 +23,14 @@ class SettingsProvider with ChangeNotifier {
   bool _autoSyncToWatch = false;
   int _watchSyncCount = 3;
 
+  bool _backgroundRefreshEnabled = true;
+  int _backgroundRefreshInterval = 15; // minutes
+
   bool get autoSyncToWatch => _autoSyncToWatch;
   int get watchSyncCount => _watchSyncCount;
+
+  bool get backgroundRefreshEnabled => _backgroundRefreshEnabled;
+  int get backgroundRefreshInterval => _backgroundRefreshInterval;
 
   SettingsProvider() {
     _loadSettings();
@@ -54,6 +60,10 @@ class SettingsProvider with ChangeNotifier {
     // Load Watch Settings
     _autoSyncToWatch = prefs.getBool('auto_sync_to_watch') ?? false;
     _watchSyncCount = prefs.getInt('watch_sync_count') ?? 3;
+
+    // Load Background Refresh Settings
+    _backgroundRefreshEnabled = prefs.getBool('background_refresh_enabled') ?? true;
+    _backgroundRefreshInterval = prefs.getInt('background_refresh_interval') ?? 15;
 
     notifyListeners();
   }
@@ -108,5 +118,20 @@ class SettingsProvider with ChangeNotifier {
     notifyListeners();
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt('watch_sync_count', count);
+  }
+
+  Future<void> setBackgroundRefreshEnabled(bool enabled) async {
+    _backgroundRefreshEnabled = enabled;
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('background_refresh_enabled', enabled);
+  }
+
+  Future<void> setBackgroundRefreshInterval(int minutes) async {
+    if (minutes < 15) minutes = 15; // iOS minimum
+    _backgroundRefreshInterval = minutes;
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('background_refresh_interval', minutes);
   }
 }

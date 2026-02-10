@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 import '../models/podcast.dart';
+import '../services/log_service.dart';
 
 class PodcastAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
   final _player = AudioPlayer();
@@ -19,15 +20,15 @@ class PodcastAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandle
   }
 
   Future<void> _init() async {
-    print('AudioHandler: Initializing...');
+    Log.d('AudioHandler', 'Initializing...');
     
     // Configure audio session for podcast/spoken audio
     try {
         final session = await AudioSession.instance;
         await session.configure(const AudioSessionConfiguration.speech());
-        print('AudioHandler: Audio session configured');
+        Log.i('AudioHandler', 'Audio session configured');
     } catch (e) {
-        print('AudioHandler: Error configuring audio session: $e');
+        Log.e('AudioHandler', 'Error configuring audio session: $e');
     }
     
     await _loadLastState();
@@ -54,26 +55,34 @@ class PodcastAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandle
   }
 
   Future<void> _handlePlaybackCompleted() async {
+      Log.d('AudioHandler', '_handlePlaybackCompleted() called');
       // Check if there is a next item in the queue
       if (queue.value.isNotEmpty) {
           final currentMedia = mediaItem.value;
           if (currentMedia != null) {
               final currentIndex = queue.value.indexWhere((item) => item.id == currentMedia.id);
+              Log.d('AudioHandler', 'Current item index in queue: $currentIndex');
               
               // Remove the completed item from the queue
               if (currentIndex >= 0) {
                   final newQueue = List<MediaItem>.from(queue.value);
                   newQueue.removeAt(currentIndex);
                   queue.add(newQueue);
+                  // Should we zero out position? Yes, for the *next* item usually, but here we just save the list update.
                   await _saveLastState(mediaItem.value, Duration.zero);
-                  print('AudioHandler: Removed completed episode from queue, ${newQueue.length} items remaining');
+                  Log.d('AudioHandler', 'Removed completed episode from queue, ${newQueue.length} items remaining');
                   
                   // Play next item if there is one (it's now at currentIndex after removal)
                   if (currentIndex < newQueue.length) {
                       final nextItem = newQueue[currentIndex];
+                      Log.i('AudioHandler', 'Playing next item: ${nextItem.title}');
                       playMediaItem(nextItem);
                       return;
+                  } else {
+                      Log.i('AudioHandler', 'Queue finished (no more items)');
                   }
+              } else {
+                  Log.w('AudioHandler', 'Current item not found in queue');
               }
               
               // End of queue or item not found
@@ -82,8 +91,10 @@ class PodcastAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandle
           }
           // If we are not in the queue (e.g. played single episode), check if we should just stop
           // or if we should start the queue? For now, stop.
+          Log.d('AudioHandler', 'No current media item, stopping');
           stop();
       } else {
+          Log.d('AudioHandler', 'Queue is empty, stopping');
           stop();
       }
   }
@@ -134,7 +145,7 @@ class PodcastAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandle
               }
           }
       } catch (e) {
-          print("Error restoring state: $e");
+          Log.e('AudioHandler', "Error restoring state: $e");
       }
   }
 
@@ -284,6 +295,13 @@ class PodcastAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandle
   
   @override
   Future<void> removeQueueItem(MediaItem item) async {
+      // If the user removes the item currently playing, treating it as "skipping" to next
+      if (mediaItem.value?.id == item.id) {
+          Log.i('AudioHandler', 'Removing currently playing item, skipping to next/completing...');
+          await _handlePlaybackCompleted(); // Use handlePlaybackCompleted to handle queue logic/next item
+          return;
+      }
+      
       final newQueue = List<MediaItem>.from(queue.value)..removeWhere((i) => i.id == item.id);
       queue.add(newQueue);
       await _saveLastState(mediaItem.value, _player.position);
@@ -308,6 +326,56 @@ class PodcastAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandle
       newQueue.insert(newIndex, item);
       queue.add(newQueue);
       await _saveLastState(mediaItem.value, _player.position);
+  }
+
+  /// Inserts a list of items immediately after the current item, or at the top if nothing is playing.
+  Future<void> insertAfterCurrent(List<MediaItem> items) async {
+      if (items.isEmpty) return;
+
+      final newQueue = List<MediaItem>.from(queue.value);
+      int insertIndex = 0;
+      
+      final currentMedia = mediaItem.value;
+      if (currentMedia != null) {
+          final currentIndex = newQueue.indexWhere((i) => i.id == currentMedia.id);
+          if (currentIndex != -1) {
+              insertIndex = currentIndex + 1;
+          }
+      }
+      
+      // Filter out duplicates (if they are already in the queue, we can decide to move them or skip. 
+      // User intent usually implies specific addition, so moving seemingly creates "Play Next" effect best)
+      final incomingIds = items.map((i) => i.id).toSet();
+      
+      // Remove any existing instances of these items so they can be moved to the new position
+      newQueue.removeWhere((i) => incomingIds.contains(i.id));
+      
+      // Re-calculate index in case removal shifted things before it (unlikely if we insert after current, 
+      // providing current is not one of the moved items!)
+      // If current item was removed... that's a problem. 
+      // But we shouldn't be "queueing next" the *current* item usually.
+      
+      // Re-find current index to be safe
+      if (currentMedia != null) {
+           final currentIndex = newQueue.indexWhere((i) => i.id == currentMedia.id);
+           if (currentIndex != -1) {
+               insertIndex = currentIndex + 1;
+           } else {
+               // Current was apparently removed or we are at start
+               // If current was removed, we just insert at 0?
+               insertIndex = 0;
+           }
+      } else {
+        insertIndex = 0;
+      }
+      
+      // Clamp
+      if (insertIndex > newQueue.length) insertIndex = newQueue.length;
+      
+      // Insert
+      newQueue.insertAll(insertIndex, items);
+      
+      await updateQueue(newQueue);
   }
   
   Future<void> playNext(MediaItem item) async {
@@ -340,12 +408,12 @@ class PodcastAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandle
 
   @override
   Future<List<MediaItem>> getChildren(String parentMediaId, [Map<String, dynamic>? options]) async {
-    print('AudioHandler: getChildren called for $parentMediaId');
+    Log.d('AudioHandler', 'getChildren called for $parentMediaId');
     final List<MediaItem> children = [];
     
     // 1. Root Level
     if (parentMediaId == AudioService.browsableRootId) {
-      print('AudioHandler: Building Root');
+      Log.d('AudioHandler', 'Building Root');
       // Create tabs/root items
       children.add(const MediaItem(
         id: 'podcasts_root',
@@ -390,7 +458,11 @@ class PodcastAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandle
           title: e.title,
           artist: '', 
           // We need to pass the audio URL in extras or handle it via lookup
-          extras: {'url': e.audioUrl, 'podcastUrl': parentMediaId},
+          extras: {
+            'url': e.audioUrl, 
+            'podcastUrl': parentMediaId,
+            if (e.pubDate != null) 'pubDate': e.pubDate!.toIso8601String(),
+          },
           artUri: e.imageUrl != null ? Uri.parse(e.imageUrl!) : null,
           playable: true,
           duration: e.duration,
@@ -398,7 +470,7 @@ class PodcastAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandle
       }
     }
     
-    print('AudioHandler: Returning ${children.length} items for $parentMediaId');
+    Log.d('AudioHandler', 'Returning ${children.length} items for $parentMediaId');
     return children;
   }
 
@@ -445,7 +517,10 @@ class PodcastAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandle
                   artist: '',
                   artUri: foundEpisode.imageUrl != null ? Uri.parse(foundEpisode.imageUrl!) : null,
                   duration: foundEpisode.duration,
-                  extras: {'url': foundEpisode.audioUrl}
+                  extras: {
+                      'url': foundEpisode.audioUrl,
+                      if (foundEpisode.pubDate != null) 'pubDate': foundEpisode.pubDate!.toIso8601String(),
+                  }
               ),
               foundEpisode.audioUrl!,
           );
@@ -474,7 +549,7 @@ class PodcastAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandle
               return jsonList.map((j) => Podcast.fromJson(j)).toList();
           }
       } catch (e) {
-          print("Error loading podcasts in AudioHandler: $e");
+          Log.e('AudioHandler', "Error loading podcasts: $e");
       }
       return [];
   }
@@ -500,7 +575,7 @@ class PodcastAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandle
               )).toList();
           }
        } catch (e) {
-           print("Error loading episodes in AudioHandler: $e");
+           Log.e('AudioHandler', "Error loading episodes: $e");
        }
        return [];
   }
@@ -509,25 +584,25 @@ class PodcastAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandle
 
   /// Helper to start playback of a specific item found in queue or custom
 Future<void> playMediaItem(MediaItem item) async {
-     print("AudioHandler: playMediaItem called for ${item.id} - URL: ${item.extras?['url']}");
-     print("AudioHandler: Full extras: ${item.extras}");
+     Log.d('AudioHandler', "playMediaItem called for ${item.id} - URL: ${item.extras?['url']}");
+     Log.d('AudioHandler', "Full extras: ${item.extras}");
      if (item.extras?['url'] != null) {
          // Extract saved position from extras if available
          final positionSeconds = item.extras?['position_seconds'];
-         print("AudioHandler: position_seconds type: ${positionSeconds.runtimeType}, value: $positionSeconds");
+         Log.d('AudioHandler', "position_seconds type: ${positionSeconds.runtimeType}, value: $positionSeconds");
          
          final initialPosition = positionSeconds != null ? Duration(seconds: positionSeconds as int) : null;
          
-         print("AudioHandler: Saved position found: ${initialPosition?.inSeconds ?? 0} seconds");
+         Log.d('AudioHandler', "Saved position found: ${initialPosition?.inSeconds ?? 0} seconds");
          await playEpisode(item, item.extras!['url'], initialPosition: initialPosition);
      } else {
-         print("AudioHandler: Error - No URL in extras for ${item.id}");
+         Log.e('AudioHandler', "Error - No URL in extras for ${item.id}");
      }
 }
 
   /// Helper to prepare playback of a specific item without playing
   Future<void> prepareMediaItem(MediaItem item) async {
-       print("AudioHandler: prepareMediaItem called for ${item.id}");
+       Log.d('AudioHandler', "prepareMediaItem called for ${item.id}");
        if (item.extras?['url'] != null) {
            await playEpisode(item, item.extras!['url'], autoPlay: false);
        }
@@ -535,8 +610,8 @@ Future<void> playMediaItem(MediaItem item) async {
 
   /// Helper to start playback of a specific item
   Future<void> playEpisode(MediaItem item, String url, {Duration? initialPosition, bool autoPlay = true}) async {
-    print("AudioHandler: playEpisode called. URL: $url, AutoPlay: $autoPlay");
-    print("AudioHandler: MediaItem artUri: ${item.artUri}");
+    Log.d('AudioHandler', "playEpisode called. URL: $url, AutoPlay: $autoPlay");
+    Log.d('AudioHandler', "MediaItem artUri: ${item.artUri}");
     
     try {
         mediaItem.add(item);
@@ -546,24 +621,23 @@ Future<void> playMediaItem(MediaItem item) async {
         try {
             final localPath = await _getDownloadedPath(url);
             if (localPath != null) {
-                print("AudioHandler: Found local file, using: $localPath");
+                Log.d('AudioHandler', "Found local file, using: $localPath");
                 playUrl = localPath;
             }
         } catch (e) {
-            print("AudioHandler: Error checking for local file: $e");
+            Log.e('AudioHandler', "Error checking for local file: $e");
         }
         
-        print("AudioHandler: Preparing player with: $playUrl");
+        Log.d('AudioHandler', "Preparing player with: $playUrl");
         await _prepPlayer(playUrl, initialPosition: initialPosition);
         
         if (autoPlay) {
-            print("AudioHandler: Calling play()");
+            Log.d('AudioHandler', "Calling play()");
             await play();
-            print("AudioHandler: play() completed, playing: ${_player.playing}");
+            Log.d('AudioHandler', "play() completed, playing: ${_player.playing}");
         }
     } catch (e, stack) {
-        print("AudioHandler: CRITICAL ERROR in playEpisode: $e");
-        print(stack);
+        Log.e('AudioHandler', "CRITICAL ERROR in playEpisode", e, stack);
     }
   }
   
@@ -578,7 +652,7 @@ Future<void> playMediaItem(MediaItem item) async {
   }
   
   Future<void> _prepPlayer(String url, {Duration? initialPosition}) async {
-      print("AudioHandler: _prepPlayer loading $url");
+      Log.d('AudioHandler', "_prepPlayer loading $url");
       try {
         if (url.startsWith('/')) {
              await _player.setFilePath(url, initialPosition: initialPosition);
@@ -586,8 +660,10 @@ Future<void> playMediaItem(MediaItem item) async {
              await _player.setUrl(url, initialPosition: initialPosition);
         }
     } catch (e, stack) {
-        print("AudioHandler: Error loading audio source: $e");
-        print(stack);
+        Log.e('AudioHandler', "Error loading audio source", e, stack);
+        // Attempt recovery or stop?
+        // If we fail to load, we shouldn't crash, but maybe specific UI feedback is needed?
+        // For now, ensuring we don't throw up the stack is good.
     }
   }
   
@@ -654,9 +730,9 @@ Future<void> playMediaItem(MediaItem item) async {
               'playable': item.playable,
           }).toList();
           await prefs.setString('audio_queue', json.encode(queueJson));
-          print("AudioHandler: Queue explicitly saved to storage (${items.length} items)");
+          Log.d('AudioHandler', "Queue explicitly saved to storage (${items.length} items)");
       } catch (e) {
-          print("AudioHandler: Error explicitly saving queue: $e");
+          Log.e('AudioHandler', "Error explicitly saving queue: $e");
       }
   }
 }

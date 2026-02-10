@@ -6,6 +6,8 @@ import 'package:audio_service/audio_service.dart';
 import '../providers/podcast_provider.dart';
 import '../services/audio_handler.dart';
 
+import '../services/log_service.dart';
+
 class SiriService {
   static final SiriService _instance = SiriService._internal();
   factory SiriService() => _instance;
@@ -23,11 +25,11 @@ class SiriService {
   void init(BuildContext context) {
     _context = context;
     _channel.setMethodCallHandler(_handleMethodCall);
-    print("SiriService: Initialized and listening");
+    Log.i("SiriService", "Initialized and listening");
   }
 
   Future<dynamic> _handleMethodCall(MethodCall call) async {
-    print("SiriService: Received method call ${call.method}");
+    Log.d("SiriService", "Received method call ${call.method}");
     
     switch (call.method) {
       case 'playMedia':
@@ -41,11 +43,11 @@ class SiriService {
 
   Future<void> _handlePlayMedia(String query) async {
     if (_context == null || _audioHandler == null) {
-      print("SiriService: Error - Context or AudioHandler not available");
+      Log.e("SiriService", "Error - Context or AudioHandler not available");
       return;
     }
 
-    print("SiriService: Searching for podcast matching '$query'");
+    Log.d("SiriService", "Searching for podcast matching '$query'");
 
     try {
       final provider = Provider.of<PodcastProvider>(_context!, listen: false);
@@ -59,18 +61,18 @@ class SiriService {
       );
 
       if (matchingPodcast == null) {
-        print("SiriService: No podcast found for '$query'");
+        Log.i("SiriService", "No podcast found for '$query'");
         return;
       }
 
-      print("SiriService: Found podcast '${matchingPodcast.title}'");
+      Log.i("SiriService", "Found podcast '${matchingPodcast.title}'");
 
       // 2. Fetch/Get Episodes
       // Use ignoreCacheAge: false to use cache if available quickly
       final episodes = await provider.fetchEpisodes(matchingPodcast.url);
 
       if (episodes.isEmpty) {
-        print("SiriService: No episodes found for podcast");
+        Log.w("SiriService", "No episodes found for podcast");
         return;
       }
 
@@ -78,7 +80,7 @@ class SiriService {
       // Assuming episodes are sorted by date desc
       final latestEpisode = episodes.first;
       
-      print("SiriService: Playing latest episode '${latestEpisode.title}'");
+      Log.i("SiriService", "Playing latest episode '${latestEpisode.title}'");
 
       // 4. Play
       final mediaItem = MediaItem(
@@ -98,7 +100,7 @@ class SiriService {
       await _audioHandler!.playMediaItem(mediaItem);
       
     } catch (e) {
-      print("SiriService: Error handling PlayMedia: $e");
+      Log.e("SiriService", "Error handling PlayMedia: $e");
     }
   }
 }

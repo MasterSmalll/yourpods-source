@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import 'package:audio_service/audio_service.dart';
 import '../providers/player_provider.dart';
@@ -87,15 +88,27 @@ class QueueEpisodeTile extends StatelessWidget {
                           stream: player.player.positionStream,
                           builder: (context, snapshot) {
                               final position = snapshot.data ?? Duration.zero;
-                              final text = PlayerProvider.formatProgress(
+                              final progressText = PlayerProvider.formatProgress(
                                   position: position,
                                   duration: duration,
                                   showPercentListened: settings.showPercentListened,
                               );
+                              
+                              String subText = progressText;
+                              if (item.extras?['pubDate'] != null) {
+                                  try {
+                                      final date = DateTime.parse(item.extras!['pubDate']);
+                                      final dateStr = DateFormat('MMM d').format(date);
+                                      subText = "$dateStr • $subText";
+                                  } catch (e) {
+                                      // ignore parse error
+                                  }
+                              }
+                              
                               return Padding(
                                 padding: const EdgeInsets.only(top: 2.0),
                                 child: Text(
-                                    text, 
+                                    subText, 
                                     style: const TextStyle(color: Colors.deepPurpleAccent, fontSize: 10),
                                 ),
                               );
@@ -106,16 +119,27 @@ class QueueEpisodeTile extends StatelessWidget {
                   int? savedPositionSeconds = item.extras?['position_seconds'];
                   Duration savedPosition = Duration(seconds: savedPositionSeconds ?? 0);
 
-                  final text = PlayerProvider.formatProgress(
+                  final progressText = PlayerProvider.formatProgress(
                       position: savedPosition,
                       duration: duration,
                       showPercentListened: settings.showPercentListened,
                   );
                   
+                  String subText = progressText;
+                  if (item.extras?['pubDate'] != null) {
+                      try {
+                          final date = DateTime.parse(item.extras!['pubDate']);
+                          final dateStr = DateFormat('MMM d').format(date);
+                          subText = "$dateStr • $subText";
+                      } catch (e) {
+                          // ignore parse error
+                      }
+                  }
+                  
                   return Padding(
                     padding: const EdgeInsets.only(top: 2.0),
                     child: Text(
-                        text, 
+                        subText, 
                         style: const TextStyle(color: Colors.deepPurpleAccent, fontSize: 10),
                     ),
                   );

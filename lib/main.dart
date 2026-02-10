@@ -4,6 +4,9 @@ import 'package:audio_service/audio_service.dart';
 import 'services/audio_handler.dart';
 import 'services/carplay_service.dart';
 import 'services/siri_service.dart';
+import 'services/background_refresh_service.dart';
+import 'package:background_fetch/background_fetch.dart';
+import 'services/live_activity_service.dart';
 import 'providers/podcast_provider.dart';
 import 'providers/player_provider.dart';
 import 'providers/profile_provider.dart';
@@ -18,6 +21,9 @@ import 'services/watch_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Initialize Background Refresh Service
+  await BackgroundRefreshService().init();
   
   // Initialize AudioHandler
   final audioHandler = await AudioService.init(
@@ -26,6 +32,8 @@ void main() async {
       androidNotificationChannelId: 'com.asecretcompany.yourpods.channel.audio',
       androidNotificationChannelName: 'YourPods Audio',
       androidNotificationOngoing: true,
+      fastForwardInterval: Duration(seconds: 30),
+      rewindInterval: Duration(seconds: 15),
     ),
   );
 
@@ -38,6 +46,10 @@ void main() async {
   SiriService().setAudioHandler(audioHandler);
 
   final watchService = WatchService();
+
+  // Initialize Live Activity Service for Dynamic Island support
+  final liveActivityService = LiveActivityService();
+  await liveActivityService.init();
 
   runApp(
     MultiProvider(
@@ -63,6 +75,7 @@ void main() async {
               player.updatePodcastProvider(podcastProvider);
               player.updateDownloadProvider(downloadProvider);
               player.setWatchService(watchService);
+              player.setLiveActivityService(liveActivityService);
               return player;
             },
         ),
@@ -70,6 +83,9 @@ void main() async {
       child: const PodcastApp(),
     ),
   );
+
+  // Register headless task for background fetch (must be after runApp)
+  BackgroundFetch.registerHeadlessTask(backgroundFetchHeadlessTask);
 }
 
 class PodcastApp extends StatefulWidget {
@@ -105,6 +121,7 @@ class _PodcastAppState extends State<PodcastApp> with WidgetsBindingObserver {
     } else if (state == AppLifecycleState.resumed) {
         // App coming to foreground
         playerProvider.forceSync(action: 'play');
+        playerProvider.syncPlaybackState();
     }
   }
 

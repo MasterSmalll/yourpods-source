@@ -1,24 +1,17 @@
 <div align="center">
 
+# YourPods
+
 <img src="assets/images/logo.png" width="128" height="128" alt="YourPods Logo" />
 
-<h1>YourPods</h1>
+**Privacy-first, self-hosted podcast player for iOS, macOS, and Apple Watch.**
 
-<p><strong>Privacy-first, self-hosted podcast player for iOS, macOS, and Apple Watch.</strong></p>
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![Platform: iOS](https://img.shields.io/badge/Platform-iOS-000000.svg?style=flat&logo=apple)](https://apps.apple.com/us/app/yourpods/id6757721236)
+[![Platform: macOS](https://img.shields.io/badge/Platform-macOS-000000.svg?style=flat&logo=apple)](https://apps.apple.com/us/app/yourpods/id6757721236)
+[![Platform: watchOS](https://img.shields.io/badge/Platform-watchOS-000000.svg?style=flat&logo=apple)](https://apps.apple.com/us/app/yourpods/id6757721236)
 
-<p>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License: GPL v3"></a>
-  <a href="https://apps.apple.com/us/app/yourpods/id6757721236"><img src="https://img.shields.io/badge/Platform-iOS-000000.svg?style=flat&logo=apple" alt="Platform: iOS"></a>
-  <a href="https://apps.apple.com/us/app/yourpods/id6757721236"><img src="https://img.shields.io/badge/Platform-macOS-000000.svg?style=flat&logo=apple" alt="Platform: macOS"></a>
-  <a href="https://apps.apple.com/us/app/yourpods/id6757721236"><img src="https://img.shields.io/badge/Platform-watchOS-000000.svg?style=flat&logo=apple" alt="Platform: watchOS"></a>
-</p>
-
-<p>
-  <a href="#feature-highlights">Feature Highlights</a> •
-  <a href="#installation">Installation</a> •
-  <a href="#technical">Technical Details</a> •
-  <a href="#getting-started-for-developers">Contributing</a>
-</p>
+[Feature Highlights](#feature-highlights) • [Installation](#installation) • [Technical Details](#technical) • [Contributing](#getting-started-for-developers)
 
 </div>
 
@@ -52,6 +45,20 @@ For the most up-to-date features, check our [website](https://asecretcompany.com
 ## Feature Highlights
 
 YourPods seamlessly integrates with gPodder-compatible servers (such as Nextcloud & NextPod) to keep your library in sync without relying on third-party clouds.
+
+## New Features - Version 1.2.1
+-   **CarPlay Support**: Includes "Now Playing" and "In Progress" screens, with support for artwork and progress syncing.
+-   **WatchOS Companion App**: Control playback and view progress directly from your wrist. Includes background refresh support.
+-   **Dynamic Island**: Stay informed about what's playing with real-time updates on the Dynamic Island and Lock Screen on supported devices.
+-   **Chapter Support**: Navigate episodes with ease using embedded chapter markers (May need to refresh episdoes 'pull down')).
+-   **Priority Queue**: "Queue New" feature now supports adding episodes to the *top* of the queue (priority) Library->Queue New->Choose Podcasts.
+-   **Smart Downloads**: Improved background downloading and refresh logic for iOS and WatchOS (activated in YourPods settings).
+## Improvements & Fixes
+-   **Robust Sync**: Enhanced sync reliability with background refresh and better handling of large queues.
+-   **Performance**: Optimized data loading and playback start times.
+-   **UI Refinements**: Added dates to episodes in the "In Progress" queue and improved adherence to system theme.
+-   **Bug Fixes**: resolved crash issues related to CarPlay disconnect/reconnect and audio player state.
+-   **Flutter Library**: Updated to the latest supported version of key flutter libraries.
 
 ### 🍎 Apple Ecosystem Integration
 - **CarPlay**: Full queue management and playback control with native UI.
@@ -94,7 +101,7 @@ snapcraft
 ## Getting Started for Developers
 
 1.  **Prerequisites**: Ensure you have Flutter installed (`flutter doctor`).
-2.  **Clone**: `git clone https://github.com/asecretcompany/yourpods.git`
+2.  **Clone**: `git clone https://github.com/asecretcompany/yourpods-source.git`
 3.  **Install**: `flutter pub get`
 4.  **Run**: `flutter run`
 

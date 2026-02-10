@@ -19,6 +19,7 @@ struct PlayerView: View {
     @State private var statusText: String = "Tap play to start"
     @State private var playbackSource: PlaybackSource = .none
     @State private var hasSetupAudio = false
+    @State private var chaptersExpanded = false
 
     var body: some View {
         ScrollView {
@@ -121,6 +122,50 @@ struct PlayerView: View {
                 
                 Divider()
                     .padding(.vertical, 4)
+                
+                // MARK: - Chapters (if available)
+                if let chapters = episode.chapters, !chapters.isEmpty {
+                    Button(action: {
+                        withAnimation { chaptersExpanded.toggle() }
+                    }) {
+                        HStack {
+                            Image(systemName: "list.bullet")
+                                .foregroundColor(.accentColor)
+                            Text("Chapters (\(chapters.count))")
+                                .font(.caption)
+                            Spacer()
+                            Image(systemName: chaptersExpanded ? "chevron.up" : "chevron.down")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    
+                    if chaptersExpanded {
+                        ForEach(chapters) { chapter in
+                            Button(action: {
+                                let targetTime = CMTime(seconds: chapter.startTime, preferredTimescale: 1)
+                                player?.seek(to: targetTime)
+                                updateProgress()
+                            }) {
+                                HStack {
+                                    Text(chapter.title)
+                                        .font(.caption)
+                                        .lineLimit(2)
+                                        .multilineTextAlignment(.leading)
+                                    Spacer()
+                                    Text(formatChapterTime(chapter.startTime))
+                                        .font(.caption2)
+                                        .foregroundColor(.accentColor)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    
+                    Divider()
+                        .padding(.vertical, 4)
+                }
                 
                 // MARK: - Episode Actions
                 VStack(spacing: 8) {
@@ -314,6 +359,18 @@ struct PlayerView: View {
                     statusText = "Buffering..."
                 }
             }
+        }
+    }
+    
+    private func formatChapterTime(_ seconds: Double) -> String {
+        let mins = Int(seconds) / 60
+        let secs = Int(seconds) % 60
+        return "\(mins):\(String(format: "%02d", secs))"
+    }
+    
+    private func updateProgress() {
+        if let p = player {
+            progress = CMTimeGetSeconds(p.currentTime())
         }
     }
 }

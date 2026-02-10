@@ -28,7 +28,7 @@ require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelpe
 flutter_ios_podfile_setup
 
 target 'Runner' do
-  use_frameworks!
+  # use_frameworks! :linkage => :static
 
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
   target 'RunnerTests' do
@@ -39,5 +39,29 @@ end
 post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
+  end
+
+  # Patch flutter_carplay FCPExtensions.swift to fix crash from force-unwrapping
+  # optional URL and UIImage values in fromUrl(url:)
+  fcp_ext = File.join(__dir__, '.symlinks', 'plugins', 'flutter_carplay', 'ios', 'Classes', 'FCPExtensions.swift')
+  if File.exist?(fcp_ext)
+    content = File.read(fcp_ext)
+    patched = content
+    # Fix 1: safe URL unwrapping — replace force-unwrap of url with guard-let
+    patched = patched.sub(
+      "let url = URL(string: url)\n      let data = try? Data(contentsOf: url!)",
+      "guard let url = URL(string: url) else {\n          return UIImage(systemName: \"questionmark\")!\n      }\n      let data = try? Data(contentsOf: url)"
+    )
+    # Fix 2: safe UIImage creation — replace force-unwrap of UIImage(data:)
+    patched = patched.sub(
+      "return UIImage(data: data)!",
+      "return UIImage(data: data) ?? UIImage(systemName: \"questionmark\")!"
+    )
+    if patched != content
+      File.write(fcp_ext, patched)
+      puts "[YourPods] Patched flutter_carplay FCPExtensions.swift (safe URL handling)"
+    else
+      puts "[YourPods] flutter_carplay FCPExtensions.swift already patched or changed upstream"
+    end
   end
 end

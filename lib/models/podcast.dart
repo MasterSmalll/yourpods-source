@@ -1,3 +1,35 @@
+class Chapter {
+  final double startTime; // seconds
+  final String title;
+  final String? img; // optional chapter image URL
+  final String? url; // optional link
+
+  Chapter({
+    required this.startTime,
+    required this.title,
+    this.img,
+    this.url,
+  });
+
+  factory Chapter.fromJson(Map<String, dynamic> json) {
+    return Chapter(
+      startTime: (json['startTime'] as num).toDouble(),
+      title: json['title'] ?? '',
+      img: json['img'] as String?,
+      url: json['url'] as String?,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'startTime': startTime,
+      'title': title,
+      if (img != null) 'img': img,
+      if (url != null) 'url': url,
+    };
+  }
+}
+
 class Podcast {
   final String url;
   final String title;
@@ -43,6 +75,8 @@ class Episode {
   final String? imageUrl;
   final Duration? duration;
   final String? link;
+  final String? chaptersUrl;
+  List<Chapter>? chapters;
 
   Episode({
     required this.guid,
@@ -53,5 +87,7 @@ class Episode {
     this.imageUrl,
     this.duration,
     this.link,
+    this.chaptersUrl,
+    this.chapters,
   });
 }

@@ -6,6 +6,7 @@
 	<array>
 		<string>audio</string>
 	</array>
+
     <key>WKCompanionAppBundleIdentifier</key>
     <string>com.asecretcompany.yourpods</string>
     <key>WKApplication</key>

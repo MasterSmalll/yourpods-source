@@ -1,6 +1,7 @@
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import '../models/podcast.dart';
+import '../services/log_service.dart';
 
 class GPodderApi {
   final String baseUrl;
@@ -29,7 +30,7 @@ class GPodderApi {
 
     final url = '$sanitizedBaseUrl/index.php/apps/gpoddersync/subscriptions?since=$since';
     
-    print('Requesting subscriptions from: $url');
+    Log.d('GPodderApi', 'Requesting subscriptions from: $url');
 
     final response = await client.get(
       Uri.parse(url),
@@ -88,7 +89,7 @@ class GPodderApi {
 
     final url = '$sanitizedBaseUrl/index.php/apps/gpoddersync/subscription_change/create?deviceid=$deviceId';
     
-    print('Updating subscriptions at: $url');
+    Log.d('GPodderApi', 'Updating subscriptions at: $url');
 
     final response = await client.post(
       Uri.parse(url),
@@ -124,7 +125,7 @@ class GPodderApi {
 
     final url = '$sanitizedBaseUrl/index.php/apps/gpoddersync/episode_action/create';
     
-    print('Uploading ${actions.length} episode actions to: $url');
+    Log.d('GPodderApi', 'Uploading ${actions.length} episode actions to: $url');
 
     final response = await client.post(
       Uri.parse(url),
@@ -140,7 +141,7 @@ class GPodderApi {
     } else if (response.statusCode >= 500) {
       throw GPodderServerException('Upload failed: Server error', statusCode: response.statusCode);
     } else if (response.statusCode != 200) {
-      print('Upload failed. Body: ${response.body}');
+      Log.e('GPodderApi', 'Upload failed. Body: ${response.body}');
       throw GPodderException('Failed to upload episode actions', statusCode: response.statusCode);
     }
   }
@@ -158,7 +159,7 @@ class GPodderApi {
     // Standard gPodder API often uses 'device' or 'deviceid'. Nextcloud gPodder uses 'device'.
     final url = '$sanitizedBaseUrl/index.php/apps/gpoddersync/episode_action?since=$since&device=$deviceId';
     
-    print('Fetching episode actions from: $url');
+    Log.d('GPodderApi', 'Fetching episode actions from: $url');
 
     final response = await client.get(
       Uri.parse(url),

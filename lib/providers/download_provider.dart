@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:dio/dio.dart';
 import 'package:path_provider/path_provider.dart';
+import '../services/log_service.dart';
 
 enum DownloadState {
   none,
@@ -102,7 +103,7 @@ class DownloadProvider with ChangeNotifier {
       if (e is DioException && CancelToken.isCancel(e)) {
           _status[url] = DownloadState.none;
       } else {
-          print('Download error for $url: $e');
+          Log.e('DownloadProvider', 'Download error for $url: $e');
           _status[url] = DownloadState.error;
       }
       _cancelTokens.remove(url);
@@ -127,7 +128,7 @@ class DownloadProvider with ChangeNotifier {
           _progress[url] = 0.0;
           notifyListeners();
       } catch (e) {
-          print('Error deleting file: $e');
+          Log.e('DownloadProvider', 'Error deleting file: $e');
       }
   }
 }

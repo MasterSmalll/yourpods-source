@@ -6,6 +6,7 @@ import '../providers/settings_provider.dart';
 import '../providers/download_provider.dart';
 import '../screens/player_screen.dart';
 import '../screens/playlist_screen.dart';
+import '../services/log_service.dart';
 
 class NowPlayingBar extends StatelessWidget {
   const NowPlayingBar({super.key});
@@ -76,7 +77,7 @@ class NowPlayingBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final playerProvider = Provider.of<PlayerProvider>(context);
     final episode = playerProvider.currentEpisode;
-    print('NowPlayingBar rebuild. Episode: ${episode?.title}, Playing: ${playerProvider.isPlaying}');
+    Log.d('NowPlayingBar', 'rebuild. Episode: ${episode?.title}, Playing: ${playerProvider.isPlaying}');
 
     if (episode == null) return const SizedBox.shrink();
 

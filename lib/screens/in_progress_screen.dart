@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart'; // Helper text persistence
 import '../providers/podcast_provider.dart';
@@ -360,6 +361,11 @@ class _InProgressScreenState extends State<InProgressScreen> with SingleTickerPr
                                                                                         duration: total,
                                                                                         showPercentListened: settings.showPercentListened,
                                                                                     );
+                                                                                    
+                                                                                    if (episode.pubDate != null) {
+                                                                                        final dateStr = DateFormat('MMM d').format(episode.pubDate!);
+                                                                                        text = "$dateStr • $text";
+                                                                                    }
                                                                                     
                                                                                     return Text(
                                                                                         text,

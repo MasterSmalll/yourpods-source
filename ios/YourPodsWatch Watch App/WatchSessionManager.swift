@@ -2,6 +2,14 @@ import Foundation
 import WatchConnectivity
 import Combine
 
+struct WatchChapter: Identifiable, Codable {
+    var id: Double { startTime }
+    let startTime: Double // seconds
+    let title: String
+    let img: String?
+    let url: String?
+}
+
 struct WatchEpisode: Identifiable, Codable {
     let id: String
     let title: String
@@ -12,6 +20,7 @@ struct WatchEpisode: Identifiable, Codable {
     let streamUrl: String? // Remote URL for streaming
     let artUri: String? // Cover art URL
     let isAvailableOnPhone: Bool // If true, can be manually downloaded
+    let chapters: [WatchChapter]? // Episode chapters (if available)
 }
 
 // MARK: - Download Manager for on-device downloads
@@ -160,6 +169,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         setupSession()
         loadEpisodes()
         setupDownloadHandler()
+        setupBackgroundRefreshHandler()
     }
     
     func setupSession() {
@@ -174,6 +184,42 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         downloadManager.onDownloadComplete = { [weak self] episodeId, localPath in
             self?.updateEpisodeLocalPath(episodeId: episodeId, localPath: localPath)
         }
+    }
+    
+    /// Listen for background refresh notifications from BackgroundRefreshManager.
+    private func setupBackgroundRefreshHandler() {
+        NotificationCenter.default.addObserver(
+            forName: .backgroundQueueRefresh,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            if let queue = notification.userInfo?["queue"] as? [[String: Any]] {
+                print("[WatchSession] Processing background queue refresh with \(queue.count) items")
+                self?.handleQueueUpdate(queue)
+            }
+        }
+    }
+    
+    /// Request fresh queue data from the iPhone.
+    func requestQueueRefresh() {
+        guard WCSession.default.isReachable else {
+            print("[WatchSession] iPhone not reachable for queue refresh")
+            return
+        }
+        
+        WCSession.default.sendMessage(
+            ["command": "refresh_queue"],
+            replyHandler: { [weak self] reply in
+                if let queue = reply["queue"] as? [[String: Any]] {
+                    DispatchQueue.main.async {
+                        self?.handleQueueUpdate(queue)
+                    }
+                }
+            },
+            errorHandler: { error in
+                print("[WatchSession] Queue refresh request failed: \(error.localizedDescription)")
+            }
+        )
     }
     
     // MARK: - On-Device Download
@@ -210,7 +256,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 localPath: localPath,
                 streamUrl: old.streamUrl,
                 artUri: old.artUri,
-                isAvailableOnPhone: old.isAvailableOnPhone
+                isAvailableOnPhone: old.isAvailableOnPhone,
+                chapters: old.chapters
             )
             episodes[index] = updated
             saveEpisodes()
@@ -245,7 +292,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     localPath: nil, // Clear local path
                     streamUrl: old.streamUrl,
                     artUri: old.artUri,
-                    isAvailableOnPhone: old.isAvailableOnPhone
+                    isAvailableOnPhone: old.isAvailableOnPhone,
+                    chapters: old.chapters
                 )
                 episodes[index] = updated
                 saveEpisodes()
@@ -367,6 +415,22 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             // If we have a local path but the file is gone, reset it?
             // For now, assume if we have a path, it's good.
             
+            // Parse chapters if present
+            var parsedChapters: [WatchChapter]? = nil
+            if let chaptersData = item["chapters"] as? [[String: Any]] {
+                parsedChapters = chaptersData.compactMap { chData in
+                    guard let startTime = chData["startTime"] as? Double,
+                          let title = chData["title"] as? String else { return nil }
+                    return WatchChapter(
+                        startTime: startTime,
+                        title: title,
+                        img: chData["img"] as? String,
+                        url: chData["url"] as? String
+                    )
+                }
+                if parsedChapters?.isEmpty == true { parsedChapters = nil }
+            }
+            
             let newEpisode = WatchEpisode(
                 id: id,
                 title: item["title"] as? String ?? "Unknown",
@@ -376,7 +440,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 localPath: existing?.localPath, // Keep path if we had it, otherwise nil
                 streamUrl: item["url"] as? String,
                 artUri: item["artUri"] as? String ?? existing?.artUri,
-                isAvailableOnPhone: item["isAvailableOnPhone"] as? Bool ?? false
+                isAvailableOnPhone: item["isAvailableOnPhone"] as? Bool ?? false,
+                chapters: parsedChapters ?? existing?.chapters
             )
             newEpisodes.append(newEpisode)
         }
@@ -419,7 +484,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     localPath: file.fileURL.lastPathComponent,
                     streamUrl: old.streamUrl,
                     artUri: old.artUri,
-                    isAvailableOnPhone: old.isAvailableOnPhone
+                    isAvailableOnPhone: old.isAvailableOnPhone,
+                    chapters: old.chapters
                 )
                 episodes[index] = updated
                 saveEpisodes()
