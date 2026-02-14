@@ -34,7 +34,7 @@ YourPods is a gPodder-compatible, privacy-first, and self-hosted podcast player.
 
 ## Installation
 
-The current codebase corresponds to the 1.2 release in the [Apple App Store](https://apps.apple.com/us/app/yourpods/id6757721236).
+The current codebase corresponds to the 1.2.2 release in the [Apple App Store](https://apps.apple.com/us/app/yourpods/id6757721236).
 
 - **App Store**: Get automatic updates and hassle-free installation. Purchasing the App Store version directly funds YourPods development! 🙏
 - **TestFlight**: Join the [TestFlight Beta](https://testflight.apple.com/join/jF18YknW) to test new features for free.
@@ -45,6 +45,12 @@ For the most up-to-date features, check our [website](https://asecretcompany.com
 ## Feature Highlights
 
 YourPods seamlessly integrates with gPodder-compatible servers (such as Nextcloud & NextPod) to keep your library in sync without relying on third-party clouds.
+
+## New Features - Version 1.2.2
+-  **Live Transcripts**: Follow along effortlessly with interactive, auto-scrolling transcripts that support full-text search, tap-to-seek navigation, and offline access.
+-  **Expanded Siri & Shortcuts**: Take full control of your listening experience with new Siri voice commands and deeper integration with the Shortcuts app and Apple Watch.
+-  **Performance & Caching**: Enjoy a faster, more reliable app with instant chapter loading and improved transcript persistence that stays ready even after a restart.
+
 
 ## New Features - Version 1.2.1
 -   **CarPlay Support**: Includes "Now Playing" and "In Progress" screens, with support for artwork and progress syncing.
