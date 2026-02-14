@@ -353,6 +353,23 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         }
     }
     
+    func sendPlayQueue() {
+        guard WCSession.default.isReachable else { return }
+        WCSession.default.sendMessage(["command": "playQueue"], replyHandler: nil) { error in
+            print("Error sending playQueue: \(error.localizedDescription)")
+        }
+    }
+    
+    func sendPlayLatest(podcastName: String) {
+        guard WCSession.default.isReachable else { return }
+        WCSession.default.sendMessage([
+            "command": "playLatest",
+            "podcastName": podcastName
+        ], replyHandler: nil) { error in
+            print("Error sending playLatest: \(error.localizedDescription)")
+        }
+    }
+    
     func requestDownload(for episodeId: String) {
         guard WCSession.default.isReachable else { return }
         print("Requesting download for \(episodeId)")

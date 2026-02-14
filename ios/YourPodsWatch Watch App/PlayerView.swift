@@ -2,10 +2,21 @@ import SwiftUI
 import AVFoundation
 import CoreMedia
 
-enum PlaybackSource {
+enum PlaybackSource: Sendable {
     case local
     case streaming
     case none
+}
+
+extension PlaybackSource: Equatable {
+    nonisolated static func == (lhs: PlaybackSource, rhs: PlaybackSource) -> Bool {
+        switch (lhs, rhs) {
+        case (.local, .local), (.streaming, .streaming), (.none, .none):
+            return true
+        default:
+            return false
+        }
+    }
 }
 
 struct PlayerView: View {

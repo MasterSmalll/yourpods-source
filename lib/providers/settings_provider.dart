@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../services/log_service.dart';
 
 enum ActionButtonStyle {
   textAndIcon,
@@ -13,12 +14,14 @@ class SettingsProvider with ChangeNotifier {
   int _syncInterval = 30;
   int _feedCacheDuration = 24;
   bool _showPercentListened = false;
+  bool _enableListenerStats = false;
 
   ActionButtonStyle get actionButtonStyle => _actionButtonStyle;
   bool get hidePlayedEpisodes => _hidePlayedEpisodes;
   int get syncInterval => _syncInterval;
   int get feedCacheDuration => _feedCacheDuration;
   bool get showPercentListened => _showPercentListened;
+  bool get enableListenerStats => _enableListenerStats;
 
   bool _autoSyncToWatch = false;
   int _watchSyncCount = 3;
@@ -56,6 +59,9 @@ class SettingsProvider with ChangeNotifier {
 
     // Load Show Percent Listened
     _showPercentListened = prefs.getBool('show_percent_listened') ?? false;
+
+    // Load Enable Listener Stats
+    _enableListenerStats = prefs.getBool('enable_listener_stats') ?? false;
 
     // Load Watch Settings
     _autoSyncToWatch = prefs.getBool('auto_sync_to_watch') ?? false;
@@ -133,5 +139,20 @@ class SettingsProvider with ChangeNotifier {
     notifyListeners();
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt('background_refresh_interval', minutes);
+  }
+
+  Future<void> setEnableListenerStats(bool enabled) async {
+    _enableListenerStats = enabled;
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('enable_listener_stats', enabled);
+
+    if (!enabled) {
+      // Clear local stats cache when disabled
+      // Note: ListeningStatsService.clearCache() will be implemented next
+      Log.i('SettingsProvider', 'Listener stats disabled, clearing cache...');
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('listening_stats_cache');
+    }
   }
 }

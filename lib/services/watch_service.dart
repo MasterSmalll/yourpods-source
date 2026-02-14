@@ -230,6 +230,17 @@ class WatchService {
               Log.d('WatchService', 'Received refresh_queue from watch background refresh');
               _onCustomCommand?.call('refresh_queue', {});
               break;
+          case 'playQueue':
+              Log.d('WatchService', 'Received playQueue from watch');
+              _audioHandler?.play();
+              break;
+          case 'playLatest':
+              final podcastName = message['podcastName'] as String?;
+              Log.d('WatchService', 'Received playLatest from watch: $podcastName');
+              if (podcastName != null) {
+                  _onCustomCommand?.call('playLatest', {'podcastName': podcastName});
+              }
+              break;
       }
   }
 

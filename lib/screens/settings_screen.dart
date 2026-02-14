@@ -522,6 +522,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                         ),
                                     ),
                                 ],
+                                const SizedBox(height: 24),
+                                const Divider(color: Colors.white24),
+                                const SizedBox(height: 16),
+                                const Text(
+                                  'Privacy & Stats',
+                                  style: TextStyle(fontSize: 16, color: Colors.white, fontWeight: FontWeight.bold),
+                                ),
+                                const SizedBox(height: 8),
+                                SwitchListTile(
+                                    title: const Text('Enable Listening Stats', style: TextStyle(color: Colors.white70)),
+                                    subtitle: const Text(
+                                      'Compute listening hours, streaks, and top shows. Stats are derived from all history synced via the gPodder server.',
+                                      style: TextStyle(color: Colors.white38, fontSize: 12),
+                                    ),
+                                    value: settings.enableListenerStats,
+                                    onChanged: (val) => settings.setEnableListenerStats(val),
+                                    activeColor: Colors.tealAccent,
+                                    contentPadding: EdgeInsets.zero,
+                                ),
                               ],
                             );
                           },

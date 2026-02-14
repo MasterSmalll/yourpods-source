@@ -34,14 +34,21 @@ class SiriService {
     switch (call.method) {
       case 'playMedia':
         final String query = call.arguments as String;
-        await _handlePlayMedia(query);
+        await handlePlayMedia(query);
+        break;
+      case 'playLatest':
+        final String podcastName = call.arguments as String;
+        await handlePlayMedia(podcastName);
+        break;
+      case 'playQueue':
+        await handlePlayQueue();
         break;
       default:
         throw MissingPluginException();
     }
   }
 
-  Future<void> _handlePlayMedia(String query) async {
+  Future<void> handlePlayMedia(String query) async {
     if (_context == null || _audioHandler == null) {
       Log.e("SiriService", "Error - Context or AudioHandler not available");
       return;
@@ -101,6 +108,16 @@ class SiriService {
       
     } catch (e) {
       Log.e("SiriService", "Error handling PlayMedia: $e");
+    }
+  }
+
+  Future<void> handlePlayQueue() async {
+    Log.i("SiriService", "Handle PlayQueue");
+    if (_audioHandler == null) return;
+    try {
+        await _audioHandler!.play();
+    } catch (e) {
+        Log.e("SiriService", "Error in PlayQueue: $e");
     }
   }
 }

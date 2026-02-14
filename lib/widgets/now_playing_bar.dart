@@ -7,6 +7,7 @@ import '../providers/download_provider.dart';
 import '../screens/player_screen.dart';
 import '../screens/playlist_screen.dart';
 import '../services/log_service.dart';
+import '../features/transcript/transcript_view.dart';
 
 class NowPlayingBar extends StatelessWidget {
   const NowPlayingBar({super.key});
@@ -181,6 +182,19 @@ class NowPlayingBar extends StatelessWidget {
                             MaterialPageRoute(builder: (context) => const PlaylistScreen()),
                           );
                           break;
+                      case 'transcript':
+                          if (episode.transcriptUrl != null) {
+                               Navigator.push(
+                                  context,
+                                  MaterialPageRoute(builder: (context) => Scaffold(
+                                      appBar: AppBar(title: const Text('Transcript'), backgroundColor: const Color(0xFF0F0E17)),
+                                      body: TranscriptView(episode: episode),
+                                  )),
+                              );
+                          } else {
+                              _showNoTranscriptDialog(context);
+                          }
+                          break;
                       case 'speed':
                           await playerProvider.cycleSpeed();
                           break;
@@ -207,10 +221,10 @@ class NowPlayingBar extends StatelessWidget {
                           }
                           break;
                       case 'download':
-                          if (episode?.audioUrl != null) downloader.downloadEpisode(episode!.audioUrl!);
+                          if (episode.audioUrl != null) downloader.downloadEpisode(episode!.audioUrl!);
                           break;
                       case 'delete_download':
-                          if (episode?.audioUrl != null) downloader.deletedownload(episode!.audioUrl!);
+                          if (episode.audioUrl != null) downloader.deletedownload(episode!.audioUrl!);
                           break;
                       case 'remove_queue':
                            // Similar logic to 'played', need MediaItem
@@ -227,13 +241,21 @@ class NowPlayingBar extends StatelessWidget {
               itemBuilder: (context) {
                   final downloader = Provider.of<DownloadProvider>(context, listen: false);
                   final settings = Provider.of<SettingsProvider>(context, listen: false);
-                  final downloadStatus = downloader.getStatus(episode?.audioUrl ?? '');
+                  final downloadStatus = downloader.getStatus(episode.audioUrl ?? '');
                   
                   return [
                       // 1. Show Queue
                       const PopupMenuItem(
                           value: 'show_queue',
                           child: Row(children: [Icon(Icons.list, color: Colors.white), SizedBox(width: 8), Text('Show Queue', style: TextStyle(color: Colors.white))]),
+                      ),
+                      PopupMenuItem(
+                          value: 'transcript',
+                          child: Row(children: [
+                              Icon(episode.transcriptUrl != null ? Icons.description : Icons.description_outlined, color: episode.transcriptUrl != null ? Colors.white : Colors.white60), 
+                              const SizedBox(width: 8), 
+                              Text('Transcript', style: TextStyle(color: episode.transcriptUrl != null ? Colors.white : Colors.white60))
+                          ]),
                       ),
                       const PopupMenuDivider(),
                       
@@ -266,7 +288,7 @@ class NowPlayingBar extends StatelessWidget {
                            PopupMenuItem(
                               enabled: false,
                               child: Row(children: [
-                                  SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, value: downloader.getProgress(episode?.audioUrl ?? ''))), 
+                                  SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, value: downloader.getProgress(episode.audioUrl ?? ''))), 
                                   const SizedBox(width: 8), 
                                   const Text('Downloading...', style: TextStyle(color: Colors.white))
                               ]),
@@ -326,5 +348,52 @@ class NowPlayingBar extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  void _showNoTranscriptDialog(BuildContext context) {
+      showDialog(
+          context: context,
+          builder: (context) {
+              return AlertDialog(
+                  backgroundColor: const Color(0xFF1F1E27),
+                  title: const Text('Transcripts Not Available', style: TextStyle(color: Colors.white)),
+                  content: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                          const Text(
+                              'This podcast feed does not support the new transcript feature yet.',
+                              style: TextStyle(color: Colors.white70),
+                          ),
+                          const SizedBox(height: 16),
+                          Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                              children: [
+                                  Column(
+                                      children: [
+                                          const Icon(Icons.description, color: Colors.white),
+                                          const SizedBox(height: 8),
+                                          const Text('Available', style: TextStyle(color: Colors.white60, fontSize: 12)),
+                                      ],
+                                  ),
+                                  Column(
+                                      children: [
+                                          const Icon(Icons.description_outlined, color: Colors.white60),
+                                          const SizedBox(height: 8),
+                                          const Text('Unavailable', style: TextStyle(color: Colors.white60, fontSize: 12)),
+                                      ],
+                                  ),
+                              ],
+                          ),
+                      ],
+                  ),
+                  actions: [
+                      TextButton(
+                          onPressed: () => Navigator.pop(context),
+                          child: const Text('Got it'),
+                      ),
+                  ],
+              );
+          },
+      );
   }
 }

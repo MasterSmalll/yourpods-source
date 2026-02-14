@@ -32,6 +32,21 @@ struct ContentView: View {
                     }
                 }
                 
+                // MARK: - Quick Actions
+                Section {
+                    Button(action: {
+                        sessionManager.sendPlayQueue()
+                    }) {
+                        HStack {
+                            Image(systemName: "play.circle.fill")
+                                .foregroundColor(.purple)
+                                .font(.title3)
+                            Text("Play Queue")
+                                .font(.headline)
+                        }
+                    }
+                }
+                
                 // MARK: - Episode Queue
                 if sessionManager.episodes.isEmpty {
                     Section {
@@ -67,6 +82,14 @@ struct ContentView: View {
                                     
                                     episodeStatusView(for: episode)
                                 }
+                            }
+                            .swipeActions(edge: .trailing) {
+                                Button {
+                                    sessionManager.sendPlayLatest(podcastName: episode.album)
+                                } label: {
+                                    Label("Play Latest", systemImage: "sparkles")
+                                }
+                                .tint(.purple)
                             }
                         }
                     }

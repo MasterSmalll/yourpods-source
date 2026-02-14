@@ -408,6 +408,7 @@ class PodcastProvider with ChangeNotifier {
               'duration': e.duration?.inSeconds,
               'link': e.link,
               'chaptersUrl': e.chaptersUrl,
+              'transcriptUrl': e.transcriptUrl,
           }).toList());
           await file.writeAsString(jsonString);
       } catch (e) {
@@ -431,6 +432,7 @@ class PodcastProvider with ChangeNotifier {
                   duration: j['duration'] != null ? Duration(seconds: j['duration']) : null,
                   link: j['link'],
                   chaptersUrl: j['chaptersUrl'],
+                  transcriptUrl: j['transcriptUrl'],
               )).toList();
           }
       } catch (e) {

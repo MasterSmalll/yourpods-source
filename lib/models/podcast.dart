@@ -76,6 +76,7 @@ class Episode {
   final Duration? duration;
   final String? link;
   final String? chaptersUrl;
+  final String? transcriptUrl;
   List<Chapter>? chapters;
 
   Episode({
@@ -88,6 +89,7 @@ class Episode {
     this.duration,
     this.link,
     this.chaptersUrl,
+    this.transcriptUrl,
     this.chapters,
   });
 }

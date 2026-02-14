@@ -15,6 +15,7 @@ import '../services/watch_service.dart';
 import '../services/live_activity_service.dart';
 import '../services/id3_chapter_service.dart';
 import '../services/log_service.dart';
+import '../services/siri_service.dart';
 
 class PlayerProvider with ChangeNotifier {
   final PodcastAudioHandler _audioHandler;
@@ -55,6 +56,7 @@ class PlayerProvider with ChangeNotifier {
   List<MediaItem> get queue => _audioHandler.queue.value;
   
   DateTime _lastSyncTime = DateTime.fromMillisecondsSinceEpoch(0);
+  int? _lastSyncedPosition;
   SettingsProvider? _settings;
 
   PodcastProvider? _podcastProvider;
@@ -105,14 +107,18 @@ class PlayerProvider with ChangeNotifier {
       _watchService!.listenForCommands(_audioHandler);
       _watchService!.setCustomCommandHandler((command, args) {
           final episodeId = args['episodeId'] as String?;
-          if (episodeId == null) return;
           
-          if (command == 'remove_from_queue') {
+          if (command == 'remove_from_queue' && episodeId != null) {
               final item = _audioHandler.queue.value.where((i) => i.id == episodeId).firstOrNull;
               if (item != null) removeFromQueue(item);
-          } else if (command == 'mark_as_played') {
+          } else if (command == 'mark_as_played' && episodeId != null) {
               final item = _audioHandler.queue.value.where((i) => i.id == episodeId).firstOrNull;
               if (item != null) markAsListened(item);
+          } else if (command == 'playLatest') {
+              final podcastName = args['podcastName'] as String?;
+              if (podcastName != null) {
+                  SiriService().handlePlayMedia(podcastName);
+              }
           }
       });
   }
@@ -594,6 +600,7 @@ class PlayerProvider with ChangeNotifier {
       }
       
       _lastSyncTime = DateTime.now();
+      _lastSyncedPosition = initialPosition?.inSeconds ?? 0;
       _syncProgress(action: 'play');
       _startLiveActivity();
       
@@ -936,7 +943,8 @@ class PlayerProvider with ChangeNotifier {
 
   void _fetchChaptersForCurrent(String? chaptersUrl) {
     if (chaptersUrl != null) {
-        ChapterService().fetchChapters(chaptersUrl).then((chapters) => _handleChaptersLoaded(chapters, chaptersUrl));
+        final duration = _settings?.feedCacheDuration ?? 24;
+        ChapterService().fetchChapters(chaptersUrl, cacheDurationHours: duration).then((chapters) => _handleChaptersLoaded(chapters, chaptersUrl));
     } else if (_currentEpisode?.audioUrl != null) {
         // Fallback to ID3 tags
         Log.d('PlayerProvider', 'No chaptersUrl, attempting ID3 tag extraction...');
@@ -1026,10 +1034,12 @@ class PlayerProvider with ChangeNotifier {
       action: action,
       timestamp: now,
       position: position,
-      started: position, 
+      started: _lastSyncedPosition ?? position, 
       total: duration,
       device: _deviceId,
     );
+
+    _lastSyncedPosition = position;
 
     try {
           await apiToUse.uploadEpisodeActions([episodeAction]);

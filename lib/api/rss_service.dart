@@ -15,6 +15,7 @@ class RssService {
       
       // Parse raw XML to extract podcast:chapters URLs per item
       final chaptersMap = _parseChaptersUrls(response.body);
+      final transcriptMap = _parseTranscriptUrls(response.body);
       
       return feed.items.map((item) {
         final guid = item.guid ?? item.link ?? '';
@@ -30,6 +31,7 @@ class RssService {
           duration: _parseDuration(item.itunes?.duration?.toString()),
           link: item.link,
           chaptersUrl: resolvedChaptersUrl,
+          transcriptUrl: transcriptMap[guid] ?? transcriptMap[item.title],
         );
       }).toList();
     } else {
@@ -71,6 +73,45 @@ class RssService {
       }
     } catch (_) {
       // Silently ignore chapter parsing errors
+    }
+    return map;
+  }
+
+  /// Parse <podcast:transcript url="..." /> from raw RSS XML.
+  /// Returns a map from guid (or title if no guid) to transcript URL.
+  Map<String, String?> _parseTranscriptUrls(String rawXml) {
+    final map = <String, String?>{};
+    try {
+      final document = xml.XmlDocument.parse(rawXml);
+      final items = document.findAllElements('item');
+      for (final item in items) {
+        String? transcriptUrl;
+        // Look for <podcast:transcript> element
+        for (final child in item.children) {
+          if (child is xml.XmlElement) {
+            final localName = child.name.local;
+            if (localName == 'transcript' && child.getAttribute('url') != null) {
+              // Prefer JSON, then SRT/VTT if multiple. For now just take the first one or specific types if we want.
+              // Logic: specific types logic could go here, but taking the first valid URL is a good start.
+              transcriptUrl = child.getAttribute('url');
+              // Optional: Check type attribute
+              // final type = child.getAttribute('type');
+              break; 
+            }
+          }
+        }
+        if (transcriptUrl != null) {
+          // Key by guid first, fallback to title
+          final guidEl = item.findElements('guid').firstOrNull;
+          final titleEl = item.findElements('title').firstOrNull;
+          final key = guidEl?.innerText ?? titleEl?.innerText;
+          if (key != null) {
+            map[key] = transcriptUrl;
+          }
+        }
+      }
+    } catch (_) {
+      // Silently ignore transcript parsing errors
     }
     return map;
   }

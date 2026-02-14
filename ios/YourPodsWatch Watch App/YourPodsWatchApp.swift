@@ -17,8 +17,10 @@ struct YourPodsWatch_Watch_AppApp: App {
         }
         .backgroundTask(.appRefresh(BackgroundRefreshManager.refreshTaskId)) {
             await withCheckedContinuation { continuation in
-                BackgroundRefreshManager.shared.handleRefresh {
-                    continuation.resume()
+                Task { @MainActor in
+                    BackgroundRefreshManager.shared.handleRefresh {
+                        continuation.resume()
+                    }
                 }
             }
         }

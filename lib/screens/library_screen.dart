@@ -510,7 +510,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       // For now, I'll modify _PodcastSelectionDialog to accept initialSelection first.
       // Then call it here.
       
-      // Hack: For now, I'll implement _PodcastGroupEditorDialog to avoid breaking the queuing dialog logic
+      // Note: For now, I'll implement _PodcastGroupEditorDialog to avoid breaking the queuing dialog logic
       // OR I can quickly update _PodcastSelectionDialog to accept `initialSelection`.
       
       final selected = await showDialog<Set<String>>(

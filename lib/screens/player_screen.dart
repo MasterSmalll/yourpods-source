@@ -6,7 +6,7 @@ import '../providers/podcast_provider.dart';
 import '../providers/profile_provider.dart';
 import '../widgets/action_button.dart';
 import '../models/podcast.dart';
-
+import '../features/transcript/transcript_view.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class PlayerScreen extends StatefulWidget {
@@ -77,6 +77,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
           icon: const Icon(Icons.keyboard_arrow_down, size: 32),
           onPressed: () => Navigator.pop(context),
         ),
+        actions: [
+
+        ],
       ),
       body: Consumer<DownloadProvider>(
         builder: (context, downloadProvider, child) {
@@ -390,6 +393,26 @@ class _PlayerScreenState extends State<PlayerScreen> {
                               }
                           },
                       ),
+                      const SizedBox(width: 24),
+                      
+                      // Transcript Button
+                      ActionButton(
+                          icon: episode.transcriptUrl != null ? Icons.description : Icons.description_outlined,
+                          label: 'Transcript',
+                          onPressed: () {
+                              if (episode.transcriptUrl != null) {
+                                   Navigator.push(
+                                      context,
+                                      MaterialPageRoute(builder: (context) => Scaffold(
+                                          appBar: AppBar(title: const Text('Transcript'), backgroundColor: const Color(0xFF0F0E17)),
+                                          body: TranscriptView(episode: episode),
+                                      )),
+                                  );
+                              } else {
+                                  _showNoTranscriptDialog(context);
+                              }
+                          },
+                      ),
                   ],
               ),
               const SizedBox(height: 24),
@@ -637,6 +660,58 @@ class _PlayerScreenState extends State<PlayerScreen> {
           }),
       ],
     );
+  }
+
+  void _showNoTranscriptDialog(BuildContext context) {
+      showDialog(
+          context: context,
+          builder: (context) {
+              return AlertDialog(
+                  backgroundColor: const Color(0xFF1F1E27),
+                  title: const Text('Transcripts Not Available', style: TextStyle(color: Colors.white)),
+                  content: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                          const Text(
+                              'This podcast feed does not support the new transcript feature yet.',
+                              style: TextStyle(color: Colors.white70),
+                          ),
+                          const SizedBox(height: 16),
+                          const Text(
+                              'We look for the <podcast:transcript> tag in the RSS feed, which allows for synchronized highlighting and search.',
+                              style: TextStyle(color: Colors.white70, fontSize: 13),
+                          ),
+                          const SizedBox(height: 24),
+                          Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                              children: [
+                                  Column(
+                                      children: [
+                                          const Icon(Icons.description, color: Colors.white),
+                                          const SizedBox(height: 8),
+                                          const Text('Available', style: TextStyle(color: Colors.white60, fontSize: 12)),
+                                      ],
+                                  ),
+                                  Column(
+                                      children: [
+                                          const Icon(Icons.description_outlined, color: Colors.white60),
+                                          const SizedBox(height: 8),
+                                          const Text('Unavailable', style: TextStyle(color: Colors.white60, fontSize: 12)),
+                                      ],
+                                  ),
+                              ],
+                          ),
+                      ],
+                  ),
+                  actions: [
+                      TextButton(
+                          onPressed: () => Navigator.pop(context),
+                          child: const Text('Got it'),
+                      ),
+                  ],
+              );
+          },
+      );
   }
 }
 
