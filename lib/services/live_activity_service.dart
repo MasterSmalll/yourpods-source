@@ -27,10 +27,17 @@ class LiveActivityService {
   /// Whether the service has been initialised.
   bool _initialized = false;
 
+  /// Whether we're running in the iOS Simulator (Live Activities aren't supported).
+  static final bool _isSimulator = Platform.environment.containsKey('SIMULATOR_DEVICE_NAME');
+
   /// Initialise the plugin.  Safe to call multiple times — subsequent calls
   /// are no-ops.
   Future<void> init() async {
     if (!Platform.isIOS) return;
+    if (_isSimulator) {
+      Log.d('LiveActivityService', 'Skipping init — running in Simulator');
+      return;
+    }
     if (_initialized) return;
 
     await _liveActivities.init(

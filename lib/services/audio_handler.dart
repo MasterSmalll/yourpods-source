@@ -5,12 +5,21 @@ import 'package:just_audio/just_audio.dart';
 import 'package:audio_session/audio_session.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:uuid/uuid.dart';
 import '../models/podcast.dart';
+import '../providers/podcast_provider.dart';
 import '../services/log_service.dart';
 
 class PodcastAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
   final _player = AudioPlayer();
+  
+  PodcastProvider? _podcastProvider;
+  
+  // B8: Debounce timestamp for _saveLastState in _broadcastState
+  DateTime _lastBroadcastSaveTime = DateTime(0);
+
+  void setPodcastProvider(PodcastProvider provider) {
+      _podcastProvider = provider;
+  }
   
   // Keep track of the current mapping to quickly find items if needed
   // In a real app with huge libraries, we'd need a more efficient way or rely on IDs.
@@ -56,10 +65,14 @@ class PodcastAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandle
 
   Future<void> _handlePlaybackCompleted() async {
       Log.d('AudioHandler', '_handlePlaybackCompleted() called');
+      final currentMedia = mediaItem.value;
+      if (currentMedia == null) {
+          Log.d('AudioHandler', 'No current media item, stopping');
+          stop();
+          return;
+      }
       // Check if there is a next item in the queue
       if (queue.value.isNotEmpty) {
-          final currentMedia = mediaItem.value;
-          if (currentMedia != null) {
               final currentIndex = queue.value.indexWhere((item) => item.id == currentMedia.id);
               Log.d('AudioHandler', 'Current item index in queue: $currentIndex');
               
@@ -88,11 +101,6 @@ class PodcastAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandle
               // End of queue or item not found
               stop();
               return;
-          }
-          // If we are not in the queue (e.g. played single episode), check if we should just stop
-          // or if we should start the queue? For now, stop.
-          Log.d('AudioHandler', 'No current media item, stopping');
-          stop();
       } else {
           Log.d('AudioHandler', 'Queue is empty, stopping');
           stop();
@@ -179,6 +187,19 @@ class PodcastAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandle
       };
   }
 
+
+  /// Force a fresh playback state broadcast to update MPNowPlayingInfoCenter.
+  /// Call after re-presenting the CarPlay Now Playing template so the system
+  /// gets current position/rate data for the progress bar.
+  void refreshNowPlayingInfo() {
+    Log.d('AudioHandler', "refreshNowPlayingInfo: playing=${_player.playing}, speed=${_player.speed}, pos=${_player.position}");
+    _broadcastState(_player.playbackEvent);
+    // Also re-set the media item to ensure duration is current
+    final current = mediaItem.value;
+    if (current != null) {
+      mediaItem.add(current);
+    }
+  }
 
   @override
   Future<void> play() => _player.play();
@@ -280,10 +301,10 @@ class PodcastAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandle
   // --- Queue Management ---
   
   @override
-  Future<void> addQueueItem(MediaItem item) async {
-      final newQueue = List<MediaItem>.from(queue.value)..add(item);
+  Future<void> addQueueItem(MediaItem mediaItem) async {
+      final newQueue = List<MediaItem>.from(queue.value)..add(mediaItem);
       queue.add(newQueue);
-      await _saveLastState(mediaItem.value, _player.position); // Save queue persistence
+      await _saveLastState(mediaItem, _player.position); // Save queue persistence
   }
   
   @override
@@ -294,24 +315,24 @@ class PodcastAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandle
   }
   
   @override
-  Future<void> removeQueueItem(MediaItem item) async {
+  Future<void> removeQueueItem(MediaItem mediaItem) async {
       // If the user removes the item currently playing, treating it as "skipping" to next
-      if (mediaItem.value?.id == item.id) {
+      if (this.mediaItem.value?.id == mediaItem.id) {
           Log.i('AudioHandler', 'Removing currently playing item, skipping to next/completing...');
           await _handlePlaybackCompleted(); // Use handlePlaybackCompleted to handle queue logic/next item
           return;
       }
       
-      final newQueue = List<MediaItem>.from(queue.value)..removeWhere((i) => i.id == item.id);
+      final newQueue = List<MediaItem>.from(queue.value)..removeWhere((i) => i.id == mediaItem.id);
       queue.add(newQueue);
-      await _saveLastState(mediaItem.value, _player.position);
+      await _saveLastState(this.mediaItem.value, _player.position);
   }
   
   @override
-  Future<void> updateQueue(List<MediaItem> newQueue) async {
-      queue.add(newQueue);
+  Future<void> updateQueue(List<MediaItem> queue) async {
+      this.queue.add(queue);
       // Use explicit save to ensure extras (progress) are persisted
-      await _saveQueue(newQueue);
+      await _saveQueue(queue);
       // Also save legacy state just in case
       await _saveLastState(mediaItem.value, _player.position);
   }
@@ -434,39 +455,44 @@ class PodcastAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandle
     }
     // 3. Podcast List
     else if (parentMediaId == 'podcasts_root') {
-      final podcasts = await _loadLocalPodcasts();
-      for (var p in podcasts) {
-        children.add(MediaItem(
-          id: p.url, // Using URL as ID for checking against
-          album: '',
-          title: p.title,
-          artUri: p.logoUrl != null ? Uri.parse(p.logoUrl!) : null,
-          playable: false,
-        ));
+      if (_podcastProvider != null) {
+          final podcasts = _podcastProvider!.subscriptions;
+          for (var p in podcasts) {
+            children.add(MediaItem(
+              id: p.url, // Using URL as ID for checking against
+              album: '',
+              title: p.title,
+              artUri: p.logoUrl != null ? Uri.parse(p.logoUrl!) : null,
+              playable: false,
+            ));
+          }
       }
     }
     // 4. Episode List (specific podcast)
     else {
       // specific podcast URL
-      // We assume the parentMediaId is the podcast URL from the step above
-      final episodes = await _loadLocalEpisodes(parentMediaId);
-      for (var e in episodes) {
-        if (e.audioUrl == null) continue; // Skip episodes without audio
-        children.add(MediaItem(
-          id: e.guid, // Unique ID for the episode
-          album: '',
-          title: e.title,
-          artist: '', 
-          // We need to pass the audio URL in extras or handle it via lookup
-          extras: {
-            'url': e.audioUrl, 
-            'podcastUrl': parentMediaId,
-            if (e.pubDate != null) 'pubDate': e.pubDate!.toIso8601String(),
-          },
-          artUri: e.imageUrl != null ? Uri.parse(e.imageUrl!) : null,
-          playable: true,
-          duration: e.duration,
-        ));
+      if (_podcastProvider != null) {
+          // Use cached accessor
+          final episodes = await _podcastProvider!.getEpisodes(parentMediaId);
+          
+          for (var e in episodes) {
+            if (e.audioUrl == null) continue; // Skip episodes without audio
+            children.add(MediaItem(
+              id: e.guid, // Unique ID for the episode
+              album: '',
+              title: e.title,
+              artist: '', 
+              // We need to pass the audio URL in extras or handle it via lookup
+              extras: {
+                'url': e.audioUrl, 
+                'podcastUrl': parentMediaId,
+                if (e.pubDate != null) 'pubDate': e.pubDate!.toIso8601String(),
+              },
+              artUri: e.imageUrl != null ? Uri.parse(e.imageUrl!) : null,
+              playable: true,
+              duration: e.duration,
+            ));
+          }
       }
     }
     
@@ -491,13 +517,16 @@ class PodcastAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandle
           return;
       }
 
-      // Find the episode
+      if (_podcastProvider == null) return;
+
+      // Find the episode logic using provider
       Episode? foundEpisode;
       Podcast? foundPodcast;
       
-      final podcasts = await _loadLocalPodcasts();
+      final podcasts = _podcastProvider!.subscriptions;
       for (var p in podcasts) {
-          final episodes = await _loadLocalEpisodes(p.url);
+          // Use cached accessor
+          final episodes = await _podcastProvider!.getEpisodes(p.url);
           try {
              foundEpisode = episodes.firstWhere((e) => e.guid == mediaId);
              foundPodcast = p;
@@ -529,61 +558,13 @@ class PodcastAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandle
 
   // --- Helper Methods to Load Data ---
   
-  Future<String?> _getCurrentProfileId() async {
-      final prefs = await SharedPreferences.getInstance();
-      return prefs.getString('current_profile_id');
-  }
 
-  Future<List<Podcast>> _loadLocalPodcasts() async {
-      try {
-          final profileId = await _getCurrentProfileId();
-          // If no profile, we can't show much, or show default?
-          final safeId = profileId?.replaceAll(RegExp(r'[^\w]'), '_') ?? 'default';
-          
-          final directory = await getApplicationDocumentsDirectory();
-          final file = File('${directory.path}/subs_$safeId.json');
-          
-          if (await file.exists()) {
-              final jsonString = await file.readAsString();
-              final List<dynamic> jsonList = json.decode(jsonString);
-              return jsonList.map((j) => Podcast.fromJson(j)).toList();
-          }
-      } catch (e) {
-          Log.e('AudioHandler', "Error loading podcasts: $e");
-      }
-      return [];
-  }
-
-  Future<List<Episode>> _loadLocalEpisodes(String podcastUrl) async {
-       try {
-          final directory = await getApplicationDocumentsDirectory();
-          final filename = 'episodes_${const Uuid().v5(Uuid.NAMESPACE_URL, podcastUrl)}.json';
-          final file = File('${directory.path}/$filename');
-          
-          if (await file.exists()) {
-              final jsonString = await file.readAsString();
-              final List<dynamic> jsonList = json.decode(jsonString);
-              return jsonList.map((j) => Episode(
-                  guid: j['guid'],
-                  title: j['title'],
-                  description: j['description'],
-                  audioUrl: j['audioUrl'],
-                  pubDate: j['pubDate'] != null ? DateTime.parse(j['pubDate']) : null,
-                  imageUrl: j['imageUrl'],
-                  duration: j['duration'] != null ? Duration(seconds: j['duration']) : null,
-                  link: j['link'],
-              )).toList();
-          }
-       } catch (e) {
-           Log.e('AudioHandler', "Error loading episodes: $e");
-       }
-       return [];
-  }
 
   // ------------------------------------
 
   /// Helper to start playback of a specific item found in queue or custom
-Future<void> playMediaItem(MediaItem item) async {
+  @override
+  Future<void> playMediaItem(MediaItem item) async {
      Log.d('AudioHandler', "playMediaItem called for ${item.id} - URL: ${item.extras?['url']}");
      Log.d('AudioHandler', "Full extras: ${item.extras}");
      if (item.extras?['url'] != null) {
@@ -633,8 +614,8 @@ Future<void> playMediaItem(MediaItem item) async {
         
         if (autoPlay) {
             Log.d('AudioHandler', "Calling play()");
-            await play();
-            Log.d('AudioHandler', "play() completed, playing: ${_player.playing}");
+            play().catchError((e) => Log.e('AudioHandler', 'Error in unawaited play', e));
+            Log.d('AudioHandler', "play() initiated");
         }
     } catch (e, stack) {
         Log.e('AudioHandler', "CRITICAL ERROR in playEpisode", e, stack);
@@ -673,6 +654,7 @@ Future<void> playMediaItem(MediaItem item) async {
 
   /// Transform JustAudio state events into AudioService state events
   void _broadcastState(PlaybackEvent event) {
+    if (mediaItem.value == null) return;
     final playing = _player.playing;
     final queueIndex = queue.value.indexWhere((i) => i.id == mediaItem.value?.id);
     
@@ -709,10 +691,14 @@ Future<void> playMediaItem(MediaItem item) async {
       queueIndex: queueIndex >= 0 ? queueIndex : null,
     ));
     
-    // Save state if paused or stopped
-    // We can also save periodically if needed, but this covers 'resuming later' mostly.
+    // B8: Debounce save to avoid excessive SharedPreferences writes
+    // during playback. Save at most once every 10 seconds when paused/stopped.
     if (!playing || _player.processingState == ProcessingState.completed) {
-         _saveLastState(mediaItem.value, _player.position);
+        final now = DateTime.now();
+        if (now.difference(_lastBroadcastSaveTime).inSeconds >= 10) {
+             _saveLastState(mediaItem.value, _player.position);
+             _lastBroadcastSaveTime = now;
+        }
     }
   }
 

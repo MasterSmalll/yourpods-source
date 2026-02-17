@@ -327,15 +327,33 @@ class _InProgressScreenState extends State<InProgressScreen> with SingleTickerPr
                                                                             // Let's stay here but maybe show mini player update.
                                                                         }
                                                                         },
-                                                                        leading: podcast.logoUrl != null
-                                                                            ? ClipRRect(
-                                                                                borderRadius: BorderRadius.circular(8),
-                                                                                child: Image.network(podcast.logoUrl!,
-                                                                                    width: 50, height: 50, fit: BoxFit.cover),
-                                                                            )
-                                                                            : const Icon(Icons.podcasts, color: Colors.white54),
+                                                                        leading: Stack(
+                                                                            alignment: Alignment.center,
+                                                                            children: [
+                                                                              Container(
+                                                                                 width: 50,
+                                                                                 height: 50,
+                                                                                 decoration: BoxDecoration(
+                                                                                   borderRadius: BorderRadius.circular(4),
+                                                                                   color: Colors.grey[800],
+                                                                                 ),
+                                                                                 child: podcast.logoUrl != null
+                                                                                      ? ClipRRect(
+                                                                                          borderRadius: BorderRadius.circular(4),
+                                                                                          child: Image.network(
+                                                                                            podcast.logoUrl!,
+                                                                                            fit: BoxFit.cover,
+                                                                                            width: 50,
+                                                                                            height: 50,
+                                                                                            errorBuilder: (c, o, s) => const Icon(Icons.podcasts, color: Colors.white24),
+                                                                                          ),
+                                                                                        )
+                                                                                      : const Icon(Icons.podcasts, color: Colors.white24),
+                                                                              ),
+                                                                            ],
+                                                                        ),
                                                                         title: Text(
-                                                                        podcast.title,
+                                                                        episode.title,
                                                                         style: const TextStyle(
                                                                             color: Colors.white, fontWeight: FontWeight.bold),
                                                                         maxLines: 1,
@@ -345,8 +363,8 @@ class _InProgressScreenState extends State<InProgressScreen> with SingleTickerPr
                                                                         crossAxisAlignment: CrossAxisAlignment.start,
                                                                         children: [
                                                                             Text(
-                                                                            episode.title,
-                                                                            style: const TextStyle(color: Colors.white70),
+                                                                            podcast.title,
+                                                                            style: const TextStyle(color: Colors.white70, fontSize: 12),
                                                                             maxLines: 1,
                                                                             overflow: TextOverflow.ellipsis,
                                                                             ),
@@ -360,6 +378,7 @@ class _InProgressScreenState extends State<InProgressScreen> with SingleTickerPr
                                                                                         position: pos,
                                                                                         duration: total,
                                                                                         showPercentListened: settings.showPercentListened,
+                                                                                        includeDuration: true,
                                                                                     );
                                                                                     
                                                                                     if (episode.pubDate != null) {
@@ -370,7 +389,7 @@ class _InProgressScreenState extends State<InProgressScreen> with SingleTickerPr
                                                                                     return Text(
                                                                                         text,
                                                                                         style: const TextStyle(
-                                                                                            color: Colors.deepPurpleAccent, fontSize: 12),
+                                                                                            color: Colors.deepPurpleAccent, fontSize: 10),
                                                                                     );
                                                                                 }
                                                                             ),

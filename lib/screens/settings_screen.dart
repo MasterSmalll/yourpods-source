@@ -8,6 +8,8 @@ import '../providers/podcast_provider.dart';
 import '../providers/player_provider.dart';
 import '../providers/profile_provider.dart';
 import '../providers/settings_provider.dart';
+import '../widgets/conflict_resolution_dialog.dart';
+import '../models/sync_conflict.dart';
 import '../models/server_profile.dart';
 import 'package:uuid/uuid.dart';
 
@@ -100,6 +102,40 @@ class _SettingsScreenState extends State<SettingsScreen> {
         return;
     }
 
+    // Warn if using HTTP — credentials will be sent in cleartext
+    if (baseUrl.toLowerCase().startsWith('http://')) {
+      final proceed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          backgroundColor: const Color(0xFF1F1E27),
+          title: const Row(
+            children: [
+              Icon(Icons.warning_amber_rounded, color: Colors.orangeAccent, size: 28),
+              SizedBox(width: 8),
+              Text('Insecure Connection', style: TextStyle(color: Colors.white)),
+            ],
+          ),
+          content: const Text(
+            'You are connecting over HTTP (not HTTPS). '
+            'Your username and password will be sent in cleartext and could be intercepted.\n\n'
+            'Are you sure you want to continue?',
+            style: TextStyle(color: Colors.white70),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Cancel', style: TextStyle(color: Colors.white54)),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Connect Anyway', style: TextStyle(color: Colors.orangeAccent)),
+            ),
+          ],
+        ),
+      );
+      if (proceed != true) return;
+    }
+
     // 1. Create API and verify (simple verification by creating access)
     final api = GPodderApi(
       baseUrl: baseUrl,
@@ -186,7 +222,37 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (deviceId.isEmpty) return;
 
     try {
+      // Sync subscriptions
       await provider.pullFromServer(deviceId);
+      
+      // Sync playback state with Conflict Resolution
+      if (mounted) {
+          final settings = Provider.of<SettingsProvider>(context, listen: false);
+          final conflicts = await provider.syncEpisodeActions(deviceId, force: true, strategy: settings.syncConflictStrategy);
+          
+          if (conflicts.isNotEmpty && mounted) {
+               // Show Conflict Dialog
+               final decisions = await showDialog<Map<String, bool>>(
+                   context: context,
+                   barrierDismissible: false,
+                   builder: (ctx) => ConflictResolutionDialog(conflicts: conflicts),
+               );
+               
+               if (decisions != null) {
+                   // Apply resolutions
+                   for (var conflict in conflicts) {
+                       final keepRemote = decisions[conflict.episodeGuid];
+                       if (keepRemote != null) {
+                           await provider.applyConflictResolution(conflict, keepRemote);
+                       }
+                   }
+               }
+          }
+      
+          // Refresh Player/Queue UI from the (now resolved) cache
+          await Provider.of<PlayerProvider>(context, listen: false).syncPlaybackState(force: false);
+      }
+      
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Pull successful')),
@@ -359,6 +425,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                   ),
                                 ),
                                 const SizedBox(height: 16),
+
                                 const Text('Sync Interval (seconds)', style: TextStyle(color: Colors.white70)),
                                 const SizedBox(height: 8),
                                 TextField(
@@ -387,6 +454,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                 const Padding(
                                     padding: EdgeInsets.only(top: 4, left: 4),
                                     child: Text('Default: 30s. Minimum: 10s', style: TextStyle(color: Colors.white38, fontSize: 12)),
+                                ),
+                                const SizedBox(height: 16), // Add spacing
+                                const Divider(color: Colors.white24),
+                                ListTile(
+                                    title: const Text('Conflict Strategy', style: TextStyle(color: Colors.white)),
+                                    subtitle: Text(
+                                        _getStrategyLabel(settings.syncConflictStrategy),
+                                        style: const TextStyle(color: Colors.white54),
+                                    ),
+                                    trailing: const Icon(Icons.arrow_forward_ios, color: Colors.white54, size: 16),
+                                    onTap: () => _showStrategyPicker(context, settings),
                                 ),
                                 const SizedBox(height: 24),
                                 Row(
@@ -460,6 +538,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                   style: TextStyle(fontSize: 16, color: Colors.white, fontWeight: FontWeight.bold),
                                 ),
                                 const SizedBox(height: 8),
+
                                 SwitchListTile(
                                     title: const Text('Enable Background Refresh', style: TextStyle(color: Colors.white70)),
                                     subtitle: const Text(
@@ -519,6 +598,93 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                         child: Text(
                                           'iOS may adjust the actual interval based on app usage patterns. Minimum 15 minutes.',
                                           style: TextStyle(color: Colors.white38, fontSize: 12),
+                                        ),
+                                    ),
+                                ],
+                                const SizedBox(height: 24),
+                                const Divider(color: Colors.white24),
+                                const SizedBox(height: 16),
+                                const Text(
+                                  'Podcast Search',
+                                  style: TextStyle(fontSize: 16, color: Colors.white, fontWeight: FontWeight.bold),
+                                ),
+                                const SizedBox(height: 8),
+                                const Text('Search Provider', style: TextStyle(color: Colors.white70)),
+                                const SizedBox(height: 8),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white.withOpacity(0.05),
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  child: DropdownButtonHideUnderline(
+                                    child: DropdownButton<String>(
+                                      value: settings.searchProviderId,
+                                      dropdownColor: const Color(0xFF1F1E27),
+                                      isExpanded: true,
+                                      style: const TextStyle(color: Colors.white),
+                                      icon: const Icon(Icons.arrow_drop_down, color: Colors.white70),
+                                      items: const [
+                                        DropdownMenuItem(value: 'itunes', child: Text('iTunes (Apple)')),
+                                        DropdownMenuItem(value: 'podcastindex', child: Text('PodcastIndex (Open Source)')),
+                                      ],
+                                      onChanged: (val) {
+                                        if (val != null) settings.setSearchProviderId(val);
+                                      },
+                                    ),
+                                  ),
+                                ),
+                                const Padding(
+                                    padding: EdgeInsets.only(top: 4, left: 4),
+                                    child: Text(
+                                      'iTunes requires no setup. PodcastIndex is open-source and requires a free API key.',
+                                      style: TextStyle(color: Colors.white38, fontSize: 12),
+                                    ),
+                                ),
+                                if (settings.searchProviderId == 'podcastindex') ...[
+                                    const SizedBox(height: 16),
+                                    TextField(
+                                        controller: TextEditingController(text: settings.podcastIndexApiKey),
+                                        obscureText: true,
+                                        style: const TextStyle(color: Colors.white),
+                                        decoration: InputDecoration(
+                                            labelText: 'PodcastIndex API Key',
+                                            labelStyle: const TextStyle(color: Colors.white60),
+                                            filled: true,
+                                            fillColor: Colors.white.withOpacity(0.05),
+                                            border: OutlineInputBorder(
+                                                borderRadius: BorderRadius.circular(12),
+                                                borderSide: BorderSide.none,
+                                            ),
+                                            contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+                                        ),
+                                        onSubmitted: (val) => settings.setPodcastIndexApiKey(val.trim()),
+                                        onChanged: (val) => settings.setPodcastIndexApiKey(val.trim()),
+                                    ),
+                                    const SizedBox(height: 12),
+                                    TextField(
+                                        controller: TextEditingController(text: settings.podcastIndexApiSecret),
+                                        style: const TextStyle(color: Colors.white),
+                                        obscureText: true,
+                                        decoration: InputDecoration(
+                                            labelText: 'PodcastIndex API Secret',
+                                            labelStyle: const TextStyle(color: Colors.white60),
+                                            filled: true,
+                                            fillColor: Colors.white.withOpacity(0.05),
+                                            border: OutlineInputBorder(
+                                                borderRadius: BorderRadius.circular(12),
+                                                borderSide: BorderSide.none,
+                                            ),
+                                            contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+                                        ),
+                                        onSubmitted: (val) => settings.setPodcastIndexApiSecret(val.trim()),
+                                        onChanged: (val) => settings.setPodcastIndexApiSecret(val.trim()),
+                                    ),
+                                    const Padding(
+                                        padding: EdgeInsets.only(top: 8, left: 4),
+                                        child: Text(
+                                          'Get your free API key at podcastindex.org/signup',
+                                          style: TextStyle(color: Colors.deepPurpleAccent, fontSize: 12),
                                         ),
                                     ),
                                 ],
@@ -619,6 +785,47 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
       ),
     );
+  }
+
+  String _getStrategyLabel(SyncStrategy strategy) {
+      switch (strategy) {
+          case SyncStrategy.serverWins: return 'Always use Server';
+          case SyncStrategy.deviceWins: return 'Always use Device';
+          case SyncStrategy.ask: return 'Ask me';
+      }
+  }
+
+  void _showStrategyPicker(BuildContext context, SettingsProvider settings) {
+      showModalBottomSheet(
+          context: context,
+          backgroundColor: const Color(0xFF1F1E27),
+          builder: (context) {
+              return Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                      const SizedBox(height: 16),
+                      const Text('Conflict Strategy', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16)),
+                      const SizedBox(height: 16),
+                      _buildStrategyOption(context, settings, SyncStrategy.serverWins, 'Always use Server'),
+                      _buildStrategyOption(context, settings, SyncStrategy.deviceWins, 'Always use Device'),
+                      _buildStrategyOption(context, settings, SyncStrategy.ask, 'Ask me'),
+                      const SizedBox(height: 32),
+                  ],
+              );
+          }
+      );
+  }
+  
+  Widget _buildStrategyOption(BuildContext context, SettingsProvider settings, SyncStrategy strategy, String label) {
+      final isSelected = settings.syncConflictStrategy == strategy;
+      return ListTile(
+          title: Text(label, style: TextStyle(color: isSelected ? Colors.deepPurpleAccent : Colors.white)),
+          trailing: isSelected ? const Icon(Icons.check, color: Colors.deepPurpleAccent) : null,
+          onTap: () {
+              settings.setSyncConflictStrategy(strategy);
+              Navigator.pop(context);
+          },
+      );
   }
 
   Widget _buildTextField(

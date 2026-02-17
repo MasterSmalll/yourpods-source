@@ -44,6 +44,8 @@ class QueueEpisodeTile extends StatelessWidget {
                       child: Image.network(
                         item.artUri.toString(),
                         fit: BoxFit.cover,
+                        cacheWidth: 100,
+                        cacheHeight: 100,
                         errorBuilder: (c, o, s) => const Icon(Icons.music_note, color: Colors.white24),
                       ),
                     )
@@ -92,6 +94,7 @@ class QueueEpisodeTile extends StatelessWidget {
                                   position: position,
                                   duration: duration,
                                   showPercentListened: settings.showPercentListened,
+                                  includeDuration: true,
                               );
                               
                               String subText = progressText;
@@ -123,6 +126,7 @@ class QueueEpisodeTile extends StatelessWidget {
                       position: savedPosition,
                       duration: duration,
                       showPercentListened: settings.showPercentListened,
+                      includeDuration: true,
                   );
                   
                   String subText = progressText;

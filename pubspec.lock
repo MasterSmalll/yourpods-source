@@ -809,18 +809,18 @@ packages:
     dependency: "direct main"
     description:
       name: watch_connectivity
-      sha256: "6db9cb86a605d130c617e7fdc1a231d1bf49a20ec0dabecc1f0dc0f5688561d6"
+      sha256: "9c058ff3cc5c45eb333a0e319afa6ff267b8780752217f2a4b5fb51d8b0a6cba"
       url: "https://pub.dev"
     source: hosted
-    version: "0.2.6"
+    version: "0.2.7"
   watch_connectivity_platform_interface:
     dependency: transitive
     description:
       name: watch_connectivity_platform_interface
-      sha256: "7e8d10078000d2927f75ca9baa90fd597fe674863cb949476b4d46d9e1d40f45"
+      sha256: "68abe6b30b592537cb58a71e3643489e823daa4ef81677b15e47e905a1d06f00"
       url: "https://pub.dev"
     source: hosted
-    version: "0.3.0"
+    version: "0.4.0"
   web:
     dependency: transitive
     description:

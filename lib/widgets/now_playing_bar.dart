@@ -6,8 +6,9 @@ import '../providers/settings_provider.dart';
 import '../providers/download_provider.dart';
 import '../screens/player_screen.dart';
 import '../screens/playlist_screen.dart';
-import '../services/log_service.dart';
 import '../features/transcript/transcript_view.dart';
+import '../utils/media_item_builder.dart';
+
 
 class NowPlayingBar extends StatelessWidget {
   const NowPlayingBar({super.key});
@@ -78,7 +79,6 @@ class NowPlayingBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final playerProvider = Provider.of<PlayerProvider>(context);
     final episode = playerProvider.currentEpisode;
-    Log.d('NowPlayingBar', 'rebuild. Episode: ${episode?.title}, Playing: ${playerProvider.isPlaying}');
 
     if (episode == null) return const SizedBox.shrink();
 
@@ -109,7 +109,7 @@ class NowPlayingBar extends StatelessWidget {
             ClipRRect(
               borderRadius: BorderRadius.circular(8),
               child: episode.imageUrl != null
-                  ? Image.network(episode.imageUrl!, width: 56, height: 56, fit: BoxFit.cover)
+                  ? Image.network(episode.imageUrl!, width: 56, height: 56, fit: BoxFit.cover, cacheWidth: 112, cacheHeight: 112)
                   : const Icon(Icons.podcasts, size: 56, color: Colors.white24),
             ),
             const SizedBox(width: 12),
@@ -203,22 +203,14 @@ class NowPlayingBar extends StatelessWidget {
                           break;
                       case 'played':
                          if (episode != null) {
-                             await playerProvider.markAsListened(
-                                 MediaItem(id: episode.guid, title: episode.title, album: episode.title, duration: episode.duration, artUri: Uri.parse(episode.imageUrl ?? ''))
-                             ); // Construct minimal media item if needed or use current
-                             // Better: Use playerProvider.markAsListened with the actual current media item if possible
-                             if (playerProvider.player.audioSource != null && playerProvider.queue.isNotEmpty) {
-                                 // Finding the item in queue to remove it? 
-                                 // markAsListened takes a MediaItem. 
-                                 // We should try to find it in the queue or construct one.
-                                 // If it's the current item, we might not have the full MediaItem object handy here easily without looking at queue or audioHandler.mediaItem.
-                                 // Let's rely on constructing one or finding it.
-                                 final item = playerProvider.queue.firstWhere((i) => i.id == episode.guid, orElse: () => 
-                                     MediaItem(id: episode.guid, title: episode.title, album: playerProvider.currentPodcast?.title ?? '', extras: {'url': episode.audioUrl, 'podcastUrl': playerProvider.currentPodcast?.url})
-                                 );
-                                 await playerProvider.markAsListened(item);
-                             }
-                          }
+                             final item = playerProvider.queue.cast<MediaItem?>().firstWhere(
+                                 (i) => i?.id == episode.guid, 
+                                 orElse: () => null,
+                             ) ?? MediaItemBuilder.fromEpisode(
+                                 playerProvider.currentPodcast, episode,
+                             );
+                             await playerProvider.markAsListened(item);
+                         }
                           break;
                       case 'download':
                           if (episode.audioUrl != null) downloader.downloadEpisode(episode!.audioUrl!);
@@ -317,13 +309,29 @@ class NowPlayingBar extends StatelessWidget {
               },
             ),
              // Skip Back
-            IconButton(
-              icon: const Icon(
-                Icons.replay_10, // Approximate for 15s
-                color: Colors.white,
-                size: 28,
-              ),
-              onPressed: playerProvider.rewind,
+            Stack(
+              alignment: Alignment.center,
+              children: [
+                IconButton(
+                  icon: const Icon(
+                    Icons.replay, 
+                    color: Colors.white,
+                    size: 28,
+                  ),
+                  onPressed: playerProvider.rewind,
+                ),
+                const Positioned(
+                   top: 14,
+                   child: Text(
+                     "15", 
+                     style: TextStyle(
+                        color: Colors.white, 
+                        fontSize: 10, 
+                        fontWeight: FontWeight.bold
+                     )
+                   ),
+                ),
+              ],
             ),
              // Play/Pause
             IconButton(

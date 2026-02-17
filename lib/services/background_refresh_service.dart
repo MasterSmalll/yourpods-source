@@ -34,6 +34,9 @@ void backgroundFetchHeadlessTask(HeadlessTask task) async {
     // Refresh all feeds (updates RSS cache, detects new auto-queue episodes)
     final newEpisodes = await provider.refreshAllFeeds(deviceId);
     
+    // Sync Playback Actions (Background)
+    await provider.syncEpisodeActions(deviceId);
+    
     if (newEpisodes.isNotEmpty) {
       Log.i('BackgroundRefresh', 'Found ${newEpisodes.length} new auto-queue episodes');
     } else {
@@ -64,7 +67,7 @@ class BackgroundRefreshService {
 
     final prefs = await SharedPreferences.getInstance();
     final enabled = prefs.getBool('background_refresh_enabled') ?? true;
-    final intervalMinutes = prefs.getInt('background_refresh_interval') ?? 15;
+    final intervalMinutes = prefs.getInt('background_refresh_interval') ?? 60;
 
     if (!enabled) {
       Log.d('BackgroundRefresh', 'Disabled by user setting');
@@ -115,6 +118,9 @@ class BackgroundRefreshService {
 
       final newEpisodes = await provider.refreshAllFeeds(deviceId);
 
+      // Sync Playback Actions (Foreground/Background)
+      await provider.syncEpisodeActions(deviceId);
+
       if (newEpisodes.isNotEmpty) {
         Log.i('BackgroundRefresh', 'Found ${newEpisodes.length} new auto-queue episodes');
       } else {
@@ -134,7 +140,7 @@ class BackgroundRefreshService {
   }
 
   /// Start background fetch (e.g., when user enables it in settings).
-  Future<void> start({int intervalMinutes = 15}) async {
+  Future<void> start({int intervalMinutes = 60}) async {
     if (!_shouldRun()) return;
 
     if (!_configured) {

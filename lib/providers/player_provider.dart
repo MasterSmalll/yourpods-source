@@ -16,6 +16,9 @@ import '../services/live_activity_service.dart';
 import '../services/id3_chapter_service.dart';
 import '../services/log_service.dart';
 import '../services/siri_service.dart';
+import '../utils/media_item_builder.dart';
+import '../utils/episode_action_cache.dart';
+import '../models/sync_conflict.dart';
 
 class PlayerProvider with ChangeNotifier {
   final PodcastAudioHandler _audioHandler;
@@ -59,6 +62,24 @@ class PlayerProvider with ChangeNotifier {
   int? _lastSyncedPosition;
   SettingsProvider? _settings;
 
+  // B1: Cache removed, using PodcastProvider
+
+  // B3: Cached SharedPreferences instance
+  SharedPreferences? _prefs;
+  Future<SharedPreferences> get _sharedPrefs async {
+    _prefs ??= await SharedPreferences.getInstance();
+    return _prefs!;
+  }
+
+  // B5: Debounce timestamp for _syncProgress
+  DateTime _lastUploadTime = DateTime(0);
+
+  // B8: Throttle timestamps for watch/live activity sync
+  DateTime _lastWatchSyncTime = DateTime(0);
+  DateTime _lastLiveActivityTime = DateTime(0);
+  // B9: Track playing state to avoid redundant notifyListeners
+  bool _lastPlayingState = false;
+
   PodcastProvider? _podcastProvider;
 
   void updateSettings(SettingsProvider settings) {
@@ -86,6 +107,10 @@ class PlayerProvider with ChangeNotifier {
       _liveActivityService = service;
       service.onAction = _handleLiveActivityAction;
   }
+
+  // B7: Guards for service setters to avoid redundant re-setting
+  bool get hasWatchService => _watchService != null;
+  bool get hasLiveActivityService => _liveActivityService != null;
   
   void _handleLiveActivityAction(String action) {
       switch (action) {
@@ -119,33 +144,42 @@ class PlayerProvider with ChangeNotifier {
               if (podcastName != null) {
                   SiriService().handlePlayMedia(podcastName);
               }
+          } else if (command == 'update_progress') {
+              final episodeId = args['episodeId'] as String?;
+              final position = args['position'] as int?;
+              if (episodeId != null && position != null && _podcastProvider != null) {
+                  // Get current episode info if possible to populate action fields
+                  // If not current, we might need to look it up or just send minimal info
+                  // For minimal sync, we need podcast URL. 
+                  // If it's in the queue, we can find it.
+                  final item = _audioHandler.queue.value.where((i) => i.id == episodeId).firstOrNull;
+                  if (item != null) {
+                       final podcastUrl = item.extras?['podcastUrl'] as String?;
+                       if (podcastUrl != null) {
+                           Log.d('PlayerProvider', 'Syncing watch progress for $episodeId: $position');
+                           final action = EpisodeAction(
+                               podcast: podcastUrl,
+                               episode: episodeId,
+                               guid: episodeId,
+                               action: 'play',
+                               timestamp: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+                               position: position,
+                               started: 0,
+                               total: item.duration?.inSeconds ?? 0,
+                               device: 'apple-watch', // Distinguish device
+                           );
+                           _podcastProvider!.sendEpisodeAction(action);
+                       }
+                  }
+              }
           }
       });
   }
   
 
-  // Action Sync Persistence
-  static const String _syncKey = 'last_action_sync_timestamp';
-  int _lastActionSyncTimestamp = 0;
-
-  Future<void> _loadActionSyncTimestamp() async {
-      try {
-          final prefs = await SharedPreferences.getInstance();
-          _lastActionSyncTimestamp = prefs.getInt(_syncKey) ?? 0;
-      } catch (e) {
-          Log.e('PlayerProvider', 'Error loading action sync timestamp: $e');
-      }
-  }
-
-  Future<void> _saveActionSyncTimestamp(int timestamp) async {
-      try {
-          final prefs = await SharedPreferences.getInstance();
-          await prefs.setInt(_syncKey, timestamp);
-          _lastActionSyncTimestamp = timestamp;
-      } catch (e) {
-          Log.e('PlayerProvider', 'Error saving action sync timestamp: $e');
-      }
-  }
+  // Action Sync Persistence (Deprecated in PlayerProvider, moved to PodcastProvider)
+  // We keep the method signatures for compatibility if needed, but they delegate.
+  // ...
   
   void _checkWatchSync() {
       if (_watchService != null && _downloadProvider != null && _settings != null) {
@@ -153,6 +187,8 @@ class PlayerProvider with ChangeNotifier {
               queue: _audioHandler.queue.value,
               downloadProvider: _downloadProvider!,
               settings: _settings!,
+              speed: _player.speed,
+              skipSilence: skipSilenceEnabled,
           );
       }
   }
@@ -167,24 +203,40 @@ class PlayerProvider with ChangeNotifier {
   }
   
 
+  static String formatDurationHuman(Duration d) {
+    if (d.inHours > 0) {
+      return '${d.inHours}h ${d.inMinutes.remainder(60)}m';
+    }
+    if (d.inMinutes > 0) {
+      return '${d.inMinutes}m';
+    }
+    return '${d.inSeconds}s';
+  }
+
   static String formatProgress({
     required Duration position,
     required Duration duration,
     required bool showPercentListened,
+    bool includeDuration = false,
   }) {
     int percent = 0;
+    String result;
     if (showPercentListened) {
       if (duration.inSeconds > 0) {
         percent = (position.inSeconds / duration.inSeconds * 100).clamp(0, 100).toInt();
       }
-      return '$percent% listened';
+      result = '$percent% listened';
     } else {
       if (duration.inSeconds > 0) {
         final left = duration.inSeconds - position.inSeconds;
         percent = (left / duration.inSeconds * 100).clamp(0, 100).toInt();
       }
-      return '$percent% left';
+      result = '$percent% left';
     }
+    if (includeDuration && duration.inSeconds > 0) {
+      result = '$result • ${formatDurationHuman(duration)}';
+    }
+    return result;
   }
 
   PlayerProvider(this._audioHandler) {
@@ -213,9 +265,25 @@ class PlayerProvider with ChangeNotifier {
              _syncAsPlayed(_currentEpisode!);
         }
 
-        _syncWatchPlaybackState(); // Sync to Watch
-        _updateLiveActivity(); // Sync to Dynamic Island
-        notifyListeners();
+        // B8: Throttle watch and live activity sync to avoid main thread saturation
+        final now = DateTime.now();
+        if (now.difference(_lastWatchSyncTime).inSeconds >= 2) {
+            _syncWatchPlaybackState();
+            _lastWatchSyncTime = now;
+        }
+        if (now.difference(_lastLiveActivityTime).inSeconds >= 2) {
+            _updateLiveActivity();
+            _lastLiveActivityTime = now;
+        }
+
+        // B9: Only notify listeners when playing state actually changes
+        // to avoid excessive widget tree rebuilds on every playback event
+        if (playing != _lastPlayingState ||
+            state.processingState == AudioProcessingState.completed ||
+            state.processingState == AudioProcessingState.idle) {
+            _lastPlayingState = playing;
+            notifyListeners();
+        }
     });
     
     // Listen to media item changes to update current episode info if it changes via queue
@@ -258,11 +326,16 @@ class PlayerProvider with ChangeNotifier {
          device: _deviceId,
        );
 
-       try {
-         await _api!.uploadEpisodeActions([episodeAction]);
-       } catch (e) {
-         Log.e('PlayerProvider', 'Failed to sync marked-as-listened: $e');
-       }
+        if (_podcastProvider != null) {
+            await _podcastProvider!.sendEpisodeAction(episodeAction);
+        } else {
+             // Fallback if provider not linked?
+            try {
+              await _api!.uploadEpisodeActions([episodeAction]);
+            } catch (e) {
+              Log.e('PlayerProvider', 'Failed to sync marked-as-listened: $e');
+            }
+        }
        
        // Mark as interacted locally
        if (_currentPodcast != null) {
@@ -283,11 +356,8 @@ class PlayerProvider with ChangeNotifier {
     _api = api;
     _deviceId = deviceId;
     
-    // Load timestamp and sync
-    _loadActionSyncTimestamp().then((_) {
-        Log.d('PlayerProvider', 'Loaded last sync timestamp: $_lastActionSyncTimestamp');
-        syncPlaybackState();
-    });
+    // Timestamp loading handled in PodcastProvider now.
+    syncPlaybackState();
   }
 
   Future<void> loadInitialState(PodcastProvider podcastProvider) async {
@@ -296,91 +366,53 @@ class PlayerProvider with ChangeNotifier {
   }
 
   /// Syncs playback state (Episode Actions) from the server.
-  /// Uses delta sync via 'since' parameter.
-  Future<void> syncPlaybackState() async {
-      if (_api == null) return;
+  /// Delegates to PodcastProvider.
+  /// Syncs playback state (Episode Actions) from the server.
+  /// Delegates to PodcastProvider.
+  /// Returns a list of conflicts if any found (and strategy is Ask).
+  Future<List<SyncConflict>> syncPlaybackState({bool force = true}) async {
+      if (_podcastProvider == null) return [];
       
-      Log.d('PlayerProvider', 'Syncing playback state (since: $_lastActionSyncTimestamp)...');
+      Log.d('PlayerProvider', 'Delegating playback sync to PodcastProvider...');
       
-      try {
-          // Fetch new actions since last sync
-          final actions = await _api!.getEpisodeActions(_deviceId, since: _lastActionSyncTimestamp);
-          
-          if (actions.isEmpty) {
-              Log.d('PlayerProvider', 'No new actions from server.');
-              return;
-          }
-
-          // Sort by timestamp ascending to apply in order, or just find latest per episode?
-          // We want the latest state for each episode.
-          actions.sort((a, b) => a.timestamp.compareTo(b.timestamp));
-          
-          // Update timestamp to the latest one we received
-          final maxTimestamp = actions.last.timestamp;
-          
-          // Map of episode ID -> latest action
-          final Map<String, EpisodeAction> latestActions = {};
-          for (var action in actions) {
-               latestActions[action.episode] = action;
-          }
-          
-          Log.d('PlayerProvider', 'Received ${actions.length} actions, ${latestActions.length} unique episodes updated.');
-
-          // 1. Update Currently Playing if match
-          if (_currentEpisode != null && _audioHandler.mediaItem.value?.id == _currentEpisode!.guid) {
-               final action = latestActions[_currentEpisode!.guid];
+      final strategy = _settings?.syncConflictStrategy ?? SyncStrategy.serverWins;
+      final conflicts = await _podcastProvider!.syncEpisodeActions(_deviceId, force: force, strategy: strategy);
+      
+      // After sync, check if we need to seek current episode
+      // If there are conflicts for the CURRENT episode, we might not want to seek automatically?
+      // Or we wait for resolution?
+      // If strategy is ASK, syncEpisodeActions returns conflicts but DOES NOT update local yet for those items.
+      // So we shouldn't seek yet if current is conflicted.
+      
+      if (_currentEpisode != null && _audioHandler.mediaItem.value?.id == _currentEpisode!.guid) {
+           // Check if current is in conflicts
+           final isConflicted = conflicts.any((c) => c.episodeGuid == _currentEpisode!.guid);
+           
+           if (!isConflicted) {
+               final action = _podcastProvider!.getLatestAction(_currentEpisode!.guid);
                if (action != null && action.position != null) {
-                   // Only update if remote is significantly ahead (e.g. > 10s) or we are paused?
-                   // User "sync" usually implies we want to match the server. 
-                   // But if we are playing locally, we might have newer state.
-                   // The 'since' check helps: if we got an action, it's NEWER than our last sync.
-                   // However, our local playing might have advanced since then.
-                   // Let's check timestamps.
-                   
-                   // If the action happened AFTER our last local play update...? 
-                   // Hard to compare perfectly without millisecond precision on local actions.
-                   // Simple heuristic: If remote position > local position + 10s, update.
-                   
                    final currentPos = _player.position.inSeconds;
                    if (action.position! > currentPos + 5) {
                         Log.i('PlayerProvider', 'Remote position ahead ($currentPos -> ${action.position}), seeking...');
                         await _audioHandler.seek(Duration(seconds: action.position!));
                    }
                }
-          }
-
-          // 2. Enrich Queue
-          await _enrichQueueWithActions(latestActions);
-          
-          // 3. Mark as played in PodcastProvider if needed
-          // (Optional: if we see 'play' action with position close to total, marker it)
-          if (_podcastProvider != null) {
-              for (var action in latestActions.values) {
-                   _podcastProvider!.markEpisodeAsInteracted(action.podcast, action.episode);
-              }
-          }
-
-          // Save new timestamp
-          await _saveActionSyncTimestamp(maxTimestamp);
-          
-      } catch (e) {
-          Log.e('PlayerProvider', 'Error syncing playback state: $e');
+           }
       }
+      
+      // Enrich Queue with new actions
+      await _enrichQueueFromProvider();
+      
+      return conflicts;
   }
 
-  // Deprecated direct enriched, used internally by syncPlaybackState now
-  Future<void> enrichQueueWithPositions() async {
-      await syncPlaybackState();
-  }
-
-  Future<void> _enrichQueueWithActions(Map<String, EpisodeAction> actions) async {
-       if (queue.isEmpty) return;
+  Future<void> _enrichQueueFromProvider() async {
+       if (queue.isEmpty || _podcastProvider == null) return;
        
        bool hasUpdates = false;
        final updatedQueue = queue.map((item) {
-           final action = actions[item.id];
+           final action = _podcastProvider!.getLatestAction(item.id);
            if (action != null && action.position != null) {
-               // Update position
                final currentPos = item.extras?['position_seconds'] as int? ?? 0;
                if (action.position! > currentPos) {
                    hasUpdates = true;
@@ -394,9 +426,20 @@ class PlayerProvider with ChangeNotifier {
        
        if (hasUpdates) {
            await _audioHandler.updateQueue(updatedQueue);
-           Log.d('PlayerProvider', 'Queue enriched with new actions');
+           Log.d('PlayerProvider', 'Queue enriched with new actions form PodcastProvider');
        }
   }
+
+  // Legacy method kept for signature compatibility if needed
+  Future<void> _enrichQueueWithActions(Map<String, EpisodeAction> actions) async {
+      await _enrichQueueFromProvider();
+  }
+
+  // Deprecated direct enriched, used internally by syncPlaybackState now
+  Future<void> enrichQueueWithPositions() async {
+      await syncPlaybackState();
+  }
+
 
   Future<void> _evaluateFallbackState(PodcastProvider podcastProvider) async {
       // 1. Current Loaded Item (Playing or Paused)
@@ -532,24 +575,12 @@ class PlayerProvider with ChangeNotifier {
           localPath = await downloadProvider.getDownloadedPath(episode.audioUrl!);
       }
 
-      if (_api != null) {
-          try {
-             final actions = await _api!.getEpisodeActions(_deviceId).timeout(const Duration(seconds: 5));
-             
-             final targetId = episode.guid; 
-             final relatedActions = actions.where((a) => a.podcast == podcast.url && a.episode == targetId).toList();
-             
-             if (relatedActions.isNotEmpty) {
-                 relatedActions.sort((a, b) => b.timestamp.compareTo(a.timestamp));
-                 final latest = relatedActions.first;
-                 if (latest.position != null && latest.position! > 0) {
-                     initialPosition = Duration(seconds: latest.position!);
-                     Log.d('PlayerProvider', 'Resuming from server position: $initialPosition');
-                 }
-             }
-          } catch (e) {
-              Log.d('PlayerProvider', 'Pre-play sync skipped (timeout or error): $e');
-          }
+      if (_podcastProvider != null) {
+           final action = _podcastProvider!.getLatestAction(episode.guid);
+           if (action != null && action.position != null && action.position! > 0) {
+                 initialPosition = Duration(seconds: action.position!);
+                 Log.d('PlayerProvider', 'Resuming from server position (via PodcastProvider): $initialPosition');
+           }
       }
 
       // Check local queue for position if not found on server or to prefer local state?
@@ -579,16 +610,11 @@ class PlayerProvider with ChangeNotifier {
         playExtras['chapters'] = _currentChapters!.map((c) => c.toJson()).toList();
       }
       
-      final mediaItem = MediaItem(
-        id: episode.guid,
-        album: podcast.title,
-        title: episode.title,
-        artist: '',
-        artUri: (episode.imageUrl != null || podcast.logoUrl != null) 
-            ? Uri.parse(episode.imageUrl ?? podcast.logoUrl!) 
-            : null,
-        duration: episode.duration, 
+      final mediaItem = MediaItemBuilder.fromEpisode(
+        podcast, 
+        episode,
         extras: playExtras,
+        duration: episode.duration,
       );
 
       if (localPath != null) {
@@ -993,6 +1019,9 @@ class PlayerProvider with ChangeNotifier {
             return;
         }
 
+        // B5: Debounce non-stop actions to avoid excessive server uploads
+        if (action != 'stop' && DateTime.now().difference(_lastUploadTime).inSeconds < 30) return;
+
         final position = _player.position.inSeconds;
         final duration = _player.duration?.inSeconds ?? 0;
         
@@ -1024,7 +1053,9 @@ class PlayerProvider with ChangeNotifier {
         _audioHandler.updateQueue(
             List<MediaItem>.from(currentQueue)..[index] = newItem
         );
-        notifyListeners(); // Force UI rebuild just in case
+        // B9: Removed notifyListeners here — position display uses StreamBuilder,
+        // and queue persistence is handled by updateQueue. Calling notifyListeners
+        // here caused full widget tree rebuilds every 30s during playback.
     }
 
     final episodeAction = EpisodeAction(
@@ -1042,8 +1073,13 @@ class PlayerProvider with ChangeNotifier {
     _lastSyncedPosition = position;
 
     try {
-          await apiToUse.uploadEpisodeActions([episodeAction]);
-          Log.d('PlayerProvider', 'Successfully uploaded action to server');
+          if (_podcastProvider != null) {
+              await _podcastProvider!.sendEpisodeAction(episodeAction);
+          } else if (apiToUse != null) {
+              await apiToUse.uploadEpisodeActions([episodeAction]);
+          }
+          _lastUploadTime = DateTime.now(); // B5: Update debounce timestamp
+          Log.d('PlayerProvider', 'Successfully synced action via PodcastProvider');
     } catch (e) {
       Log.e('PlayerProvider', 'Failed to sync progress: $e');
     }

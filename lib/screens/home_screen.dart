@@ -60,7 +60,7 @@ class _HomeScreenState extends State<HomeScreen> {
           playerProvider.setApi(api, profile.deviceId);
 
           // Refresh subscriptions ONLY if we switched profile
-          podcastProvider.refreshSubscriptions(profile.deviceId);
+          podcastProvider.refreshSubscriptions(profile.deviceId).catchError((_) {});
       } else {
          // Even if profile ID matches, ensure API client is fresh (e.g. token updates)
          // But passing same ID prevents data clearing.

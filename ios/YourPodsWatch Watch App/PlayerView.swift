@@ -31,6 +31,7 @@ struct PlayerView: View {
     @State private var playbackSource: PlaybackSource = .none
     @State private var hasSetupAudio = false
     @State private var chaptersExpanded = false
+    @State private var lastSyncTime = Date()
 
     var body: some View {
         ScrollView {
@@ -310,6 +311,7 @@ struct PlayerView: View {
                 DispatchQueue.main.async {
                     let item = AVPlayerItem(url: url)
                     self.player = AVPlayer(playerItem: item)
+                    self.player?.rate = Float(self.sessionManager.playbackSpeed)
                     self.player?.play()
                     self.isPlaying = true
                     self.hasSetupAudio = true
@@ -337,6 +339,7 @@ struct PlayerView: View {
             timer?.invalidate()
             statusText = "Paused"
         } else {
+            p.rate = Float(sessionManager.playbackSpeed)
             p.play()
             isPlaying = true
             startTimer()
@@ -356,6 +359,12 @@ struct PlayerView: View {
             if let p = player {
                 progress = CMTimeGetSeconds(p.currentTime())
                 
+                // Periodic Progress Sync to Phone (every 10 seconds)
+                if Date().timeIntervalSince(lastSyncTime) >= 10.0 {
+                    sessionManager.sendProgress(episodeId: episode.id, position: Int(progress))
+                    lastSyncTime = Date()
+                }
+
                 if let error = p.currentItem?.error {
                     statusText = "Error: \(error.localizedDescription)"
                 } else if p.status == .failed {

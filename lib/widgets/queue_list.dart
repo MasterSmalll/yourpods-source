@@ -6,6 +6,8 @@ import '../providers/player_provider.dart';
 import '../providers/download_provider.dart';
 // import '../providers/podcast_provider.dart'; // import for future improved filtering
 import 'queue_episode_tile.dart';
+import 'conflict_resolution_dialog.dart';
+import '../models/sync_conflict.dart';
 
 class QueueList extends StatefulWidget {
   final String currentFilter;
@@ -77,8 +79,31 @@ class _QueueListState extends State<QueueList> {
                     );
                   }
 
-                  // Apply Filters
-                  final filteredQueue = queue.where((item) {
+                  // 1. Identify Now Playing
+                  MediaItem? nowPlayingItem;
+                  final currentId = player.currentEpisode?.guid; // Or player.mediaItem.value?.id
+                  
+                  // 2. Separate Queue
+                  final List<MediaItem> upNextItems = [];
+                  
+                  for (var item in queue) {
+                      if (item.id == currentId) {
+                          nowPlayingItem = item;
+                      } else {
+                          upNextItems.add(item);
+                      }
+                  }
+                  
+                  // If we didn't find current in queue (e.g. queue cleared but playing), 
+                  // maybe we should just show the queue as is?
+                  // But usually current IS in queue. 
+                  // If currentId is null (nothing playing), everything is Up Next.
+
+                  // 3. Apply Filters to *Up Next* (Now Playing is always shown if it matches, or maybe specifically handled?)
+                  // The user likely wants to see Now Playing regardless of filter, OR matching filter.
+                  // Let's filter both for consistency with "Downloaded" etc.
+                  
+                  bool matchesFilter(MediaItem item) {
                      if (widget.currentFilter == 'All') return true;
                      
                      if (widget.currentFilter == 'Downloaded') {
@@ -88,24 +113,35 @@ class _QueueListState extends State<QueueList> {
                      }
                      
                      if (widget.currentFilter == 'Unplayed') {
-                         // Assume queue items are unplayed unless actively playing?
-                         // Or filter out "In Progress" items?
-                         // For now, let's treat "Unplayed" as "Not In Progress"
-                         // Check if it matches current episode?
-                         if (player.currentEpisode?.guid == item.id) return false;
+                         // "Unplayed" generally implies "Not In Progress"
+                         // So Now Playing probably shouldn't show in "Unplayed" list?
+                         // But if I just started it?
+                         // Let's stick to existing logic:
+                         if (player.currentEpisode?.guid == item.id) return false; 
                          return true;
                      }
                      
                      if (widget.currentFilter == 'In Progress') {
-                         // Check if it is current episode
                          if (player.currentEpisode?.guid == item.id) return true;
                          return false;
                      }
                      
                      return true;
-                  }).toList();
+                  }
 
-                  if (filteredQueue.isEmpty) {
+                  final filteredUpNext = upNextItems.where(matchesFilter).toList();
+                  
+                  // Check Now Playing against filter too?
+                  // "Unplayed" -> Now Playing (active) is technically "In Progress" usually.
+                  // "In Progress" -> Now Playing definitely is.
+                  // "Downloaded" -> checks download status.
+                  
+                  bool showNowPlaying = false;
+                  if (nowPlayingItem != null) {
+                      showNowPlaying = matchesFilter(nowPlayingItem!);
+                  }
+
+                  if (!showNowPlaying && filteredUpNext.isEmpty) {
                        return Center(
                            child: Column(
                                mainAxisAlignment: MainAxisAlignment.center,
@@ -118,46 +154,157 @@ class _QueueListState extends State<QueueList> {
                        );
                   }
 
-                  // If showing 'All', allow reordering
+                  // 4. Build List
+                  // If showing 'All', allow reordering of Up Next
                   if (widget.currentFilter == 'All') {
-                      return ReorderableListView.builder(
-                        padding: const EdgeInsets.only(bottom: 120),
-                        itemCount: filteredQueue.length,
-                        onReorder: (oldIndex, newIndex) {
-                           player.reorderQueue(oldIndex, newIndex);
+                      return RefreshIndicator(
+                        onRefresh: () async {
+                            final conflicts = await player.syncPlaybackState(force: true);
+                            if (context.mounted && conflicts.isNotEmpty) {
+                                ConflictResolutionDialog.show(context, conflicts);
+                            }
                         },
-                        itemBuilder: (context, index) {
-                          final item = filteredQueue[index];
-                          return QueueEpisodeTile(
-                              key: ValueKey(item.id),
-                              item: item,
-                              index: index,
-                              isReorderingAllowed: true,
-                              onTap: () => player.playMediaItem(item), 
-                              onMoveToTop: () => player.reorderQueue(index, 0),
-                              onMoveToBottom: () => player.reorderQueue(index, queue.length),
-                          );
-                        },
+                        child: CustomScrollView(
+                          physics: const AlwaysScrollableScrollPhysics(), // Ensure scroll for refresh
+                          controller: widget.scrollController,
+                          slivers: [
+                              if (showNowPlaying && nowPlayingItem != null)
+                                  SliverToBoxAdapter(
+                                      child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                              _buildSectionHeader("Now Playing"),
+                                              QueueEpisodeTile(
+                                                  key: ValueKey(nowPlayingItem!.id),
+                                                  item: nowPlayingItem!,
+                                                  index: -1, // Not reorderable
+                                                  isReorderingAllowed: false,
+                                                  onTap: () => player.playMediaItem(nowPlayingItem!),
+                                              ),
+                                              if (filteredUpNext.isNotEmpty)
+                                                  _buildSectionHeader("Up Next"),
+                                          ],
+                                      ),
+                                  ),
+                              
+                              if (filteredUpNext.isNotEmpty && !showNowPlaying && nowPlayingItem == null)
+                                   // Edge case: Nothing playing, just Up Next (which is everything)
+                                   // But typically we'd header it "Up Next" if we have a distinction?
+                                   // Or just "Queue"?
+                                   // Let's assume if there's no Now Playing, it's just a list.
+                                   // But for consistency let's header it if we think it's helpful.
+                                   // Actually if nothing is playing, "Now Playing" header limits confusion.
+                                   SliverToBoxAdapter(child: _buildSectionHeader("Up Next")),
+
+                              SliverReorderableList(
+                                  itemBuilder: (context, index) {
+                                      final item = filteredUpNext[index];
+                                      return QueueEpisodeTile(
+                                          key: ValueKey(item.id),
+                                          item: item,
+                                          index: index,
+                                          isReorderingAllowed: true,
+                                          onTap: () => player.playMediaItem(item), 
+                                          onMoveToTop: () {
+                                              // We need absolute index in original queue
+                                              final originalIndex = queue.indexOf(item);
+                                              if (originalIndex != -1) player.reorderQueue(originalIndex, 0); // Logic might differ if Now Playing is at 0?
+                                              // reorderQueue(old, new). 
+                                              // If Now Playing is at 0, moving to 0 replaces it? 
+                                              // Usually Now Playing is index 0. 
+                                              // If we move to 0, does it become Now Playing?
+                                              // Yes.
+                                          },
+                                          onMoveToBottom: () {
+                                               final originalIndex = queue.indexOf(item);
+                                               if (originalIndex != -1) player.reorderQueue(originalIndex, queue.length);
+                                          },
+                                      );
+                                  },
+                                  itemCount: filteredUpNext.length,
+                                  onReorder: (oldIndex, newIndex) {
+                                      // Map filteredUpNext indices to global queue indices
+                                      final item = filteredUpNext[oldIndex];
+                                      final globalOldIndex = queue.indexOf(item);
+                                      
+                                      // Prepare target
+                                      int globalNewIndex;
+                                      if (newIndex >= filteredUpNext.length) {
+                                          // Moving to end of Up Next
+                                          // So after the last item of Up Next
+                                          final lastItem = filteredUpNext.last;
+                                          globalNewIndex = queue.indexOf(lastItem) + 1; 
+                                          // Correction for removal? 
+                                          // reorderQueue handles "insert at newIndex". 
+                                      } else {
+                                          final targetItem = filteredUpNext[newIndex];
+                                          globalNewIndex = queue.indexOf(targetItem);
+                                      }
+                                      
+                                      // Adjust if moving downwards (standard ReorderableListView logic)
+                                      // But we are manually calculating via global indices.
+                                      // player.reorderQueue likely expects global indices.
+                                      
+                                      if (globalOldIndex != -1) {
+                                          player.reorderQueue(globalOldIndex, globalNewIndex);
+                                      }
+                                  },
+                              ),
+                              
+                              const SliverPadding(padding: EdgeInsets.only(bottom: 120)),
+                          ],
+                        ),
                       );
                   } else {
-                      // Filtered view (No reorder)
-                      // Important: We need to find original index for skipToQueueItem
-                      return ListView.builder(
-                          padding: const EdgeInsets.only(bottom: 120),
-                          itemCount: filteredQueue.length,
-                          itemBuilder: (context, index) {
-                              final item = filteredQueue[index];
-                              
-                              return QueueEpisodeTile(
-                                  key: ValueKey(item.id),
-                                  item: item,
-                                  index: index, // Visual index
-                                  isReorderingAllowed: false,
-                                  onTap: () {
-                                      player.playMediaItem(item);
-                                  },
-                              );
-                          },
+                      // Filtered View (No reorder)
+                      return RefreshIndicator(
+                        onRefresh: () async {
+                            final conflicts = await player.syncPlaybackState(force: true);
+                            if (context.mounted && conflicts.isNotEmpty) {
+                                ConflictResolutionDialog.show(context, conflicts);
+                            }
+                        },
+                        child: CustomScrollView(
+                          physics: const AlwaysScrollableScrollPhysics(), // Ensure scroll for refresh
+                          controller: widget.scrollController,
+                          slivers: [
+                               if (showNowPlaying && nowPlayingItem != null)
+                                  SliverToBoxAdapter(
+                                      child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                              _buildSectionHeader("Now Playing"),
+                                              QueueEpisodeTile(
+                                                  key: ValueKey(nowPlayingItem!.id),
+                                                  item: nowPlayingItem!,
+                                                  index: -1,
+                                                  isReorderingAllowed: false,
+                                                  onTap: () => player.playMediaItem(nowPlayingItem!),
+                                              ),
+                                              if (filteredUpNext.isNotEmpty)
+                                                  _buildSectionHeader("Up Next"),
+                                          ],
+                                      ),
+                                  ),
+                                  
+                              SliverList(
+                                  delegate: SliverChildBuilderDelegate(
+                                      (context, index) {
+                                          final item = filteredUpNext[index];
+                                          return QueueEpisodeTile(
+                                              key: ValueKey(item.id),
+                                              item: item,
+                                              index: index,
+                                              isReorderingAllowed: false,
+                                              onTap: () => player.playMediaItem(item),
+                                          );
+                                      },
+                                      childCount: filteredUpNext.length,
+                                  ),
+                              ),
+                              const SliverPadding(padding: EdgeInsets.only(bottom: 120)),
+                          ],
+                        ),
                       );
                   }
                 },
@@ -169,6 +316,21 @@ class _QueueListState extends State<QueueList> {
     );
   }
 
+  Widget _buildSectionHeader(String title) {
+      return Padding(
+          padding: const EdgeInsets.fromLTRB(16, 24, 16, 8),
+          child: Text(
+              title.toUpperCase(),
+              style: const TextStyle(
+                  color: Colors.white54,
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 1.0,
+              ),
+          ),
+      );
 
+
+  }
 }
 

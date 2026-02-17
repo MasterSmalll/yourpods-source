@@ -6,7 +6,7 @@ plugins {
 }
 
 android {
-    namespace = "com.example.podcast_player"
+    namespace = "com.asecretcompany.yourpods"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 

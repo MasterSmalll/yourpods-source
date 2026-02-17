@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 import 'settings_provider.dart';
 import '../services/log_service.dart';
+import '../models/sync_conflict.dart';
 
 class PodcastProvider with ChangeNotifier {
   List<Podcast> _subscriptions = [];
@@ -21,6 +22,22 @@ class PodcastProvider with ChangeNotifier {
   String? get error => _error;
   
   int _lastSyncTimestamp = 0;
+  
+  // Episode Action Cache
+  List<EpisodeAction> _cachedEpisodeActions = [];
+  int _lastActionsFetchTime = 0;
+  static const int _actionsCacheDuration = 300; // 5 minutes fresh
+  final Map<String, EpisodeAction> _actionMap = {}; // Quick lookup by guid
+
+  // B4: Cached documents directory
+  Directory? _docsDir;
+  Future<Directory> get _documentsDir async {
+    _docsDir ??= await getApplicationDocumentsDirectory();
+    return _docsDir!;
+  }
+
+  // C2: Cached UUID v5 computations
+  final Map<String, String> _uuidCache = {};
   final _storage = const FlutterSecureStorage(
     aOptions: AndroidOptions(
       encryptedSharedPreferences: true,
@@ -33,9 +50,32 @@ class PodcastProvider with ChangeNotifier {
   final Set<String> _podcastsWithDownloads = {};
   final Set<String> _podcastsWithInProgress = {};
 
+  // In-Memory Cache for Episodes (LRU-like via LinkedHashMap implicitly if we manage order, or just simple Map for now)
+  // We'll limit the size to avoid memory bloat.
+  final Map<String, List<Episode>> _memoryEpisodeCache = {};
+  final List<String> _memoryCacheKeys = [];
+  static const int _maxMemoryCacheSize = 10; // Keep top 10 podcasts in memory
+
   bool hasUnplayed(String url) => _podcastsWithUnplayed.contains(url);
   bool hasDownloads(String url) => _podcastsWithDownloads.contains(url);
   bool hasInProgress(String url) => _podcastsWithInProgress.contains(url);
+  
+  // Public accessor for cached episodes (Read-through)
+  Future<List<Episode>> getEpisodes(String podcastUrl, {bool forceRefresh = false}) async {
+    // 1. Check Memory Cache
+    if (!forceRefresh && _memoryEpisodeCache.containsKey(podcastUrl)) {
+        // Move to end (most recently used)
+        _memoryCacheKeys.remove(podcastUrl);
+        _memoryCacheKeys.add(podcastUrl);
+        return _memoryEpisodeCache[podcastUrl]!;
+    }
+    
+    // 2. Check File Cache (via existing logic)
+    // We reuse fetchEpisodes which checks file cache, but we want to populate memory cache too.
+    final episodes = await fetchEpisodes(podcastUrl, forceRefresh: forceRefresh);
+    
+    return episodes; // fetchEpisodes updates memory cache now
+  }
 
   GPodderApi? _api;
   final _rssService = RssService();
@@ -63,6 +103,10 @@ class PodcastProvider with ChangeNotifier {
               await _loadSyncTimestamp(); 
               await _loadAutoQueueSettings();
               await _loadGroups();
+              await _loadGroups();
+              await _loadActionCache(); // Load persisted actions
+              // Prefetch/warm up actions cache
+              syncEpisodeActions(_currentProfileId!, force: false).catchError((e) { Log.e('PodcastProvider', 'Initial actions sync failed', e); return <SyncConflict>[]; });
               notifyListeners();
           }
       } catch (e) {
@@ -86,12 +130,217 @@ class PodcastProvider with ChangeNotifier {
     _loadSyncTimestamp(); 
     _loadAutoQueueSettings();
     _loadGroups();
+    syncEpisodeActions(profileId, force: true);
     notifyListeners();
   }
+
+  // Action Persistence
+  Future<File> get _actionsFile async {
+    final directory = await _documentsDir;
+    final safeId = _currentProfileId?.replaceAll(RegExp(r'[^\w]'), '_') ?? 'default';
+    return File('${directory.path}/actions_$safeId.json');
+  }
+
+  Future<void> _loadActionCache() async {
+      try {
+          final file = await _actionsFile;
+          if (await file.exists()) {
+              final jsonString = await file.readAsString();
+              final List<dynamic> jsonList = json.decode(jsonString);
+              _cachedEpisodeActions = jsonList.map((j) => EpisodeAction.fromJson(j)).toList();
+              
+              _actionMap.clear();
+              for (var action in _cachedEpisodeActions) {
+                  _actionMap[action.episode] = action;
+              }
+              notifyListeners();
+          }
+      } catch (e) {
+          Log.e('PodcastProvider', 'Error loading action cache: $e');
+      }
+  }
+
+  Future<void> _saveActionCache() async {
+      try {
+          final file = await _actionsFile;
+          final jsonString = json.encode(_cachedEpisodeActions.map((a) => a.toJson()).toList());
+          await file.writeAsString(jsonString);
+      } catch (e) {
+          Log.e('PodcastProvider', 'Error saving action cache: $e');
+      }
+  }
+
+  /// Centralized Sync for Playback State (Episode Actions)
+  /// 
+  /// 1. Pushes any local pending actions (if we track them later, for now we rely on immediate push)
+  /// 2. Pulls latest actions from server
+  /// 3. Merges with local cache
+  /// 4. Persists to disk
+  Future<List<SyncConflict>> syncEpisodeActions(String deviceId, {bool force = false, SyncStrategy strategy = SyncStrategy.serverWins}) async {
+      if (_api == null) return [];
+      
+      // Rate limit unless forced
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      if (!force && (now - _lastActionsFetchTime < 60)) { 
+          // 1 minute default throttle for background/start if already fresh
+          return []; 
+      }
+
+      final conflicts = <SyncConflict>[];
+
+      try {
+          // Load timestamp
+          await _loadSyncTimestamp(); // Ensure we have latest timestamp
+          
+          final prefs = await SharedPreferences.getInstance();
+          int lastActionSync = prefs.getInt('last_action_sync_timestamp') ?? 0;
+          
+          Log.d('PodcastProvider', 'Syncing actions (since: $lastActionSync)...');
+          
+          final remoteActions = await _api!.getEpisodeActions(deviceId, since: lastActionSync);
+          
+          if (remoteActions.isNotEmpty) {
+              // Merge strategy: 
+              // 1. Sort remote by timestamp
+              remoteActions.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+              
+              // 2. Update map
+              bool changed = false;
+              for (var action in remoteActions) {
+                  final existing = _actionMap[action.episode];
+                  
+                  // Check for conflict
+                  if (existing != null) {
+                      final diff = (action.position! - existing.position!).abs();
+                      // Only consider conflict if diff > 60s AND remote is newer (if remote is older, we ignore it anyway usually)
+                      // Actually, if remote is newer but significantly different, that's a conflict. 
+                      // If remote is OLDER, we just keep ours.
+                      
+                      if (action.timestamp > existing.timestamp && diff > 60) {
+                          // Potential Conflict
+                      if (strategy == SyncStrategy.ask) {
+                               // Look up titles
+                               String? podTitle;
+                               String? epTitle;
+                               
+                               try {
+                                   final podcast = _subscriptions.firstWhere((p) => p.url == action.podcast);
+                                   podTitle = podcast.title;
+                                   
+                                   final episodes = await _loadEpisodeCache(action.podcast);
+                                   final episode = episodes.firstWhere((e) => e.guid == action.episode, orElse: () => Episode(guid: action.episode, title: action.episode, description: '', audioUrl: '', pubDate: DateTime.now(), duration: Duration.zero));
+                                   if (episode.title != action.episode) {
+                                       epTitle = episode.title;
+                                   }
+                               } catch (e) {
+                                   // ignore lookup errors
+                               }
+
+                               final conflict = SyncConflict(
+                                   episodeGuid: action.episode,
+                                   podcastUrl: action.podcast, 
+                                   localAction: existing,
+                                   remoteAction: action,
+                                   podcastTitle: podTitle,
+                                   episodeTitle: epTitle,
+                               );
+                               conflicts.add(conflict);
+                               continue; // optimizing: don't update map yet
+                          } else if (strategy == SyncStrategy.deviceWins) {
+                              Log.i('PodcastProvider', 'Conflict: Device wins for ${action.episode}');
+                              // We keep ours. But maybe we should push ours to server to settle it?
+                              // For now, just don't overwrite.
+                              continue;
+                          }
+                          // strategy == serverWins -> fall through to update
+                      }
+                  }
+
+                  if (existing == null || action.timestamp > existing.timestamp) {
+                      _actionMap[action.episode] = action;
+                      changed = true;
+                  }
+              }
+              
+              // 3. Rebuild list and save
+              if (changed) {
+                  _cachedEpisodeActions = _actionMap.values.toList();
+                  await _saveActionCache();
+                  
+                  // Update timestamp
+                  final maxTs = remoteActions.last.timestamp;
+                  if (maxTs > lastActionSync) {
+                      await prefs.setInt('last_action_sync_timestamp', maxTs);
+                  }
+                  
+                  notifyListeners();
+              }
+              Log.i('PodcastProvider', 'Synced actions. ${conflicts.length} conflicts detected.');
+          } else {
+             Log.d('PodcastProvider', 'No new actions on server.');
+          }
+          
+          _lastActionsFetchTime = now;
+          
+      } catch (e) {
+          Log.e('PodcastProvider', 'Action sync failed: $e');
+      }
+      
+      return conflicts;
+  }
+
+  Future<void> resolveConflicts(List<SyncConflict> resolutions) async {
+       bool changed = false;
+       for (var resolution in resolutions) {
+           // If we chose remote (which is stored in resolution.remoteAction)
+           // But how do we know which one was chosen?
+           // The caller passes back a modified list? Or list of "Resolved" objects?
+           // Actually, the caller should probably pass the *Actions* to keep.
+           
+           // Simpler: resolveConflict(SyncConflict conflict, bool keepRemote)
+       }
+  }
+  
+  Future<void> applyConflictResolution(SyncConflict conflict, bool keepRemote) async {
+      if (keepRemote && conflict.remoteAction != null) {
+          _actionMap[conflict.episodeGuid] = conflict.remoteAction!;
+          _cachedEpisodeActions = _actionMap.values.toList();
+          await _saveActionCache();
+          notifyListeners();
+      } else if (!keepRemote && conflict.localAction != null) {
+          // Keep local. Ensure server knows about it.
+          await sendEpisodeAction(conflict.localAction!);
+      }
+  }
+
+  /// Get the latest known state for an episode
+  EpisodeAction? getLatestAction(String episodeGuid) {
+      return _actionMap[episodeGuid];
+  }
+
+  /// Send an action (played/progress) to the server and update local cache
+  Future<void> sendEpisodeAction(EpisodeAction action) async {
+      if (_api == null) return;
+      
+      // Optimistic update
+      _actionMap[action.episode] = action;
+      _cachedEpisodeActions = _actionMap.values.toList();
+      notifyListeners(); // Notify UI immediately
+      
+      try {
+          await _api!.uploadEpisodeActions([action]);
+          // Don't await save, just do it
+          _saveActionCache(); 
+      } catch (e) {
+          Log.e('PodcastProvider', 'Failed to upload action: $e');
+          // TODO: Queue for retry? For now, we rely on next sync or user retry.
+      }
+  }
+
   
   // Persistence Helpers
   Future<File> get _localFile async {
-    final directory = await getApplicationDocumentsDirectory();
+    final directory = await _documentsDir;
     final safeId = _currentProfileId?.replaceAll(RegExp(r'[^\w]'), '_') ?? 'default';
     return File('${directory.path}/subs_$safeId.json');
   }
@@ -389,9 +638,10 @@ class PodcastProvider with ChangeNotifier {
 
   // Episode Caching Helpers
   Future<File> _getEpisodeCacheFile(String url) async {
-      final directory = await getApplicationDocumentsDirectory();
-      // Use Uuid v5 (Name based) for stable filenames across isolates
-      final filename = 'episodes_${const Uuid().v5(Uuid.NAMESPACE_URL, url)}.json';
+      final directory = await _documentsDir;
+      // C2: Use cached UUID v5 for stable filenames
+      final uuid = _uuidCache[url] ??= const Uuid().v5(Uuid.NAMESPACE_URL, url);
+      final filename = 'episodes_$uuid.json';
       return File('${directory.path}/$filename');
   }
 
@@ -442,7 +692,20 @@ class PodcastProvider with ChangeNotifier {
   }
 
   Future<List<Episode>> fetchEpisodes(String rssUrl, {bool forceRefresh = false, bool ignoreCacheAge = false}) async {
-    // 1. Check local cache first
+    // 0. Check Memory Cache (First line of defense)
+    if (!forceRefresh && !ignoreCacheAge && _memoryEpisodeCache.containsKey(rssUrl)) {
+        // We trust memory cache if we aren't forcing refresh. 
+        // Logic: if it's in memory, we likely just loaded it or used it.
+        // If the user wants to be sure about "Age", they might need to check file timestamp, 
+        // but for general UI browsing, memory is king.
+        _memoryCacheKeys.remove(rssUrl);
+        _memoryCacheKeys.add(rssUrl);
+        return _memoryEpisodeCache[rssUrl]!;
+    }
+    
+    List<Episode>? result;
+
+    // 1. Check local file cache
     try {
         final cacheFile = await _getEpisodeCacheFile(rssUrl);
         if (await cacheFile.exists()) {
@@ -455,7 +718,7 @@ class PodcastProvider with ChangeNotifier {
             if (!forceRefresh && (age.inHours < cacheDurationHours || ignoreCacheAge)) {
                  final cached = await _loadEpisodeCache(rssUrl);
                  if (cached.isNotEmpty) {
-                    return cached;
+                    result = cached;
                  }
             }
         }
@@ -463,21 +726,39 @@ class PodcastProvider with ChangeNotifier {
         Log.d('PodcastProvider', 'Cache check failed for $rssUrl: $e');
     }
 
+    if (result != null) {
+        _updateMemoryCache(rssUrl, result);
+        return result;
+    }
+
     // 2. Network fetch
     try {
         final episodes = await _rssService.fetchEpisodes(rssUrl);
         // Cache success
         await _saveEpisodeCache(rssUrl, episodes);
+        _updateMemoryCache(rssUrl, episodes);
         return episodes;
     } catch (e) {
         Log.w('PodcastProvider', 'Network fetch failed for $rssUrl, trying cache fallback. Error: $e');
         // Fallback to cache even if stale (logic above handles success case, this handles failure case)
         final cached = await _loadEpisodeCache(rssUrl);
         if (cached.isNotEmpty) {
+            _updateMemoryCache(rssUrl, cached);
             return cached;
         }
         rethrow;
     }
+  }
+
+  void _updateMemoryCache(String url, List<Episode> episodes) {
+      if (_memoryEpisodeCache.containsKey(url)) {
+          _memoryCacheKeys.remove(url);
+      } else if (_memoryCacheKeys.length >= _maxMemoryCacheSize) {
+          final lru = _memoryCacheKeys.removeAt(0);
+          _memoryEpisodeCache.remove(lru);
+      }
+      _memoryCacheKeys.add(url);
+      _memoryEpisodeCache[url] = episodes;
   }
 
   Future<void> refreshSubscriptions(String deviceId) async {
@@ -540,10 +821,13 @@ class PodcastProvider with ChangeNotifier {
       await _saveSyncTimestamp(delta.timestamp);
 
     } catch (e) {
-      Log.e('PodcastProvider', 'Sync failed: $e');
+    Log.e('PodcastProvider', 'Sync failed: $e');
+    // Only surface error to UI if we have no cached subscriptions to show
+    if (_subscriptions.isEmpty) {
       _error = e.toString();
-      rethrow;
-    } finally {
+    }
+    // Don't rethrow — let callers and UI degrade gracefully
+  } finally {
       _isLoading = false;
       notifyListeners();
     }
@@ -638,8 +922,8 @@ class PodcastProvider with ChangeNotifier {
     try {
       await refreshSubscriptions(deviceId);
     } catch (e) {
-      _error = e.toString();
-      rethrow;
+      // refreshSubscriptions handles _error internally
+      Log.e('PodcastProvider', 'Pull from server failed: $e');
     } finally {
       _isLoading = false;
       notifyListeners();
@@ -850,7 +1134,12 @@ class PodcastProvider with ChangeNotifier {
 
       await _api!.uploadEpisodeActions(actions);
 
-      await _api!.uploadEpisodeActions(actions);
+      // Update local cache immediately
+      for (var action in actions) {
+          _actionMap[action.episode] = action;
+      }
+      _cachedEpisodeActions = _actionMap.values.toList();
+      _saveActionCache(); // Persist
 
       // Also mark as interacted locally so "New" badge disappears
       // Optimization: Group by podcast to batch updates
@@ -1060,29 +1349,24 @@ class PodcastProvider with ChangeNotifier {
       notifyListeners();
   }
 
+
   Future<Map<String, String>> getEpisodeStatuses(String podcastUrl, String deviceId) async {
       final statuses = <String, String>{};
-      if (_api == null) return statuses;
+      
+      // Use cached actions if available (syncEpisodeActions should be called by lifecycle/screens)
+      // Fallback to simpler check or empty if no cache? 
+      // If the cache is empty but we have an API, maybe we should fetch?
+      // For CarPlay, we expect syncEpisodeActions to be called on init.
+      
+      if (_cachedEpisodeActions.isEmpty && _api != null) {
+          // Try a quick fetch if we have nothing
+           await syncEpisodeActions(deviceId, force: false);
+      }
 
       try {
-          // 1. Get Actions (server state)
-          // Ideally we cache this too, but for now fetch fresh or rely on what we have if we cached actions separately
-          // Optimization: fetchInProgressEpisodes uses getEpisodeActions which might be heavy for a list.
-          // Let's assume we want to call getEpisodeActions once per screen load or cache it.
-          // For now, let's just fetch actions. To avoid hitting server too hard, maybe we should cache actions in the provider?
-          // But getEpisodeActions is per device. 
-          
-          List<EpisodeAction> actions = [];
-          try {
-             actions = await _api!.getEpisodeActions(deviceId);
-          } catch(e) {
-             Log.d('PodcastProvider', 'Error fetching actions for status: $e');
-             // Proceed with empty actions (offline/error)
-          }
-
-          // Filter actions for this podcast
+          // Filter actions for this podcast from CACHE
           final simpleActions = <String, EpisodeAction>{};
-          for (var action in actions) {
+          for (var action in _cachedEpisodeActions) {
               if (action.podcast == podcastUrl) {
                   final key = action.episode;
                   final existing = simpleActions[key];
@@ -1091,18 +1375,6 @@ class PodcastProvider with ChangeNotifier {
                   }
               }
           }
-
-          // We don't have the list of episodes here, we return a map for the UI to use
-          // UI iterates its episodes and checks this map.
-          // Wait, we need to know all episode GUIDs to check "New".
-          // Actually, "New" is the absence of interaction AND absence of server action.
-          // But the UI needs to know if it should populate "New".
-          // The UI calls this, gets a map: GUID -> 'played' | 'in_progress' | 'new' | 'unplayed'
-          
-          // Since we can't iterate all possible episodes here easily without fetching the feed again,
-          // we will provide a helper function or assume UI checks individual "isNew" logic.
-          // Better: Return a Map containing known states for GUIDs. 
-          // If a GUID is NOT in the map, the UI checks 'interacted' storage. If not interacted, it's New.
           
           for (var entry in simpleActions.entries) {
               final action = entry.value;

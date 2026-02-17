@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../services/log_service.dart';
+import '../models/sync_conflict.dart';
 
 enum ActionButtonStyle {
   textAndIcon,
@@ -34,6 +36,26 @@ class SettingsProvider with ChangeNotifier {
 
   bool get backgroundRefreshEnabled => _backgroundRefreshEnabled;
   int get backgroundRefreshInterval => _backgroundRefreshInterval;
+
+  // Search Provider Settings
+  String _searchProviderId = 'itunes'; // default
+  String _podcastIndexApiKey = '';
+  String _podcastIndexApiSecret = '';
+
+  String get searchProviderId => _searchProviderId;
+  String get podcastIndexApiKey => _podcastIndexApiKey;
+  String get podcastIndexApiSecret => _podcastIndexApiSecret;
+
+  SyncStrategy _syncConflictStrategy = SyncStrategy.ask;
+  SyncStrategy get syncConflictStrategy => _syncConflictStrategy;
+
+
+  final _secureStorage = const FlutterSecureStorage(
+    aOptions: AndroidOptions(
+      encryptedSharedPreferences: true,
+      resetOnError: true,
+    ),
+  );
 
   SettingsProvider() {
     _loadSettings();
@@ -70,6 +92,19 @@ class SettingsProvider with ChangeNotifier {
     // Load Background Refresh Settings
     _backgroundRefreshEnabled = prefs.getBool('background_refresh_enabled') ?? true;
     _backgroundRefreshInterval = prefs.getInt('background_refresh_interval') ?? 15;
+
+    // Load Search Provider Settings
+    _searchProviderId = prefs.getString('search_provider_id') ?? 'itunes';
+    _podcastIndexApiKey = await _secureStorage.read(key: 'podcastindex_api_key') ?? '';
+    _podcastIndexApiSecret = await _secureStorage.read(key: 'podcastindex_api_secret') ?? '';
+
+    _podcastIndexApiSecret = await _secureStorage.read(key: 'podcastindex_api_secret') ?? '';
+
+    // Load Sync Conflict Strategy
+    final syncStratIndex = prefs.getInt('sync_conflict_strategy') ?? SyncStrategy.ask.index;
+    if (syncStratIndex >= 0 && syncStratIndex < SyncStrategy.values.length) {
+        _syncConflictStrategy = SyncStrategy.values[syncStratIndex];
+    }
 
     notifyListeners();
   }
@@ -141,6 +176,25 @@ class SettingsProvider with ChangeNotifier {
     await prefs.setInt('background_refresh_interval', minutes);
   }
 
+  Future<void> setSearchProviderId(String providerId) async {
+    _searchProviderId = providerId;
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('search_provider_id', providerId);
+  }
+
+  Future<void> setPodcastIndexApiKey(String key) async {
+    _podcastIndexApiKey = key;
+    notifyListeners();
+    await _secureStorage.write(key: 'podcastindex_api_key', value: key);
+  }
+
+  Future<void> setPodcastIndexApiSecret(String secret) async {
+    _podcastIndexApiSecret = secret;
+    notifyListeners();
+    await _secureStorage.write(key: 'podcastindex_api_secret', value: secret);
+  }
+
   Future<void> setEnableListenerStats(bool enabled) async {
     _enableListenerStats = enabled;
     notifyListeners();
@@ -154,5 +208,12 @@ class SettingsProvider with ChangeNotifier {
       final prefs = await SharedPreferences.getInstance();
       await prefs.remove('listening_stats_cache');
     }
+  }
+
+  Future<void> setSyncConflictStrategy(SyncStrategy strategy) async {
+      _syncConflictStrategy = strategy;
+      notifyListeners();
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt('sync_conflict_strategy', strategy.index);
   }
 }

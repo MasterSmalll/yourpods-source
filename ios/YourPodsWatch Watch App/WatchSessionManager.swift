@@ -100,28 +100,31 @@ class WatchDownloadManager: NSObject, ObservableObject, URLSessionDownloadDelega
         
         let destinationURL = documentsURL.appendingPathComponent(filename)
         
-        do {
-            // Remove existing file if present
-            if fileManager.fileExists(atPath: destinationURL.path) {
-                try fileManager.removeItem(at: destinationURL)
-            }
-            
-            // Move downloaded file
-            try fileManager.moveItem(at: location, to: destinationURL)
-            
-            print("Download complete for \(episodeId): \(destinationURL.path)")
-            
-            DispatchQueue.main.async {
-                self.downloadTasks.removeValue(forKey: episodeId)
-                self.activeDownloads.removeValue(forKey: episodeId)
-                self.completedDownloads.insert(episodeId)
-                self.onDownloadComplete?(episodeId, filename)
-            }
-        } catch {
-            print("Failed to move downloaded file: \(error)")
-            DispatchQueue.main.async {
-                self.downloadTasks.removeValue(forKey: episodeId)
-                self.activeDownloads.removeValue(forKey: episodeId)
+        DispatchQueue.global(qos: .background).async {
+            let bgFileManager = FileManager.default
+            do {
+                // Remove existing file if present
+                if bgFileManager.fileExists(atPath: destinationURL.path) {
+                    try bgFileManager.removeItem(at: destinationURL)
+                }
+
+                // Move downloaded file
+                try fileManager.moveItem(at: location, to: destinationURL)
+
+                print("Download complete for \(episodeId): \(destinationURL.path)")
+
+                DispatchQueue.main.async {
+                    self.downloadTasks.removeValue(forKey: episodeId)
+                    self.activeDownloads.removeValue(forKey: episodeId)
+                    self.completedDownloads.insert(episodeId)
+                    self.onDownloadComplete?(episodeId, filename)
+                }
+            } catch {
+                print("Failed to move downloaded file: \(error)")
+                DispatchQueue.main.async {
+                    self.downloadTasks.removeValue(forKey: episodeId)
+                    self.activeDownloads.removeValue(forKey: episodeId)
+                }
             }
         }
     }
@@ -152,6 +155,7 @@ class WatchDownloadManager: NSObject, ObservableObject, URLSessionDownloadDelega
 
 class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     @Published var episodes: [WatchEpisode] = []
+    @Published var playbackSpeed: Double = 1.0
     
     // Remote Control State
     @Published var remoteTitle: String = "Not Playing"
@@ -337,6 +341,11 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 self.handleQueueUpdate(queue)
             }
             
+            // Handle Speed
+            if let speed = applicationContext["speed"] as? Double {
+                self.playbackSpeed = speed
+            }
+
             // Handle Playback Info
             if let info = applicationContext["playback_info"] as? [String: Any] {
                 self.remoteTitle = info["title"] as? String ?? "Not Playing"
@@ -402,6 +411,17 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         }
     }
     
+    func sendProgress(episodeId: String, position: Int) {
+        guard WCSession.default.isReachable else { return }
+        WCSession.default.sendMessage([
+            "command": "update_progress",
+            "episodeId": episodeId,
+            "position": position
+        ], replyHandler: nil) { error in
+            print("Error sending progress: \(error.localizedDescription)")
+        }
+    }
+
     func markAsPlayed(for episodeId: String) {
         guard WCSession.default.isReachable else { return }
         print("Requesting mark as played for \(episodeId)")
@@ -470,51 +490,53 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     // Handle File Transfer
     func session(_ session: WCSession, didReceive file: WCSessionFile) {
         guard let metadata = file.metadata else { return }
-        
-        DispatchQueue.main.async {
-            self.handleReceivedFile(file: file, metadata: metadata)
-        }
+        self.handleReceivedFile(file: file, metadata: metadata)
     }
     
     private func handleReceivedFile(file: WCSessionFile, metadata: [String: Any]) {
-        let fileManager = FileManager.default
         let destURL = getDocumentsDirectory().appendingPathComponent(file.fileURL.lastPathComponent)
         
-        do {
-            if fileManager.fileExists(atPath: destURL.path) {
-                try fileManager.removeItem(at: destURL)
+        DispatchQueue.global(qos: .background).async {
+            let fileManager = FileManager.default
+            do {
+                if fileManager.fileExists(atPath: destURL.path) {
+                    try fileManager.removeItem(at: destURL)
+                }
+                try fileManager.moveItem(at: file.fileURL, to: destURL)
+
+                let id = metadata["id"] as? String ?? UUID().uuidString
+
+                DispatchQueue.main.async {
+                    self.pendingDownloads.remove(id) // Clear pending state
+
+                    // We need to update the specific episode in our list with the new local path
+                    if let index = self.episodes.firstIndex(where: { $0.id == id }) {
+                        let old = self.episodes[index]
+                        let updated = WatchEpisode(
+                            id: old.id,
+                            title: old.title,
+                            album: old.album,
+                            artist: old.artist,
+                            duration: old.duration,
+                            localPath: file.fileURL.lastPathComponent,
+                            streamUrl: old.streamUrl,
+                            artUri: old.artUri,
+                            isAvailableOnPhone: old.isAvailableOnPhone,
+                            chapters: old.chapters
+                        )
+                        self.episodes[index] = updated
+                        self.saveEpisodes()
+                        print("Received and updated episode: \(updated.title)")
+                    } else {
+                        // If it wasn't in list (maybe synced in background?), add it?
+                        // Usually we only care about queue itms.
+                        print("Received file for episode not in queue: \(id)")
+                    }
+                }
+
+            } catch {
+                print("Error moving file: \(error)")
             }
-            try fileManager.moveItem(at: file.fileURL, to: destURL)
-            
-            let id = metadata["id"] as? String ?? UUID().uuidString
-            pendingDownloads.remove(id) // Clear pending state
-            
-            // We need to update the specific episode in our list with the new local path
-            if let index = episodes.firstIndex(where: { $0.id == id }) {
-                let old = episodes[index]
-                let updated = WatchEpisode(
-                    id: old.id,
-                    title: old.title,
-                    album: old.album,
-                    artist: old.artist,
-                    duration: old.duration,
-                    localPath: file.fileURL.lastPathComponent,
-                    streamUrl: old.streamUrl,
-                    artUri: old.artUri,
-                    isAvailableOnPhone: old.isAvailableOnPhone,
-                    chapters: old.chapters
-                )
-                episodes[index] = updated
-                saveEpisodes()
-                print("Received and updated episode: \(updated.title)")
-            } else {
-                // If it wasn't in list (maybe synced in background?), add it?
-                // Usually we only care about queue itms.
-                print("Received file for episode not in queue: \(id)")
-            }
-            
-        } catch {
-            print("Error moving file: \(error)")
         }
     }
     

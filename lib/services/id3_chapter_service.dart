@@ -1,6 +1,4 @@
-import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 import 'package:id3tag/id3tag.dart' as id3;
 import '../models/podcast.dart';
@@ -18,7 +16,7 @@ class ID3ChapterService {
       // ID3v2 tags are at the start of the file.
       final response = await http.get(
         Uri.parse(audioUrl),
-        headers: {'Range': 'bytes=0-2097152'}, // 2MB
+        headers: {'Range': 'bytes=0-262144'}, // 256KB (usually enough for text frames)
       );
 
       if (response.statusCode != 200 && response.statusCode != 206) {

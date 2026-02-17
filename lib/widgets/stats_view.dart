@@ -167,7 +167,7 @@ class StatsView extends StatelessWidget {
               ClipRRect(
                 borderRadius: BorderRadius.circular(8),
                 child: pod.logoUrl != null
-                    ? Image.network(pod.logoUrl!, width: 48, height: 48, fit: BoxFit.cover)
+                    ? Image.network(pod.logoUrl!, width: 48, height: 48, fit: BoxFit.cover, cacheWidth: 96, cacheHeight: 96)
                     : Container(
                         width: 48,
                         height: 48,

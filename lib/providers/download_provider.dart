@@ -1,4 +1,6 @@
+import 'dart:convert';
 import 'dart:io';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:dio/dio.dart';
 import 'package:path_provider/path_provider.dart';
@@ -44,9 +46,21 @@ class DownloadProvider with ChangeNotifier {
     if (!await downloadsDir.exists()) {
         await downloadsDir.create(recursive: true);
     }
-    // Safe filename
-    final filename = 'ep_${url.hashCode}.mp3';
-    return '${downloadsDir.path}/$filename';
+    // Stable, collision-resistant filename using sha256
+    final hash = sha256.convert(utf8.encode(url)).toString().substring(0, 16);
+    final newPath = '${downloadsDir.path}/ep_$hash.mp3';
+
+    // If new file already exists, use it
+    if (await File(newPath).exists()) return newPath;
+
+    // Check for legacy hashCode-based filename and migrate it
+    final legacyPath = '${downloadsDir.path}/ep_${url.hashCode}.mp3';
+    if (await File(legacyPath).exists()) {
+      await File(legacyPath).rename(newPath);
+      Log.i('DownloadProvider', 'Migrated download to new filename scheme');
+    }
+
+    return newPath;
   }
 
   Future<String?> getDownloadedPath(String url) async {

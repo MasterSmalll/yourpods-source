@@ -19,6 +19,8 @@ class WatchService {
 
   SettingsProvider? _settings;
   DownloadProvider? _downloadProvider;
+  
+  String? _lastContextJson;
 
   WatchService() {
     _init();
@@ -35,6 +37,8 @@ class WatchService {
     required List<MediaItem> queue,
     required DownloadProvider downloadProvider,
     required SettingsProvider settings,
+    double speed = 1.0,
+    bool skipSilence = false,
   }) async {
     _settings = settings;
     _downloadProvider = downloadProvider;
@@ -79,6 +83,7 @@ class WatchService {
              'album': item.album,
              'artist': item.artist,
              'duration': item.duration?.inSeconds ?? 0,
+             'position': item.extras?['position_seconds'] ?? 0, // A5: include playback position
              'url': url,
              'artUri': item.artUri?.toString(),
              'isAvailableOnPhone': isDownloadedOnPhone,
@@ -93,8 +98,21 @@ class WatchService {
          }
       }
 
-      // 3. Update Application Context
-      await _watch.updateApplicationContext({'queue': contextQueue});
+      // 3. Update Application Context — A6: include speed & skipSilence
+      final newContext = {
+        'queue': contextQueue,
+        'speed': speed,
+        'skipSilence': skipSilence,
+      };
+      
+      final jsonStr = json.encode(newContext);
+      if (jsonStr == _lastContextJson) {
+          Log.d('WatchService', 'Skipping sync (context unchanged)');
+          return;
+      }
+      
+      await _watch.updateApplicationContext(newContext);
+      _lastContextJson = jsonStr;
       Log.d('WatchService', 'Application Context updated');
       
     } catch (e) {
@@ -241,6 +259,18 @@ class WatchService {
                   _onCustomCommand?.call('playLatest', {'podcastName': podcastName});
               }
               break;
+          case 'update_progress':
+               // Received progress update from Watch (offline playback)
+               final episodeId = message['episodeId'] as String?;
+               final position = message['position'] as int?;
+               if (episodeId != null && position != null) {
+                   Log.d('WatchService', 'Received update_progress for $episodeId: $position');
+                   _onCustomCommand?.call('update_progress', {
+                       'episodeId': episodeId, 
+                       'position': position,
+                   });
+               }
+               break;
       }
   }
 

@@ -1,4 +1,4 @@
-package com.example.podcast_player
+package com.asecretcompany.yourpods
 
 import io.flutter.embedding.android.FlutterActivity
 

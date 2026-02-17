@@ -37,8 +37,10 @@ extension AppDelegate: INPlayMediaIntentHandling {
         }
         
         if !searchTerm.isEmpty {
-             let channel = FlutterMethodChannel(name: "com.asecretcompany.yourpods/siri", binaryMessenger: self.flutterEngine.binaryMessenger)
-             channel.invokeMethod("playMedia", arguments: searchTerm)
+             DispatchQueue.main.async {
+                 let channel = FlutterMethodChannel(name: "com.asecretcompany.yourpods/siri", binaryMessenger: self.flutterEngine.binaryMessenger)
+                 channel.invokeMethod("playMedia", arguments: searchTerm)
+             }
         }
         
         completion(response)

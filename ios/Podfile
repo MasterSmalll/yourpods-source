@@ -41,6 +41,22 @@ post_install do |installer|
     flutter_additional_ios_build_settings(target)
   end
 
+  # Strip extended attributes (com.apple.provenance) that break code signing
+  installer.pods_project.targets.each do |target|
+    target.build_configurations.each do |config|
+      config.build_settings['CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION'] = 'YES'
+    end
+  end
+
+  # Add a script phase to strip extended attributes before code signing
+  installer.pods_project.targets.each do |target|
+    existing = target.shell_script_build_phases.find { |p| p.name == '[YourPods] Strip Extended Attributes' }
+    unless existing
+      phase = target.new_shell_script_build_phase('[YourPods] Strip Extended Attributes')
+      phase.shell_script = 'find "${BUILT_PRODUCTS_DIR}" -name "*.framework" -exec xattr -cr {} \\; 2>/dev/null || true'
+    end
+  end
+
   # Patch flutter_carplay FCPExtensions.swift to fix crash from force-unwrapping
   # optional URL and UIImage values in fromUrl(url:)
   fcp_ext = File.join(__dir__, '.symlinks', 'plugins', 'flutter_carplay', 'ios', 'Classes', 'FCPExtensions.swift')

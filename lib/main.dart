@@ -39,6 +39,9 @@ void main() async {
 
   // Create PodcastProvider early
   final podcastProvider = PodcastProvider();
+  
+  // AudioHandler needs provider for browsing
+  audioHandler.setPodcastProvider(podcastProvider);
 
   // Configure Services with AudioHandler and Provider
   CarPlayService().setAudioHandler(audioHandler);
@@ -74,8 +77,9 @@ void main() async {
               player!.updateSettings(settings);
               player.updatePodcastProvider(podcastProvider);
               player.updateDownloadProvider(downloadProvider);
-              player.setWatchService(watchService);
-              player.setLiveActivityService(liveActivityService);
+              // B7: Only set services once to avoid redundant re-initialization
+              if (!player.hasWatchService) player.setWatchService(watchService);
+              if (!player.hasLiveActivityService) player.setLiveActivityService(liveActivityService);
               return player;
             },
         ),
@@ -139,6 +143,8 @@ class _PodcastAppState extends State<PodcastApp> with WidgetsBindingObserver {
       CarPlayService().setPlayerProvider(playerProvider);
       final settingsProvider = Provider.of<SettingsProvider>(context, listen: false);
       CarPlayService().setSettingsProvider(settingsProvider);
+      final downloadProvider = Provider.of<DownloadProvider>(context, listen: false);
+      CarPlayService().setDownloadProvider(downloadProvider);
       
       // Wait for build to finish? Actually this is just async logic fire-and-forget
       playerProvider.loadInitialState(podcastProvider);

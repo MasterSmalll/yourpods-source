@@ -8,6 +8,9 @@ import '../widgets/action_button.dart';
 import 'episode_list_screen.dart';
 import '../providers/download_provider.dart';
 import '../providers/profile_provider.dart';
+import 'podcast_search_delegate.dart';
+import '../widgets/conflict_resolution_dialog.dart';
+import '../models/sync_conflict.dart';
 
 class LibraryScreen extends StatefulWidget {
   const LibraryScreen({super.key});
@@ -206,6 +209,17 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     ),
                     const SizedBox(width: 8),
                     ActionButton(
+                      icon: Icons.search,
+                      label: 'Search',
+                      onPressed: () {
+                        showSearch(
+                          context: context,
+                          delegate: PodcastSearchDelegate(hintText: 'Search podcasts...'),
+                        );
+                      },
+                    ),
+                    const SizedBox(width: 8),
+                    ActionButton(
                       icon: Icons.add,
                       label: 'Add Link',
                       onPressed: () => _showAddPodcastDialog(context),
@@ -232,7 +246,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       return const Center(child: CircularProgressIndicator(color: Colors.deepPurple));
                     }
 
-                    if (provider.error != null) {
+                    if (provider.error != null && provider.subscriptions.isEmpty) {
                       return Center(
                         child: Column(
                           mainAxisAlignment: MainAxisAlignment.center,
@@ -288,6 +302,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
                           // 1. Refresh Subscriptions (GPodder)
                           await provider.refreshSubscriptions(deviceId);
                           
+                          // 1b. Sync Playback State (Conflicts, etc)
+                          if (context.mounted) {
+                              final conflicts = await Provider.of<PlayerProvider>(context, listen: false).syncPlaybackState(force: true);
+                              if (context.mounted && conflicts.isNotEmpty) {
+                                  await ConflictResolutionDialog.show(context, conflicts);
+                              }
+                          }
+                          
                           // 2. Refresh All Feeds & Check auto-queue (Consolidated)
                           if (!context.mounted) return;
                           final newEpisodes = await provider.refreshAllFeeds(deviceId);
@@ -333,20 +355,53 @@ class _LibraryScreenState extends State<LibraryScreen> {
                               }
                           }
                       },
-                      child: GridView.builder(
-                        padding: const EdgeInsets.only(left: 16, right: 16, top: 0, bottom: 120),
+                      child: CustomScrollView(
                         physics: const AlwaysScrollableScrollPhysics(),
-                        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: 2,
-                          crossAxisSpacing: 16,
-                          mainAxisSpacing: 16,
-                          childAspectRatio: 0.75,
-                        ),
-                        itemCount: filteredList.length,
-                        itemBuilder: (context, index) {
-                          final podcast = filteredList[index];
-                          return _buildPodcastCard(context, podcast);
-                        },
+                        slivers: [
+                          // Offline/sync-failed banner
+                          if (provider.error != null)
+                            SliverToBoxAdapter(
+                              child: Container(
+                                margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                decoration: BoxDecoration(
+                                  color: Colors.orange.withOpacity(0.15),
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(color: Colors.orange.withOpacity(0.3)),
+                                ),
+                                child: Row(
+                                  children: [
+                                    const Icon(Icons.cloud_off, color: Colors.orange, size: 18),
+                                    const SizedBox(width: 8),
+                                    const Expanded(
+                                      child: Text(
+                                        'Showing cached library — sync failed. Pull to retry.',
+                                        style: TextStyle(color: Colors.orange, fontSize: 12),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          SliverPadding(
+                            padding: const EdgeInsets.only(left: 16, right: 16, top: 0, bottom: 120),
+                            sliver: SliverGrid(
+                              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                                crossAxisCount: 2,
+                                crossAxisSpacing: 16,
+                                mainAxisSpacing: 16,
+                                childAspectRatio: 0.75,
+                              ),
+                              delegate: SliverChildBuilderDelegate(
+                                (context, index) {
+                                  final podcast = filteredList[index];
+                                  return _buildPodcastCard(context, podcast);
+                                },
+                                childCount: filteredList.length,
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     );
                   },
@@ -510,7 +565,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       // For now, I'll modify _PodcastSelectionDialog to accept initialSelection first.
       // Then call it here.
       
-      // Note: For now, I'll implement _PodcastGroupEditorDialog to avoid breaking the queuing dialog logic
+      // Hack: For now, I'll implement _PodcastGroupEditorDialog to avoid breaking the queuing dialog logic
       // OR I can quickly update _PodcastSelectionDialog to accept `initialSelection`.
       
       final selected = await showDialog<Set<String>>(

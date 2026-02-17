@@ -46,48 +46,44 @@ For the most up-to-date features, check our [website](https://asecretcompany.com
 
 YourPods seamlessly integrates with gPodder-compatible servers (such as Nextcloud & NextPod) to keep your library in sync without relying on third-party clouds.
 
-## New Features - Version 1.2.2
--  **Live Transcripts**: Follow along effortlessly with interactive, auto-scrolling transcripts that support full-text search, tap-to-seek navigation, and offline access.
--  **Expanded Siri & Shortcuts**: Take full control of your listening experience with new Siri voice commands and deeper integration with the Shortcuts app and Apple Watch.
--  **Performance & Caching**: Enjoy a faster, more reliable app with instant chapter loading and improved transcript persistence that stays ready even after a restart.
-
-
-## New Features - Version 1.2.1
--   **CarPlay Support**: Includes "Now Playing" and "In Progress" screens, with support for artwork and progress syncing.
--   **WatchOS Companion App**: Control playback and view progress directly from your wrist. Includes background refresh support.
--   **Dynamic Island**: Stay informed about what's playing with real-time updates on the Dynamic Island and Lock Screen on supported devices.
--   **Chapter Support**: Navigate episodes with ease using embedded chapter markers (May need to refresh episdoes 'pull down')).
--   **Priority Queue**: "Queue New" feature now supports adding episodes to the *top* of the queue (priority) Library->Queue New->Choose Podcasts.
--   **Smart Downloads**: Improved background downloading and refresh logic for iOS and WatchOS (activated in YourPods settings).
-## Improvements & Fixes
--   **Robust Sync**: Enhanced sync reliability with background refresh and better handling of large queues.
--   **Performance**: Optimized data loading and playback start times.
--   **UI Refinements**: Added dates to episodes in the "In Progress" queue and improved adherence to system theme.
--   **Bug Fixes**: resolved crash issues related to CarPlay disconnect/reconnect and audio player state.
--   **Flutter Library**: Updated to the latest supported version of key flutter libraries.
+## New Features - Version 1.3.0
+-   **Unified Search**: Defaults to iTunes for extensive coverage, with optional support for **PodcastIndex** (requires personal API key).
+-   **Queue Redesign**:  Distinguished "Now Playing" and "Up Next" sections with visible episode lengths.
+-   **Sync Conflict Management**: Smart conflict resolution with options to keep your device's state or overwrite the server.
+-   **Audio Engine 2.0**: Rewritten audio handling to resolve Bluetooth dropouts and improve stability.
+-   **CarPlay & WatchOS Polish**: Smoother UI updates, reliable progress bars, and performance optimizations.
+-   **Modernization**: Updated codebase dependencies and improved build infrastructure.
 
 ### 🍎 Apple Ecosystem Integration
 - **CarPlay**: Full queue management and playback control with native UI.
 - **Apple Watch**: Standalone playback, offline episode transfer, and haptic controls.
+- **Dynamic Island**: Real-time playback status on supported iPhones.
 - **Siri Support**: Voice commands for hands-free playback.
-- **Universal Purchase**: Seamless experience across iPhone, iPad, and Mac.
+- **Universal Purchase**: Seamless experience across iPhone, iPad, Mac, Watch, and TV (soon 1.3.x feature, available in TestFlight).
 
 ### 🎧 Player Experience
+- **Live Transcripts**: Interactive, searchable transcripts with auto-scroll.
+- **Smart Chapters**: Embedded chapter support for easy navigation.
 - **Smart Queue**: Manual drag-and-drop reordering with "Move to Top/Bottom" quick actions.
 - **Precision Control**: Granular playback speed slider and custom sleep timers.
 - **Mini Player**: Persistent playback controls across the app.
-- **Metadata Caching**: Configurable cache duration for faster load times and reduced server strain.
+- **Metadata Caching**: Configurable cache duration for faster load times.
 
 ### ☁️ Sync & Privacy
 - **Self-Hosted**: Full compatibility with Nextcloud/gPodder.
 - **Privacy First**: No tracking, no analytics, no ads.
 - **Multi-Profile**: Switch between different servers or user accounts instantly.
 
+### 🔍 Discovery
+- **Unified Search**: Defaults to iTunes for extensive coverage, with optional support for **PodcastIndex** (requires personal API key).
+- **Add to Server**: Discover new podcasts in-app and instantly sync subscriptions to your self-hosted server.
+
 ## Technical
 
 - **Sync Backend**: Optimized for the [gpodder-sync](https://apps.nextcloud.com/apps/gpoddersync) Nextcloud app. Standard `gpodder` services may work but are not the primary focus.
 - **Protocol**: Implements the Open Podcast Sync protocol for subscriptions (`SubscriptionDelta`) and actions (`EpisodeAction`).
 - **Architecture**: Built with `provider` for state management and `just_audio` for robust playback.
+- **Platform Integration**: Native integrations for CarPlay (Swift), WatchOS (SwiftUI), tvOS (SwiftUI), and iOS Live Activities.
 - **Storage**: Uses `flutter_secure_storage` for credentials and local database for offline capability.
 
 ## Experimental: Linux Support
