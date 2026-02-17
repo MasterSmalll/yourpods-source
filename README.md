@@ -34,7 +34,7 @@ YourPods is a gPodder-compatible, privacy-first, and self-hosted podcast player.
 
 ## Installation
 
-The current codebase corresponds to the 1.2.2 release in the [Apple App Store](https://apps.apple.com/us/app/yourpods/id6757721236).
+The current codebase corresponds to the 1.3.0 release in the [Apple App Store](https://apps.apple.com/us/app/yourpods/id6757721236).
 
 - **App Store**: Get automatic updates and hassle-free installation. Purchasing the App Store version directly funds YourPods development! 🙏
 - **TestFlight**: Join the [TestFlight Beta](https://testflight.apple.com/join/jF18YknW) to test new features for free.
