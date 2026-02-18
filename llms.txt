@@ -1,6 +1,6 @@
 # YourPods
 
-> YourPods is a gPodder compatible, privacy-first and self-hosted podcast player for iOS, macOS, and Apple Watch. Sync your subscriptions and listening progress across all your devices using your own Nextcloud server.
+> YourPods is a gPodder-compatible, privacy-first, self-hosted podcast player for iOS, macOS, watchOS, tvOS, and Apple Watch. Sync your subscriptions and listening progress across all your devices using your own Nextcloud server. Version 1.3.0.
 
 ## Project Info
 
@@ -10,12 +10,58 @@
 
 ## Core Features
 
-- **Apple Ecosystem**: Optimized for iOS, macOS, watchOS, and CarPlay.
-- **Privacy**: No tracking, analytics, or ads. Self-hosted sync.
-- **Smart Queue**: Drag-and-drop management.
-- **Tech Stack**: Flutter, Provider, Just Audio, Hive/SQLite.
+- **Apple Ecosystem**: Optimized for iOS, macOS, watchOS, tvOS, and CarPlay with native integrations.
+- **Privacy**: No tracking, analytics, or ads. Fully self-hosted sync via Nextcloud/gPodder.
+- **Multi-Profile**: Switch between different servers or user accounts instantly. Local-only accounts supported.
+- **Sync Conflict Management**: Smart conflict resolution with options to keep local state or overwrite from server.
+- **Last Synced Timestamp**: Displays the last sync time in settings for transparency.
+
+## Player & Audio
+
+- **Audio Engine 2.0**: Rewritten audio handling resolving Bluetooth dropouts and improving stability.
+- **Live Transcripts**: Interactive, searchable transcripts with auto-scroll.
+- **Smart Chapters**: Embedded chapter support (RSS and ID3 tag-based) for easy navigation.
+- **Smart Queue**: Drag-and-drop reordering with "Now Playing" and "Up Next" sections, visible episode lengths, "Move to Top/Bottom" quick actions.
+- **Precision Control**: Granular playback speed slider and custom sleep timers.
+- **Mini Player**: Persistent playback controls across the app.
+- **Listening Stats**: Local listening history tracking.
+
+## Discovery
+
+- **Unified Search**: Defaults to iTunes for extensive coverage, with optional PodcastIndex support (requires personal API key).
+- **Add to Server**: Discover new podcasts in-app and instantly sync subscriptions to your self-hosted server.
+- **Metadata Caching**: Configurable cache duration for faster load times.
+- **Background Refresh**: Automatic episode fetching in the background.
+
+## Platform Integrations
+
+- **CarPlay**: Full queue management and playback control with native UI, optimized template updates.
+- **Apple Watch**: Standalone playback, offline episode transfer, and haptic controls.
+- **Apple TV (tvOS)**: Universal purchase support across iPhone, iPad, Mac, Watch, and TV.
+- **Dynamic Island**: Real-time playback status via Live Activities on supported iPhones.
+- **Siri Support**: Voice commands for hands-free playback.
+
+## Technical
+
+- **Tech Stack**: Flutter 3.10+, Provider for state management, Just Audio + Audio Service for playback.
+- **Sync Backend**: Optimized for the gpodder-sync Nextcloud app. Standard gPodder services may work but are not the primary focus.
+- **Protocol**: Implements the Open Podcast Sync protocol for subscriptions (SubscriptionDelta) and actions (EpisodeAction).
+- **Storage**: flutter_secure_storage for credentials, Hive/SQLite for local database and offline capability.
+- **Native Code**: CarPlay (Swift), watchOS (SwiftUI), tvOS (SwiftUI), iOS Live Activities.
+- **Key Dependencies**: just_audio, audio_service, flutter_carplay, dio, live_activities, watch_connectivity, background_fetch, dart_rss.
+
+## Architecture
+
+- `lib/api/` - Nextcloud/gPodder API integration
+- `lib/models/` - Data models (Podcast, Episode, etc.)
+- `lib/providers/` - State management (Provider pattern)
+- `lib/screens/` - UI screens (Player, Library, Settings, Search, History, Queue, Playlists, Profile Selection)
+- `lib/services/` - Core services (Audio, CarPlay, Chapters, Live Activities, Siri, Transcripts, Watch, Background Refresh, Listening Stats)
+- `lib/widgets/` - Reusable UI components
+- `lib/utils/` - Utility functions
 
 ## External Links
 
 - [Website](https://asecretcompany.com/yourpods/)
 - [App Store](https://apps.apple.com/us/app/yourpods/id6757721236)
+- [TestFlight Beta](https://testflight.apple.com/join/jF18YknW)
