@@ -17,7 +17,7 @@ layout: default
   </a>
 </p>
 
-YourPods is a **gPodder-compatible**, privacy-first, self-hosted podcast player. Sync your subscriptions and listening progress across all your devices using your own Nextcloud server, manage multiple profiles, and keep your data **100% yours**.
+YourPods is a clean, simple, and refreshing podcast experience. No app ads. Ever.  YourPodsis a **gPodder-compatible**, privacy-first, self-hosted friendly podcast player. Sync your subscriptions and listening progress across all your devices using your own Nextcloud server, manage multiple profiles, and keep your data **100% yours**.
 
 <p align="center">
   <a href="https://apps.apple.com/us/app/yourpods/id6757721236">
