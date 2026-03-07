@@ -17,6 +17,7 @@ import 'screens/settings_screen.dart';
 import 'screens/in_progress_screen.dart';
 import 'screens/profile_selection_screen.dart';
 import 'screens/home_screen.dart';
+import 'screens/podcast_import_screen.dart';
 import 'services/watch_service.dart';
 
 void main() async {
@@ -120,12 +121,17 @@ class _PodcastAppState extends State<PodcastApp> with WidgetsBindingObserver {
     final playerProvider = Provider.of<PlayerProvider>(context, listen: false);
     
     if (state == AppLifecycleState.paused || state == AppLifecycleState.detached) {
-        // App going to background or closing
+        // App going to background or closing — persist to disk first,
+        // then sync to server. Disk save is critical because force-quit
+        // can happen before the server upload completes.
+        playerProvider.forceSaveState();
         playerProvider.forceSync(action: 'play');
     } else if (state == AppLifecycleState.resumed) {
         // App coming to foreground
         playerProvider.forceSync(action: 'play');
         playerProvider.syncPlaybackState();
+        // Drain any episodes queued by background refresh while suspended
+        playerProvider.drainPendingAutoQueue();
     }
   }
 
@@ -171,6 +177,7 @@ class _PodcastAppState extends State<PodcastApp> with WidgetsBindingObserver {
             '/inprogress': (context) => const InProgressScreen(),
             '/profile_selection': (context) => const ProfileSelectionScreen(),
             '/home': (context) => const HomeScreen(),
+            '/import': (context) => const PodcastImportScreen(),
           },
         );
       },

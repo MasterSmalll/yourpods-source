@@ -1,4 +1,4 @@
-import 'dart:convert';
+
 import 'package:uuid/uuid.dart';
 
 class ServerProfile {
@@ -7,8 +7,9 @@ class ServerProfile {
   final String baseUrl;
   final String username;
   final String deviceId;
-  final bool savePassword; // Restored
-  String? password; // Restored
+  final bool isLocal; // New field
+  final String? password;
+  final bool savePassword;
   final int? lastAccessed;
 
   ServerProfile({
@@ -20,6 +21,7 @@ class ServerProfile {
     this.savePassword = false,
     this.password,
     this.lastAccessed,
+    this.isLocal = false, // Default to false
   }) : id = id ?? const Uuid().v4();
 
   // Create a copy with updated fields
@@ -31,9 +33,10 @@ class ServerProfile {
     bool? savePassword,
     String? password,
     int? lastAccessed,
+    bool? isLocal,
   }) {
     return ServerProfile(
-      id: this.id,
+      id: id,
       name: name ?? this.name,
       baseUrl: baseUrl ?? this.baseUrl,
       username: username ?? this.username,
@@ -41,6 +44,7 @@ class ServerProfile {
       savePassword: savePassword ?? this.savePassword,
       password: password ?? this.password,
       lastAccessed: lastAccessed ?? this.lastAccessed,
+      isLocal: isLocal ?? this.isLocal,
     );
   }
 
@@ -55,6 +59,7 @@ class ServerProfile {
       if (lastAccessed != null) 'lastAccessed': lastAccessed,
       // We only save password if requested
       if (savePassword) 'password': password,
+      'isLocal': isLocal,
     };
   }
 
@@ -68,6 +73,7 @@ class ServerProfile {
       savePassword: json['savePassword'] ?? false,
       password: json['password'],
       lastAccessed: json['lastAccessed'],
+      isLocal: json['isLocal'] ?? false,
     );
   }
 }

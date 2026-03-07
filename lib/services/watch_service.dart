@@ -5,22 +5,23 @@ import 'package:watch_connectivity/watch_connectivity.dart';
 import 'package:audio_service/audio_service.dart';
 import '../providers/download_provider.dart';
 import '../providers/settings_provider.dart';
+import '../providers/podcast_provider.dart';
 import '../services/audio_handler.dart';
 import '../services/log_service.dart';
 
 class WatchService {
   final _watch = WatchConnectivity();
-  
-  // Cache of sent episode IDs to avoid re-transferring same session
-  final Set<String> _sentEpisodeIds = {};
-  
-  // Track items currently transferring to avoid duplicates
-  final Set<String> _transferringIds = {};
 
-  SettingsProvider? _settings;
   DownloadProvider? _downloadProvider;
+  // ignore: unused_field — set via setPodcastProvider(), used for future on-demand episode resolution
+  PodcastProvider? _podcastProvider;
   
   String? _lastContextJson;
+  String? _lastLibraryJson;
+  
+  /// Merged application context — both queue and playback share this
+  /// so one doesn't overwrite the other.
+  final Map<String, dynamic> _currentContext = {};
 
   WatchService() {
     _init();
@@ -40,7 +41,6 @@ class WatchService {
     double speed = 1.0,
     bool skipSilence = false,
   }) async {
-    _settings = settings;
     _downloadProvider = downloadProvider;
 
     if (!settings.autoSyncToWatch) return;
@@ -87,31 +87,26 @@ class WatchService {
              'url': url,
              'artUri': item.artUri?.toString(),
              'isAvailableOnPhone': isDownloadedOnPhone,
+             'autoDownload': shouldAutoDownload,
              // Include chapters if available in extras
              if (item.extras?['chapters'] != null)
                'chapters': item.extras!['chapters'],
          });
-
-         // 2. Transfer File if needed (and valid)
-         if (shouldAutoDownload && isDownloadedOnPhone && url != null) {
-             _transferFileIfNeeded(item.id, url, downloadProvider);
-         }
       }
 
-      // 3. Update Application Context — A6: include speed & skipSilence
-      final newContext = {
-        'queue': contextQueue,
-        'speed': speed,
-        'skipSilence': skipSilence,
-      };
+      // 3. Update Application Context — merge into shared context
+      _currentContext['queue'] = contextQueue;
+      _currentContext['speed'] = speed;
+      _currentContext['skipSilence'] = skipSilence;
+      _currentContext['wifiOnly'] = settings.watchDownloadWiFiOnly;
       
-      final jsonStr = json.encode(newContext);
+      final jsonStr = json.encode(_currentContext);
       if (jsonStr == _lastContextJson) {
           Log.d('WatchService', 'Skipping sync (context unchanged)');
           return;
       }
       
-      await _watch.updateApplicationContext(newContext);
+      await _watch.updateApplicationContext(_currentContext);
       _lastContextJson = jsonStr;
       Log.d('WatchService', 'Application Context updated');
       
@@ -124,35 +119,7 @@ class WatchService {
     }
   }
   
-  Future<void> _transferFileIfNeeded(String id, String url, DownloadProvider downloadProvider) async {
-       // functionality not available in watch_connectivity 0.2.6
-       Log.w('WatchService', 'File transfer not supported in this version of watch_connectivity');
-       /*
-       if (_sentEpisodeIds.contains(id) || _transferringIds.contains(id)) return;
-       
-       final path = await downloadProvider.getDownloadedPath(url);
-       if (path != null) {
-           final file = File(path);
-           if (await file.exists()) {
-               Log.d('WatchService', 'Transferring file for episode $id');
-               _transferringIds.add(id);
-               
-               // Transfer file with metadata so watch knows which episode it is
-               _watch.transferFile(file, metadata: {
-                   'id': id,
-                   'url': url, // Key used to match streamUrl in watch
-               }).then((_) {
-                   Log.d('WatchService', 'Transfer initiated for $id');
-                   _sentEpisodeIds.add(id);
-                   _transferringIds.remove(id);
-               }).catchError((e) {
-                   Log.e('WatchService', 'Transfer failed for $id: $e');
-                   _transferringIds.remove(id);
-               });
-           }
-       }
-       */
-  }
+
 
   // Sync Playback State (Title, Artist, Playing Status)
   Future<void> updatePlaybackState({
@@ -171,14 +138,14 @@ class WatchService {
           // Note: isReachable is flaky on simulators, but checking it or just catching the specific error is safer.
           // We will rely on try-catch to keep it robust against "Watch App Not Installed".
 
-          final context = {
-              'playback_info': {
-                  'title': mediaItem?.title ?? 'Not Playing',
-                  'artist': mediaItem?.artist ?? '',
-                  'isPlaying': isPlaying,
-              }
-          };
-          await _watch.updateApplicationContext(context);
+           // Merge playback_info into shared context so it doesn't overwrite queue
+           _currentContext['playback_info'] = {
+               'title': mediaItem?.title ?? 'Not Playing',
+               'artist': mediaItem?.artist ?? '',
+               'isPlaying': isPlaying,
+               'episodeId': mediaItem?.id,
+           };
+           await _watch.updateApplicationContext(_currentContext);
       } catch (e) {
           // Suppress redundant logs for "Watch app is not installed" to avoid noise/crashes
           if (e.toString().contains('Watch app is not installed')) {
@@ -271,6 +238,17 @@ class WatchService {
                    });
                }
                break;
+           case 'request_library':
+               Log.d('WatchService', 'Received request_library from watch');
+               _onCustomCommand?.call('request_library', {});
+               break;
+           case 'request_episodes':
+               final feedUrl = message['feedUrl'] as String?;
+               if (feedUrl != null) {
+                   Log.d('WatchService', 'Received request_episodes for $feedUrl');
+                   _onCustomCommand?.call('request_episodes', {'feedUrl': feedUrl});
+               }
+               break;
       }
   }
 
@@ -281,25 +259,77 @@ class WatchService {
   }
   
   Future<void> _handleManualDownloadRequest(String episodeId) async {
-       if (_downloadProvider == null) return; // Can't do anything without provider
+       if (_downloadProvider == null) return;
        
-       // We need to find the item in current queue (or elsewhere) to get its URL
-       // For now, assume it's in the queue since that's what we synced
-       final queue = _audioHandler?.queue.value ?? [];
-       final item = queue.where((i) => i.id == episodeId).firstOrNull;
-       
-       if (item != null) {
-           final url = item.extras?['url'] as String?;
-           if (url != null) {
-               // Verify it is downloaded
-               final isDownloaded = await _downloadProvider!.isDownloaded(url);
-               if (isDownloaded) {
-                   await _transferFileIfNeeded(episodeId, url, _downloadProvider!);
-               } else {
-                   Log.w('WatchService', 'Requested episode $episodeId is not downloaded on phone.');
-                   // Optionally trigger download on phone? For now, just ignore or log.
-               }
-           }
-       }
+       // Episode downloads now happen directly on the watch via WatchDownloadManager.
+       // This message is a legacy path — the watch should use its own downloadOnWatch().
+       // We just log and acknowledge.
+       Log.d('WatchService', 'Manual download request for $episodeId — watch should use direct download');
+  }
+
+  void setPodcastProvider(PodcastProvider provider) {
+      _podcastProvider = provider;
+  }
+
+  /// Sync the podcast library (subscriptions) to the watch.
+  /// Sends a compact payload with top-3 episodes per podcast.
+  Future<void> syncLibrary(List<dynamic> subscriptions) async {
+      if (!Platform.isIOS) return;
+
+      try {
+          final isSupported = await _watch.isSupported;
+          if (!isSupported) return;
+
+          final isPaired = await _watch.isPaired;
+          if (!isPaired) return;
+
+          final List<Map<String, dynamic>> libraryData = [];
+          for (final podcast in subscriptions) {
+              libraryData.add({
+                  'title': podcast.title,
+                  'feedUrl': podcast.url,
+                  'artUri': podcast.logoUrl,
+                  'author': podcast.author ?? '',
+              });
+          }
+
+          final jsonStr = json.encode(libraryData);
+          if (jsonStr == _lastLibraryJson) {
+              Log.d('WatchService', 'Skipping library sync (unchanged)');
+              return;
+          }
+
+          await _watch.sendMessage({
+              'library': libraryData,
+          });
+          _lastLibraryJson = jsonStr;
+          Log.d('WatchService', 'Library synced: ${libraryData.length} podcasts');
+      } catch (e) {
+          if (e.toString().contains('Watch app is not installed')) {
+              Log.d('WatchService', 'Library sync skipped (Watch app not installed)');
+          } else {
+              Log.e('WatchService', 'Library sync failed: $e');
+          }
+      }
+  }
+
+  /// Send episodes for a specific podcast feed to the watch.
+  Future<void> sendEpisodesToWatch(String feedUrl, List<Map<String, dynamic>> episodes) async {
+      if (!Platform.isIOS) return;
+
+      try {
+          final isSupported = await _watch.isSupported;
+          if (!isSupported) return;
+
+          await _watch.sendMessage({
+              'episodes_for_feed': {
+                  'feedUrl': feedUrl,
+                  'episodes': episodes,
+              },
+          });
+          Log.d('WatchService', 'Sent ${episodes.length} episodes for $feedUrl to watch');
+      } catch (e) {
+          Log.e('WatchService', 'Failed to send episodes to watch: $e');
+      }
   }
 }

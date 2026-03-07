@@ -1,6 +1,7 @@
 import Foundation
 import WatchConnectivity
 import Combine
+import WatchKit
 
 struct WatchChapter: Identifiable, Codable {
     var id: Double { startTime }
@@ -23,28 +24,76 @@ struct WatchEpisode: Identifiable, Codable {
     let chapters: [WatchChapter]? // Episode chapters (if available)
 }
 
+struct WatchPodcast: Identifiable, Codable {
+    let id: String // feedUrl
+    let title: String
+    let feedUrl: String
+    let artUri: String?
+    let author: String
+}
+
 // MARK: - Download Manager for on-device downloads
 class WatchDownloadManager: NSObject, ObservableObject, URLSessionDownloadDelegate {
     static let shared = WatchDownloadManager()
+    static let backgroundSessionId = "com.asecretcompany.yourpods.watch.download"
+    
+    /// System-provided completion handler for background session events.
+    static var backgroundSessionCompletionHandler: (() -> Void)?
     
     @Published var activeDownloads: [String: Double] = [:] // episodeId -> progress (0.0-1.0)
     @Published var completedDownloads: Set<String> = []
     
     private var downloadTasks: [String: URLSessionDownloadTask] = [:]
     private var episodeInfo: [String: (url: String, title: String)] = [:]
+    private var downloadQueue: [(episodeId: String, url: String, title: String)] = []
+    private var stallTimers: [String: Timer] = [:]
+    private var lastBytesReceived: [String: Date] = [:]
+    
+    /// Whether to restrict downloads to Wi-Fi only (blocks watch cellular radio).
+    private var currentWifiOnly: Bool = true
     
     private lazy var session: URLSession = {
-        let config = URLSessionConfiguration.default
-        config.allowsCellularAccess = true
-        config.waitsForConnectivity = true
+        let config = URLSessionConfiguration.background(withIdentifier: Self.backgroundSessionId)
+        config.isDiscretionary = false          // download ASAP, not at system discretion
+        config.sessionSendsLaunchEvents = true  // wake app on download completion
+        config.allowsCellularAccess = true      // per-task override in startDownload()
         return URLSession(configuration: config, delegate: self, delegateQueue: .main)
     }()
     
     var onDownloadComplete: ((String, String) -> Void)? // (episodeId, localPath)
     
+    /// Check if battery is too low for downloads (< 10%)
+    private var isBatteryTooLow: Bool {
+        let device = WKInterfaceDevice.current()
+        device.isBatteryMonitoringEnabled = true
+        return device.batteryLevel >= 0 && device.batteryLevel < 0.10
+    }
+    
+    /// Max concurrent downloads to avoid radio contention
+    private let maxConcurrentDownloads = 1
+    
+    /// Update the Wi-Fi-only network policy. New downloads will respect this;
+    /// in-flight downloads are not interrupted.
+    func updateNetworkPolicy(wifiOnly: Bool) {
+        currentWifiOnly = wifiOnly
+    }
+    
     func startDownload(episodeId: String, url: String, title: String) {
         guard downloadTasks[episodeId] == nil else {
             print("Download already in progress for \(episodeId)")
+            return
+        }
+        
+        // Skip if battery too low
+        if isBatteryTooLow {
+            print("Skipping download for \(title) — battery too low")
+            return
+        }
+        
+        // Queue if max concurrent reached
+        if downloadTasks.count >= maxConcurrentDownloads {
+            print("Queueing download for \(title) (max concurrent reached)")
+            downloadQueue.append((episodeId: episodeId, url: url, title: title))
             return
         }
         
@@ -53,14 +102,33 @@ class WatchDownloadManager: NSObject, ObservableObject, URLSessionDownloadDelega
             return
         }
         
-        print("Starting on-watch download for: \(title)")
+        print("Starting on-watch download for: \(title) (wifiOnly: \(currentWifiOnly))")
         episodeInfo[episodeId] = (url, title)
         activeDownloads[episodeId] = 0.0
+        lastBytesReceived[episodeId] = Date()
         
-        let task = session.downloadTask(with: downloadUrl)
+        var request = URLRequest(url: downloadUrl)
+        request.allowsCellularAccess = !currentWifiOnly
+        
+        let task = session.downloadTask(with: request)
         task.taskDescription = episodeId
         downloadTasks[episodeId] = task
         task.resume()
+        
+        // Start stall detection timer (5 minutes)
+        startStallTimer(for: episodeId)
+    }
+    
+    private func startStallTimer(for episodeId: String) {
+        stallTimers[episodeId]?.invalidate()
+        stallTimers[episodeId] = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            if let lastReceived = self.lastBytesReceived[episodeId],
+               Date().timeIntervalSince(lastReceived) > 300 { // 5 minutes no progress
+                print("Download stalled for \(episodeId) — cancelling")
+                self.cancelDownload(episodeId: episodeId)
+            }
+        }
     }
     
     func cancelDownload(episodeId: String) {
@@ -68,6 +136,19 @@ class WatchDownloadManager: NSObject, ObservableObject, URLSessionDownloadDelega
         downloadTasks.removeValue(forKey: episodeId)
         activeDownloads.removeValue(forKey: episodeId)
         episodeInfo.removeValue(forKey: episodeId)
+        stallTimers[episodeId]?.invalidate()
+        stallTimers.removeValue(forKey: episodeId)
+        lastBytesReceived.removeValue(forKey: episodeId)
+        
+        // Start next queued download if any
+        processQueue()
+    }
+    
+    private func processQueue() {
+        guard downloadTasks.count < maxConcurrentDownloads,
+              !downloadQueue.isEmpty else { return }
+        let next = downloadQueue.removeFirst()
+        startDownload(episodeId: next.episodeId, url: next.url, title: next.title)
     }
     
     // MARK: - URLSessionDownloadDelegate
@@ -79,7 +160,6 @@ class WatchDownloadManager: NSObject, ObservableObject, URLSessionDownloadDelega
         let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
         
         // Sanitize episode ID to create a valid filename
-        // Replace invalid characters and hash if too long
         let sanitizedId = episodeId
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: ":", with: "_")
@@ -88,10 +168,8 @@ class WatchDownloadManager: NSObject, ObservableObject, URLSessionDownloadDelega
             .replacingOccurrences(of: "=", with: "_")
             .replacingOccurrences(of: " ", with: "_")
         
-        // If still too long, use a hash
         let filename: String
         if sanitizedId.count > 100 {
-            // Create a simple hash from the episode ID
             let hash = episodeId.data(using: .utf8)?.hashValue ?? Int.random(in: 0..<Int.max)
             filename = "episode_\(abs(hash)).mp3"
         } else {
@@ -100,31 +178,31 @@ class WatchDownloadManager: NSObject, ObservableObject, URLSessionDownloadDelega
         
         let destinationURL = documentsURL.appendingPathComponent(filename)
         
-        DispatchQueue.global(qos: .background).async {
-            let bgFileManager = FileManager.default
-            do {
-                // Remove existing file if present
-                if bgFileManager.fileExists(atPath: destinationURL.path) {
-                    try bgFileManager.removeItem(at: destinationURL)
-                }
-
-                // Move downloaded file
-                try fileManager.moveItem(at: location, to: destinationURL)
-
-                print("Download complete for \(episodeId): \(destinationURL.path)")
-
-                DispatchQueue.main.async {
-                    self.downloadTasks.removeValue(forKey: episodeId)
-                    self.activeDownloads.removeValue(forKey: episodeId)
-                    self.completedDownloads.insert(episodeId)
-                    self.onDownloadComplete?(episodeId, filename)
-                }
-            } catch {
-                print("Failed to move downloaded file: \(error)")
-                DispatchQueue.main.async {
-                    self.downloadTasks.removeValue(forKey: episodeId)
-                    self.activeDownloads.removeValue(forKey: episodeId)
-                }
+        // CRITICAL: For background URLSessions, the temp file at `location` is
+        // deleted when this callback returns. The file MUST be moved synchronously.
+        do {
+            if fileManager.fileExists(atPath: destinationURL.path) {
+                try fileManager.removeItem(at: destinationURL)
+            }
+            try fileManager.moveItem(at: location, to: destinationURL)
+            print("Download complete for \(episodeId): \(destinationURL.path)")
+            
+            DispatchQueue.main.async {
+                self.downloadTasks.removeValue(forKey: episodeId)
+                self.activeDownloads.removeValue(forKey: episodeId)
+                self.completedDownloads.insert(episodeId)
+                self.stallTimers[episodeId]?.invalidate()
+                self.stallTimers.removeValue(forKey: episodeId)
+                self.lastBytesReceived.removeValue(forKey: episodeId)
+                self.onDownloadComplete?(episodeId, filename)
+                self.processQueue()
+            }
+        } catch {
+            print("Failed to move downloaded file: \(error)")
+            DispatchQueue.main.async {
+                self.downloadTasks.removeValue(forKey: episodeId)
+                self.activeDownloads.removeValue(forKey: episodeId)
+                self.processQueue()
             }
         }
     }
@@ -138,6 +216,7 @@ class WatchDownloadManager: NSObject, ObservableObject, URLSessionDownloadDelega
         
         DispatchQueue.main.async {
             self.activeDownloads[episodeId] = progress
+            self.lastBytesReceived[episodeId] = Date()
         }
     }
     
@@ -149,6 +228,18 @@ class WatchDownloadManager: NSObject, ObservableObject, URLSessionDownloadDelega
         DispatchQueue.main.async {
             self.downloadTasks.removeValue(forKey: episodeId)
             self.activeDownloads.removeValue(forKey: episodeId)
+            self.stallTimers[episodeId]?.invalidate()
+            self.stallTimers.removeValue(forKey: episodeId)
+            self.lastBytesReceived.removeValue(forKey: episodeId)
+            self.processQueue()
+        }
+    }
+    
+    /// Called by the system when all background session events have been delivered.
+    nonisolated func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        DispatchQueue.main.async {
+            Self.backgroundSessionCompletionHandler?()
+            Self.backgroundSessionCompletionHandler = nil
         }
     }
 }
@@ -161,6 +252,11 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     @Published var remoteTitle: String = "Not Playing"
     @Published var remoteArtist: String = ""
     @Published var remoteIsPlaying: Bool = false
+    @Published var remoteEpisodeId: String? = nil
+    
+    // Library (subscriptions)
+    @Published var library: [WatchPodcast] = []
+    @Published var libraryEpisodes: [String: [WatchEpisode]] = [:] // feedUrl -> episodes
     
     // Track pending downloads (from iPhone) to show UI state if needed
     @Published var pendingDownloads: Set<String> = []
@@ -168,10 +264,17 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     // On-device download manager
     let downloadManager = WatchDownloadManager.shared
     
+    /// The currently-playing episode (looked up from episodes list)
+    var currentEpisode: WatchEpisode? {
+        guard let id = remoteEpisodeId else { return nil }
+        return episodes.first(where: { $0.id == id })
+    }
+    
     override init() {
         super.init()
         setupSession()
         loadEpisodes()
+        loadLibrary()
         setupDownloadHandler()
         setupBackgroundRefreshHandler()
     }
@@ -203,6 +306,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             }
         }
     }
+    
+
     
     /// Request fresh queue data from the iPhone.
     func requestQueueRefresh() {
@@ -351,6 +456,29 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 self.remoteTitle = info["title"] as? String ?? "Not Playing"
                 self.remoteArtist = info["artist"] as? String ?? ""
                 self.remoteIsPlaying = info["isPlaying"] as? Bool ?? false
+                self.remoteEpisodeId = info["episodeId"] as? String
+            }
+            
+            // Handle WiFi-only setting — push to download manager
+            if let wifiOnly = applicationContext["wifiOnly"] as? Bool {
+                self.downloadManager.updateNetworkPolicy(wifiOnly: wifiOnly)
+            }
+        }
+    }
+    
+    // Handle incoming messages (library data, episodes)
+    func session(_ session: WCSession, didReceiveMessage message: [String : Any]) {
+        DispatchQueue.main.async {
+            // Handle Library
+            if let libraryData = message["library"] as? [[String: Any]] {
+                self.handleLibraryUpdate(libraryData)
+            }
+            
+            // Handle Episodes for a specific feed
+            if let episodesData = message["episodes_for_feed"] as? [String: Any],
+               let feedUrl = episodesData["feedUrl"] as? String,
+               let episodes = episodesData["episodes"] as? [[String: Any]] {
+                self.handleEpisodesForFeed(feedUrl: feedUrl, episodesData: episodes)
             }
         }
     }
@@ -484,7 +612,116 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         }
         
         self.episodes = newEpisodes
-        self.saveEpisodes() 
+        self.saveEpisodes()
+        
+        // Auto-download episodes flagged for it
+        self.processAutoDownloads(queueData)
+    }
+    
+    private func processAutoDownloads(_ queueData: [[String: Any]]) {
+        for item in queueData {
+            guard let autoDownload = item["autoDownload"] as? Bool, autoDownload,
+                  let id = item["id"] as? String,
+                  let url = item["url"] as? String,
+                  let title = item["title"] as? String else { continue }
+            
+            // Skip if already downloaded
+            if let episode = episodes.first(where: { $0.id == id }), episode.localPath != nil { continue }
+            // Skip if already downloading
+            if downloadManager.activeDownloads[id] != nil { continue }
+            // Skip if completed in this session
+            if downloadManager.completedDownloads.contains(id) { continue }
+            
+            // Network policy (wifiOnly) is enforced per-task via
+            // URLRequest.allowsCellularAccess in WatchDownloadManager.startDownload().
+            // No manual NWPathMonitor check needed.
+            
+            print("[AutoDownload] Starting auto-download for \(title)")
+            downloadManager.startDownload(episodeId: id, url: url, title: title)
+        }
+    }
+    
+    // MARK: - Library
+    
+    private func handleLibraryUpdate(_ libraryData: [[String: Any]]) {
+        var newLibrary: [WatchPodcast] = []
+        for item in libraryData {
+            guard let feedUrl = item["feedUrl"] as? String else { continue }
+            let podcast = WatchPodcast(
+                id: feedUrl,
+                title: item["title"] as? String ?? "Unknown",
+                feedUrl: feedUrl,
+                artUri: item["artUri"] as? String,
+                author: item["author"] as? String ?? ""
+            )
+            newLibrary.append(podcast)
+        }
+        self.library = newLibrary
+        self.saveLibrary()
+        print("[WatchSession] Library updated: \(newLibrary.count) podcasts")
+    }
+    
+    private func handleEpisodesForFeed(feedUrl: String, episodesData: [[String: Any]]) {
+        var episodes: [WatchEpisode] = []
+        for item in episodesData {
+            guard let guid = item["guid"] as? String else { continue }
+            let episode = WatchEpisode(
+                id: guid,
+                title: item["title"] as? String ?? "Unknown",
+                album: "",
+                artist: "",
+                duration: item["duration"] as? Int ?? 0,
+                localPath: nil,
+                streamUrl: item["audioUrl"] as? String,
+                artUri: item["imageUrl"] as? String,
+                isAvailableOnPhone: false,
+                chapters: nil
+            )
+            episodes.append(episode)
+        }
+        self.libraryEpisodes[feedUrl] = episodes
+        print("[WatchSession] Got \(episodes.count) episodes for feed \(feedUrl)")
+    }
+    
+    func requestLibrary() {
+        guard WCSession.default.isReachable else {
+            print("[WatchSession] iPhone not reachable for library request")
+            return
+        }
+        WCSession.default.sendMessage(
+            ["command": "request_library"],
+            replyHandler: nil,
+            errorHandler: { error in
+                print("[WatchSession] Library request failed: \(error.localizedDescription)")
+            }
+        )
+    }
+    
+    func requestEpisodes(feedUrl: String) {
+        guard WCSession.default.isReachable else {
+            print("[WatchSession] iPhone not reachable for episodes request")
+            return
+        }
+        WCSession.default.sendMessage(
+            ["command": "request_episodes", "feedUrl": feedUrl],
+            replyHandler: nil,
+            errorHandler: { error in
+                print("[WatchSession] Episodes request failed: \(error.localizedDescription)")
+            }
+        )
+    }
+    
+    private func loadLibrary() {
+        if let data = UserDefaults.standard.data(forKey: "saved_library"),
+           let saved = try? JSONDecoder().decode([WatchPodcast].self, from: data) {
+            self.library = saved
+        }
+    }
+    
+    private func saveLibrary() {
+        if let data = try? JSONEncoder().encode(library) {
+            UserDefaults.standard.set(data, forKey: "saved_library")
+        }
     }
     
     // Handle File Transfer

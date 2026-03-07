@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -10,8 +13,10 @@ import '../providers/profile_provider.dart';
 import '../providers/settings_provider.dart';
 import '../widgets/conflict_resolution_dialog.dart';
 import '../models/sync_conflict.dart';
+import '../models/queue_sync_change.dart';
 import '../models/server_profile.dart';
 import 'package:uuid/uuid.dart';
+import 'package:file_picker/file_picker.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -28,6 +33,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _deviceIdController = TextEditingController(text: 'yourpods-ios');
   bool _saveConnection = true;
   bool _rememberPassword = true;
+  bool _isLocalAccount = false; // New state for local account creation
   String? _editingProfileId; // Track ID for updates
 
   bool _isInit = true;
@@ -59,7 +65,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           backgroundColor: const Color(0xFF1F1E27),
           title: const Text('Welcome to YourPods', style: TextStyle(color: Colors.white)),
           content: const Text(
-            'YourPods is intended to connect to your existing installed GPodder Sync compatable server. That functionality is not included with this app.',
+            'YourPods is designed to work best with a gPodder-compatible sync server (like Nextcloud), but you can also use it locally without syncing.',
             style: TextStyle(color: Colors.white70),
           ),
           actions: [
@@ -86,6 +92,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _passwordController.text = profile.password ?? '';
       _saveConnection = true; // Assumed since it exists
       _rememberPassword = profile.savePassword;
+      _isLocalAccount = profile.isLocal; // Load local state
     }
   }
 
@@ -95,11 +102,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final password = _passwordController.text.trim();
     final deviceId = _deviceIdController.text.trim();
 
-    if (baseUrl.isEmpty || username.isEmpty || deviceId.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Please fill all required fields')),
-        );
-        return;
+
+
+    if (_isLocalAccount) {
+         if (deviceId.isEmpty) {
+             ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Please enter a Device ID')),
+            );
+            return;
+         }
+         // Skip other checks
+    } else {
+        if (baseUrl.isEmpty || username.isEmpty || deviceId.isEmpty) {
+            ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Please fill all required fields')),
+            );
+            return;
+        }
     }
 
     // Warn if using HTTP — credentials will be sent in cleartext
@@ -136,49 +155,108 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (proceed != true) return;
     }
 
+
+
     // 1. Create API and verify (simple verification by creating access)
-    final api = GPodderApi(
-      baseUrl: baseUrl,
-      username: username,
-      password: password,
-    );
+    GPodderApi? api;
+    if (!_isLocalAccount) {
+        api = GPodderApi(
+          baseUrl: baseUrl,
+          username: username,
+          password: password,
+        );
+    }
     
     // 2. Update Providers
     final podcastProvider = Provider.of<PodcastProvider>(context, listen: false);
     final tempId = const Uuid().v4(); 
-    podcastProvider.setApi(api, tempId); // Always force refresh on manual connect/test
+    // Always force refresh on manual connect/test, or just set API
+    if (api != null) {
+        podcastProvider.setApi(api, tempId); 
+    } else if (_isLocalAccount) {
+        // Activate local profile in PodcastProvider so it knows the profile ID
+        podcastProvider.setApi(null, tempId);
+    }
     
     final playerProvider = Provider.of<PlayerProvider>(context, listen: false);
-    playerProvider.setApi(api, deviceId);
+    if (!_isLocalAccount) {
+        playerProvider.setApi(api!, deviceId, profileId: podcastProvider.currentProfileId);
+    } else {
+        // Pass null API for local account to prevent server sync from happening,
+        // but still pass profileId so the background audio service queue is correctly scoped.
+        playerProvider.setApi(null, deviceId, profileId: podcastProvider.currentProfileId);
+    }
 
     // 3. Save Profile if requested
     if (_saveConnection) {
         String profileName = _nameController.text.trim();
         if (profileName.isEmpty) {
-            profileName = username;
+            profileName = _isLocalAccount ? 'Local User' : username;
         }
 
         final profile = ServerProfile(
             id: _editingProfileId, // Pass ID to update existing
             name: profileName,
-            baseUrl: baseUrl,
-            username: username,
+            baseUrl: _isLocalAccount ? 'local://' : baseUrl,
+            username: _isLocalAccount ? 'Local User' : username,
             deviceId: deviceId,
             savePassword: _rememberPassword,
             password: _rememberPassword ? password : null,
+            isLocal: _isLocalAccount,
         );
         
         await Provider.of<ProfileProvider>(context, listen: false).saveProfile(profile);
     }
     
     // 4. Test connection via refresh
+    // Show loading overlay while syncing
+    if (mounted) {
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => const PopScope(
+          canPop: false,
+          child: Center(
+            child: Card(
+              color: Color(0xFF1F1E27),
+              child: Padding(
+                padding: EdgeInsets.all(32),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    CircularProgressIndicator(color: Colors.deepPurpleAccent),
+                    SizedBox(height: 16),
+                    Text('Syncing...', style: TextStyle(color: Colors.white70, fontSize: 16)),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
     try {
-      await podcastProvider.refreshSubscriptions(deviceId);
+      if (!_isLocalAccount) {
+          await podcastProvider.refreshSubscriptions(deviceId);
+      } else {
+          // For local, we just set the API (which sets profile ID and loads local storage)
+          // We need to actually "Activate" this profile fully
+          // The Save Profile above just saves it to list. 
+          // Use selectProfile to activate it
+          if (_editingProfileId != null) {
+             // We are editing, so we might need to re-select?
+          }
+          // The logic below just exits. The user will select it from list or we can auto-select.
+      }
+      
       if (mounted) {
-      Navigator.pushNamedAndRemoveUntil(context, '/home', (route) => false);
+        Navigator.of(context).pop(); // Dismiss loading overlay
+        Navigator.pushNamedAndRemoveUntil(context, '/home', (route) => false);
       }
     } catch (e) {
       if (mounted) {
+        Navigator.of(context).pop(); // Dismiss loading overlay
         String message = 'Connection failed: $e';
         if (e is GPodderAuthException) {
             message = 'Incorrect username or password.';
@@ -268,7 +346,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   @override
-  @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: Container(
@@ -306,9 +383,75 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           textAlign: TextAlign.center,
                         ),
                         const SizedBox(height: 48),
-                        AutofillGroup(
-                          child: Column(
-                            children: [
+                        Column(
+                          children: [
+                              // Toggle Account Type
+                              Container(
+                                decoration: BoxDecoration(
+                                  color: Colors.white.withOpacity(0.1),
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                margin: const EdgeInsets.only(bottom: 24),
+                                child: Row(
+                                  children: [
+                                    Expanded(
+                                      child: GestureDetector(
+                                          onTap: () {
+                                            setState(() {
+                                              _isLocalAccount = false;
+                                              if (_deviceIdController.text == 'yourpods-local' || _deviceIdController.text.isEmpty) {
+                                                _deviceIdController.text = 'yourpods-ios';
+                                              }
+                                            });
+                                          },
+                                          child: Container(
+                                            padding: const EdgeInsets.symmetric(vertical: 12),
+                                            decoration: BoxDecoration(
+                                              color: !_isLocalAccount ? Colors.deepPurple : Colors.transparent,
+                                              borderRadius: BorderRadius.circular(12),
+                                            ),
+                                            child: Text(
+                                              'Sync Account',
+                                              textAlign: TextAlign.center,
+                                              style: TextStyle(
+                                                color: !_isLocalAccount ? Colors.white : Colors.white70,
+                                                fontWeight: FontWeight.bold,
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    Expanded(
+                                      child: GestureDetector(
+                                        onTap: () {
+                                          setState(() {
+                                            _isLocalAccount = true;
+                                            if (_deviceIdController.text == 'yourpods-ios' || _deviceIdController.text.isEmpty) {
+                                              _deviceIdController.text = 'yourpods-local';
+                                            }
+                                          });
+                                        },
+                                        child: Container(
+                                          padding: const EdgeInsets.symmetric(vertical: 12),
+                                          decoration: BoxDecoration(
+                                            color: _isLocalAccount ? Colors.teal : Colors.transparent,
+                                            borderRadius: BorderRadius.circular(12),
+                                          ),
+                                          child: Text(
+                                            'Local Account',
+                                            textAlign: TextAlign.center,
+                                            style: TextStyle(
+                                              color: _isLocalAccount ? Colors.white : Colors.white70,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            
                               _buildTextField(
                                 _nameController, 
                                 'Account Name (Optional)',
@@ -316,55 +459,68 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                 textInputAction: TextInputAction.next,
                               ),
                               const SizedBox(height: 16),
-                              _buildTextField(
-                                _urlController, 
-                                'Nextcloud URL (e.g. https://cloud.com)',
-                                autofillHints: [AutofillHints.url],
-                                textInputAction: TextInputAction.next,
-                              ),
-                              const SizedBox(height: 16),
-                              _buildTextField(
-                                _userController, 
-                                'Username',
-                                autofillHints: [AutofillHints.username],
-                                textInputAction: TextInputAction.next,
-                              ),
-                              const SizedBox(height: 16),
-                              _buildTextField(
-                                _passwordController, 
-                                'Password', 
-                                obscureText: true,
-                                autofillHints: [AutofillHints.password],
-                                textInputAction: TextInputAction.next,
-                              ),
-                              const SizedBox(height: 16),
+                              
+                              if (!_isLocalAccount) ...[
+                                  _buildTextField(
+                                    _urlController, 
+                                    'Nextcloud URL (e.g. https://cloud.com)',
+                                    autofillHints: [AutofillHints.url],
+                                    textInputAction: TextInputAction.next,
+                                  ),
+                                  const SizedBox(height: 16),
+                                  _buildTextField(
+                                    _userController, 
+                                    'Username',
+                                    autofillHints: [AutofillHints.username],
+                                    textInputAction: TextInputAction.next,
+                                  ),
+                                  const SizedBox(height: 16),
+                                  _buildTextField(
+                                    _passwordController, 
+                                    'Password', 
+                                    obscureText: true,
+                                    autofillHints: [AutofillHints.password],
+                                    textInputAction: TextInputAction.next,
+                                  ),
+                                  const SizedBox(height: 16),
+                              ] else ...[
+                                  const Text(
+                                      'Local accounts do not sync with any server. Your data is stored only on this device.',
+                                      style: TextStyle(color: Colors.white54, fontStyle: FontStyle.italic),
+                                      textAlign: TextAlign.center,
+                                  ),
+                                  const SizedBox(height: 16),
+                              ],
+                              
                               _buildTextField(
                                 _deviceIdController, 
                                 'Device ID',
                                 textInputAction: TextInputAction.done,
                                 onSubmitted: (_) => _saveAndConnect(),
                               ),
-                            ],
-                          ),
+                          ],
                         ),
-                        const SizedBox(height: 16),
-                        CheckboxListTile(
-                            title: const Text('Save Connection Details', style: TextStyle(color: Colors.white)),
-                            value: _saveConnection,
-                            onChanged: (val) => setState(() => _saveConnection = val ?? true),
-                            activeColor: Colors.deepPurple,
-                            contentPadding: EdgeInsets.zero,
-                            controlAffinity: ListTileControlAffinity.leading,
-                        ),
-                        CheckboxListTile(
-                            title: const Text('Remember Password', style: TextStyle(color: Colors.white)),
-                            value: _rememberPassword,
-                            enabled: _saveConnection,
-                            onChanged: (val) => setState(() => _rememberPassword = val ?? true),
-                            activeColor: Colors.deepPurple,
-                            contentPadding: EdgeInsets.zero,
-                            controlAffinity: ListTileControlAffinity.leading,
-                        ),
+                        
+                        if (!_isLocalAccount) ...[
+                            const SizedBox(height: 16),
+                            CheckboxListTile(
+                                title: const Text('Save Connection Details', style: TextStyle(color: Colors.white)),
+                                value: _saveConnection,
+                                onChanged: (val) => setState(() => _saveConnection = val ?? true),
+                                activeColor: Colors.deepPurple,
+                                contentPadding: EdgeInsets.zero,
+                                controlAffinity: ListTileControlAffinity.leading,
+                            ),
+                            CheckboxListTile(
+                                title: const Text('Remember Password', style: TextStyle(color: Colors.white)),
+                                value: _rememberPassword,
+                                enabled: _saveConnection,
+                                onChanged: (val) => setState(() => _rememberPassword = val ?? true),
+                                activeColor: Colors.deepPurple,
+                                contentPadding: EdgeInsets.zero,
+                                controlAffinity: ListTileControlAffinity.leading,
+                            ),
+                        ],
                         const SizedBox(height: 32),
                         ElevatedButton(
                           onPressed: _saveAndConnect,
@@ -374,7 +530,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             padding: const EdgeInsets.symmetric(vertical: 16),
                             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                           ),
-                          child: const Text('Save & Sync', style: TextStyle(fontSize: 18)),
+                          child: Text(_isLocalAccount ? 'Create Local Account' : 'Save & Sync', style: const TextStyle(fontSize: 18)),
                         ),
                         const SizedBox(height: 24),
                         const Divider(color: Colors.white24),
@@ -384,7 +540,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           style: TextStyle(fontSize: 18, color: Colors.white, fontWeight: FontWeight.bold),
                         ),
                         const SizedBox(height: 16),
-                          Consumer<SettingsProvider>(
+                        Consumer<SettingsProvider>(
                           builder: (context, settings, _) {
                             return Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
@@ -426,46 +582,58 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                 ),
                                 const SizedBox(height: 16),
 
-                                const Text('Sync Interval (seconds)', style: TextStyle(color: Colors.white70)),
-                                const SizedBox(height: 8),
-                                TextField(
-                                    controller: TextEditingController(text: settings.syncInterval.toString()),
-                                    keyboardType: TextInputType.number,
-                                    style: const TextStyle(color: Colors.white),
-                                    decoration: InputDecoration(
-                                        filled: true,
-                                        fillColor: Colors.white.withOpacity(0.05),
-                                        border: OutlineInputBorder(
-                                            borderRadius: BorderRadius.circular(12),
-                                            borderSide: BorderSide.none,
-                                        ),
-                                        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-                                        hintText: 'Minimum 10 seconds',
-                                        hintStyle: const TextStyle(color: Colors.white30),
-                                    ),
-                                    onSubmitted: (val) {
-                                        final seconds = int.tryParse(val);
-                                        if (seconds != null) {
-                                            settings.setSyncInterval(seconds);
-                                        }
-                                    },
-                                    // Also update on focus lost if possible, but onSubmitted is good for now
-                                ),
-                                const Padding(
-                                    padding: EdgeInsets.only(top: 4, left: 4),
-                                    child: Text('Default: 30s. Minimum: 10s', style: TextStyle(color: Colors.white38, fontSize: 12)),
-                                ),
-                                const SizedBox(height: 16), // Add spacing
-                                const Divider(color: Colors.white24),
-                                ListTile(
-                                    title: const Text('Conflict Strategy', style: TextStyle(color: Colors.white)),
-                                    subtitle: Text(
-                                        _getStrategyLabel(settings.syncConflictStrategy),
-                                        style: const TextStyle(color: Colors.white54),
-                                    ),
-                                    trailing: const Icon(Icons.arrow_forward_ios, color: Colors.white54, size: 16),
-                                    onTap: () => _showStrategyPicker(context, settings),
-                                ),
+                                if (!_isLocalAccount) ...[
+                                  const SizedBox(height: 16),
+                                  const Text('Sync Interval (seconds)', style: TextStyle(color: Colors.white70)),
+                                  const SizedBox(height: 8),
+                                  TextField(
+                                      controller: TextEditingController(text: settings.syncInterval.toString()),
+                                      keyboardType: TextInputType.number,
+                                      style: const TextStyle(color: Colors.white),
+                                      decoration: InputDecoration(
+                                          filled: true,
+                                          fillColor: Colors.white.withOpacity(0.05),
+                                          border: OutlineInputBorder(
+                                              borderRadius: BorderRadius.circular(12),
+                                              borderSide: BorderSide.none,
+                                          ),
+                                          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+                                          hintText: 'Minimum 10 seconds',
+                                          hintStyle: const TextStyle(color: Colors.white30),
+                                      ),
+                                      onSubmitted: (val) {
+                                          final seconds = int.tryParse(val);
+                                          if (seconds != null) {
+                                              settings.setSyncInterval(seconds);
+                                          }
+                                      },
+                                  ),
+                                  const Padding(
+                                      padding: EdgeInsets.only(top: 4, left: 4),
+                                      child: Text('Default: 30s. Minimum: 10s', style: TextStyle(color: Colors.white38, fontSize: 12)),
+                                  ), // End Sync Interval
+                                  
+                                  const SizedBox(height: 16),
+                                  const Divider(color: Colors.white24),
+                                  ListTile(
+                                      title: const Text('Conflict Strategy', style: TextStyle(color: Colors.white)),
+                                      subtitle: Text(
+                                          _getStrategyLabel(settings.syncConflictStrategy),
+                                          style: const TextStyle(color: Colors.white54),
+                                      ),
+                                      trailing: const Icon(Icons.arrow_forward_ios, color: Colors.white54, size: 16),
+                                      onTap: () => _showStrategyPicker(context, settings),
+                                  ),
+                                  ListTile(
+                                      title: const Text('Queue Sync', style: TextStyle(color: Colors.white)),
+                                      subtitle: Text(
+                                          _getQueueSyncLabel(settings.queueSyncStrategy),
+                                          style: const TextStyle(color: Colors.white54),
+                                      ),
+                                      trailing: const Icon(Icons.arrow_forward_ios, color: Colors.white54, size: 16),
+                                      onTap: () => _showQueueSyncPicker(context, settings),
+                                  ),
+                                ],
                                 const SizedBox(height: 24),
                                 Row(
                                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -495,10 +663,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                 const SizedBox(height: 24),
                                 SwitchListTile(
                                     title: const Text('Sync to Apple Watch', style: TextStyle(color: Colors.white70)),
-                                    subtitle: const Text('Automatically transfer downloaded episodes to your watch', style: TextStyle(color: Colors.white38, fontSize: 12)),
+                                    subtitle: const Text('Automatically transfer downloaded episodes to your watch\nNote: The watch will sync with the last profile used on this device.', style: TextStyle(color: Colors.white38, fontSize: 12)),
                                     value: settings.autoSyncToWatch,
                                     onChanged: (val) => settings.setAutoSyncToWatch(val),
-                                    activeColor: Colors.deepPurpleAccent,
+                                    activeThumbColor: Colors.deepPurpleAccent,
                                     contentPadding: EdgeInsets.zero,
                                 ),
                                 if (settings.autoSyncToWatch) ...[
@@ -529,6 +697,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                             style: TextStyle(color: Colors.white38, fontSize: 12),
                                         ),
                                     ),
+                                    const SizedBox(height: 12),
+                                    SwitchListTile(
+                                        title: const Text('Download on WiFi Only', style: TextStyle(color: Colors.white70)),
+                                        subtitle: const Text(
+                                          'Restrict auto-downloads to WiFi to save battery and data',
+                                          style: TextStyle(color: Colors.white38, fontSize: 12),
+                                        ),
+                                        value: settings.watchDownloadWiFiOnly,
+                                        onChanged: (val) => settings.setWatchDownloadWiFiOnly(val),
+                                        activeThumbColor: Colors.deepPurpleAccent,
+                                        contentPadding: EdgeInsets.zero,
+                                    ),
                                 ],
                                 const SizedBox(height: 24),
                                 const Divider(color: Colors.white24),
@@ -542,7 +722,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                 SwitchListTile(
                                     title: const Text('Enable Background Refresh', style: TextStyle(color: Colors.white70)),
                                     subtitle: const Text(
-                                      'Refresh podcast feeds in the background to detect new episodes',
+                                      'Refresh podcast feeds in the background to detect new episodes.\nNote: Background refresh automatically skips local-only profiles.',
                                       style: TextStyle(color: Colors.white38, fontSize: 12),
                                     ),
                                     value: settings.backgroundRefreshEnabled,
@@ -556,7 +736,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                         BackgroundRefreshService().stop();
                                       }
                                     },
-                                    activeColor: Colors.deepPurpleAccent,
+                                    activeThumbColor: Colors.deepPurpleAccent,
                                     contentPadding: EdgeInsets.zero,
                                 ),
                                 if (settings.backgroundRefreshEnabled) ...[
@@ -704,44 +884,124 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                     ),
                                     value: settings.enableListenerStats,
                                     onChanged: (val) => settings.setEnableListenerStats(val),
-                                    activeColor: Colors.tealAccent,
+                                    activeThumbColor: Colors.tealAccent,
                                     contentPadding: EdgeInsets.zero,
                                 ),
                               ],
                             );
                           },
                         ),
+                        
+                        const SizedBox(height: 24),
+                        const Divider(color: Colors.white24),
+                        const SizedBox(height: 16),
+                        const Text(
+                          'Data Management',
+                          style: TextStyle(fontSize: 16, color: Colors.white, fontWeight: FontWeight.bold),
+                        ),
+                        const SizedBox(height: 8),
+                        ListTile(
+                          leading: const Icon(Icons.file_download, color: Colors.deepPurpleAccent),
+                          title: const Text('Import Podcasts', style: TextStyle(color: Colors.white)),
+                          subtitle: Text(
+                            _isLocalAccount
+                                ? 'Import from another podcast app (OPML)'
+                                : 'Import feeds not on your gPodder server',
+                            style: const TextStyle(color: Colors.white54, fontSize: 12),
+                          ),
+                          trailing: const Icon(Icons.arrow_forward_ios, color: Colors.white38, size: 16),
+                          onTap: () => Navigator.pushNamed(context, '/import'),
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                        ListTile(
+                          leading: const Icon(Icons.file_upload, color: Colors.deepPurpleAccent),
+                          title: const Text('Export Subscriptions', style: TextStyle(color: Colors.white)),
+                          subtitle: const Text(
+                            'Save subscriptions as OPML file',
+                            style: TextStyle(color: Colors.white54, fontSize: 12),
+                          ),
+                          trailing: const Icon(Icons.arrow_forward_ios, color: Colors.white38, size: 16),
+                          onTap: () => _exportOpml(context),
+                          contentPadding: EdgeInsets.zero,
+                        ),
                         const SizedBox(height: 24),
                         const SizedBox(height: 16),
-                        Row(
-                          children: [
-                            Expanded(
-                              child: ElevatedButton(
-                                onPressed: () => _pushSync(context),
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: Colors.blueAccent,
-                                  foregroundColor: Colors.white,
-                                  padding: const EdgeInsets.symmetric(vertical: 16),
-                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                                ),
-                                child: const Text('Push to Server', style: TextStyle(fontSize: 16)),
-                              ),
+                        
+                        if (!_isLocalAccount) ...[
+                            const SizedBox(height: 24),
+                            Consumer<PodcastProvider>(
+                              builder: (context, provider, _) {
+                                final lastSync = provider.lastSyncedAt;
+                                final label = lastSync != null
+                                    ? _formatTimeAgo(lastSync)
+                                    : 'Never';
+                                return Padding(
+                                  padding: const EdgeInsets.only(bottom: 16),
+                                  child: Row(
+                                    children: [
+                                      const Icon(Icons.sync, color: Colors.white38, size: 18),
+                                      const SizedBox(width: 8),
+                                      Text(
+                                        'Last synced: $label',
+                                        style: const TextStyle(color: Colors.white54, fontSize: 13),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              },
                             ),
-                            const SizedBox(width: 16),
-                            Expanded(
-                              child: ElevatedButton(
-                                onPressed: () => _pullSync(context),
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: Colors.green,
-                                  foregroundColor: Colors.white,
-                                  padding: const EdgeInsets.symmetric(vertical: 16),
-                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: ElevatedButton(
+                                    onPressed: () => _pushSync(context),
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: Colors.blueAccent,
+                                      foregroundColor: Colors.white,
+                                      padding: const EdgeInsets.symmetric(vertical: 16),
+                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                    ),
+                                    child: const Text('Push to Server', style: TextStyle(fontSize: 16)),
+                                  ),
                                 ),
-                                child: const Text('Pull from Server', style: TextStyle(fontSize: 16)),
-                              ),
+                                const SizedBox(width: 16),
+                                Expanded(
+                                  child: ElevatedButton(
+                                    onPressed: () => _pullSync(context),
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: Colors.green,
+                                      foregroundColor: Colors.white,
+                                      padding: const EdgeInsets.symmetric(vertical: 16),
+                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                    ),
+                                    child: const Text('Pull from Server', style: TextStyle(fontSize: 16)),
+                                  ),
+                                ),
+                              ],
                             ),
-                          ],
-                        ),
+                        ] else ...[
+                            const SizedBox(height: 24),
+                            Container(
+                                padding: const EdgeInsets.all(16),
+                                decoration: BoxDecoration(
+                                    color: Colors.teal.withOpacity(0.1),
+                                    borderRadius: BorderRadius.circular(12),
+                                    border: Border.all(color: Colors.teal.withOpacity(0.3)),
+                                ),
+                                child: const Row(
+                                    children: [
+                                        Icon(Icons.perm_device_information, color: Colors.tealAccent),
+                                        SizedBox(width: 16),
+                                        Expanded(
+                                            child: Text(
+                                                'Local Account Mode\nSyncing is disabled.',
+                                                style: TextStyle(color: Colors.tealAccent),
+                                            ),
+                                        ),
+                                    ],
+                                ),
+                            ),
+                        ],
                         const SizedBox(height: 24),
                       ],
                     ),
@@ -795,6 +1055,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
       }
   }
 
+  String _formatTimeAgo(DateTime dateTime) {
+    final diff = DateTime.now().difference(dateTime);
+    if (diff.inSeconds < 60) return 'just now';
+    if (diff.inMinutes < 60) {
+      final m = diff.inMinutes;
+      return '$m ${m == 1 ? 'minute' : 'minutes'} ago';
+    }
+    if (diff.inHours < 24) {
+      final h = diff.inHours;
+      return '$h ${h == 1 ? 'hour' : 'hours'} ago';
+    }
+    final d = diff.inDays;
+    return '$d ${d == 1 ? 'day' : 'days'} ago';
+  }
+
   void _showStrategyPicker(BuildContext context, SettingsProvider settings) {
       showModalBottomSheet(
           context: context,
@@ -828,6 +1103,105 @@ class _SettingsScreenState extends State<SettingsScreen> {
       );
   }
 
+  String _getQueueSyncLabel(QueueSyncStrategy strategy) {
+      switch (strategy) {
+          case QueueSyncStrategy.serverWins:
+              return 'Always update from server';
+          case QueueSyncStrategy.deviceWins:
+              return 'Keep device queue';
+          case QueueSyncStrategy.ask:
+              return 'Ask me';
+      }
+  }
+
+  void _showQueueSyncPicker(BuildContext context, SettingsProvider settings) {
+      showModalBottomSheet(
+          context: context,
+          backgroundColor: const Color(0xFF1F1E27),
+          shape: const RoundedRectangleBorder(
+              borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+          ),
+          builder: (context) {
+              return Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                      const SizedBox(height: 16),
+                      const Text('Queue Sync Strategy', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16)),
+                      const SizedBox(height: 8),
+                      const Padding(
+                          padding: EdgeInsets.symmetric(horizontal: 24),
+                          child: Text(
+                              'When other devices have queue changes, how should this device handle them?',
+                              style: TextStyle(color: Colors.white54, fontSize: 12),
+                              textAlign: TextAlign.center,
+                          ),
+                      ),
+                      const SizedBox(height: 16),
+                      _buildQueueSyncOption(context, settings, QueueSyncStrategy.ask, 'Ask me', 'Review changes before applying (recommended)'),
+                      _buildQueueSyncOption(context, settings, QueueSyncStrategy.serverWins, 'Always update from server', 'Automatically merge queue from server'),
+                      _buildQueueSyncOption(context, settings, QueueSyncStrategy.deviceWins, 'Keep device queue', 'Ignore server queue changes'),
+                      const SizedBox(height: 32),
+                  ],
+              );
+          }
+      );
+  }
+
+  Widget _buildQueueSyncOption(BuildContext context, SettingsProvider settings, QueueSyncStrategy strategy, String label, String subtitle) {
+      final isSelected = settings.queueSyncStrategy == strategy;
+      return ListTile(
+          title: Text(label, style: TextStyle(color: isSelected ? Colors.deepPurpleAccent : Colors.white)),
+          subtitle: Text(subtitle, style: TextStyle(color: isSelected ? Colors.deepPurpleAccent.withValues(alpha: 0.7) : Colors.white38, fontSize: 12)),
+          trailing: isSelected ? const Icon(Icons.check, color: Colors.deepPurpleAccent) : null,
+          onTap: () {
+              settings.setQueueSyncStrategy(strategy);
+              Navigator.pop(context);
+          },
+      );
+  }
+
+  void _exportOpml(BuildContext context) async {
+    final podcastProvider = Provider.of<PodcastProvider>(context, listen: false);
+    final opmlContent = podcastProvider.exportToOpml();
+    final bytes = utf8.encode(opmlContent);
+
+    try {
+      final outputPath = await FilePicker.platform.saveFile(
+        dialogTitle: 'Save OPML File',
+        fileName: 'yourpods_subscriptions.opml',
+        type: FileType.custom,
+        allowedExtensions: ['opml'],
+        bytes: Uint8List.fromList(bytes),
+      );
+
+      if (outputPath != null) {
+        // On desktop, saveFile returns a path but doesn't write bytes,
+        // so we need to write the file ourselves.
+        if (!Platform.isIOS && !Platform.isAndroid) {
+          final file = File(outputPath);
+          await file.writeAsString(opmlContent);
+        }
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Subscriptions exported successfully!'),
+              backgroundColor: Colors.green,
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Export failed: $e'),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
+    }
+  }
+
   Widget _buildTextField(
       TextEditingController controller, 
       String label, 
@@ -858,4 +1232,3 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 }
-

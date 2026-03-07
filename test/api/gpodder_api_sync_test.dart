@@ -4,7 +4,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:YourPods/api/gpodder_api.dart';
 
-import 'package:YourPods/models/podcast.dart'; // Correct package import assuming pubspec name
+// Correct package import assuming pubspec name
 
 void main() {
   group('GPodderApi Sync', () {

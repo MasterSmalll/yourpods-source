@@ -87,6 +87,15 @@ class _InProgressScreenState extends State<InProgressScreen> with SingleTickerPr
 
   @override
   Widget build(BuildContext context) {
+    final isLocal = Provider.of<ProfileProvider>(context).currentProfile?.isLocal ?? false;
+    
+    // Safety check: if local profile somehow loaded with server tab selected, revert it
+    if (isLocal && _currentQueueType == 'Synced with Server') {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) setState(() => _currentQueueType = 'Device Queue');
+        });
+    }
+
     return Scaffold(
       appBar: AppBar(
         title: Text(_isSelectionMode ? '${_selectedIndices.length} Selected' : 'In Progress'),
@@ -155,7 +164,8 @@ class _InProgressScreenState extends State<InProgressScreen> with SingleTickerPr
                                 // Filter Dropdown
                                 const Text('Filter: ', style: TextStyle(color: Colors.white70)),
                                 const SizedBox(width: 8),
-                                Container(
+                                Flexible(
+                                  child: Container(
                                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 0),
                                     decoration: BoxDecoration(
                                         color: const Color(0xFF2A2935),
@@ -167,6 +177,7 @@ class _InProgressScreenState extends State<InProgressScreen> with SingleTickerPr
                                             dropdownColor: const Color(0xFF2A2935),
                                             icon: const Icon(Icons.arrow_drop_down, color: Colors.deepPurpleAccent),
                                             style: const TextStyle(color: Colors.white),
+                                            isExpanded: true,
                                             onChanged: (String? newValue) {
                                                 if (newValue != null) {
                                                     setState(() {
@@ -183,6 +194,7 @@ class _InProgressScreenState extends State<InProgressScreen> with SingleTickerPr
                                                 }).toList(),
                                         ),
                                     ),
+                                  ),
                                 ),
                                 
                                 const Spacer(),
@@ -211,7 +223,7 @@ class _InProgressScreenState extends State<InProgressScreen> with SingleTickerPr
                                                     });
                                                 }
                                             },
-                                            items: <String>['Device Queue', 'Synced with Server']
+                                            items: (isLocal ? <String>['Device Queue'] : <String>['Device Queue', 'Synced with Server'])
                                                 .map<DropdownMenuItem<String>>((String value) {
                                                     return DropdownMenuItem<String>(
                                                         value: value,
@@ -280,7 +292,22 @@ class _InProgressScreenState extends State<InProgressScreen> with SingleTickerPr
                                                             child: Text('No in-progress episodes on server.',
                                                                 style: TextStyle(color: Colors.white70)))
                                                         : RefreshIndicator(
-                                                            onRefresh: _loadData,
+                                                            onRefresh: () async {
+                                                                await _loadData();
+                                                                // Auto-queue: drain any pending episodes from buffer
+                                                                // (buffer is populated by Library refresh, background refresh, or app resume)
+                                                                if (!context.mounted) return;
+                                                                final playerProvider = Provider.of<PlayerProvider>(context, listen: false);
+                                                                final autoQueued = await playerProvider.drainPendingAutoQueue();
+                                                                if (autoQueued > 0 && context.mounted) {
+                                                                    ScaffoldMessenger.of(context).showSnackBar(
+                                                                        SnackBar(
+                                                                            content: Text('Auto-queued $autoQueued new episodes'),
+                                                                            behavior: SnackBarBehavior.floating,
+                                                                        ),
+                                                                    );
+                                                                }
+                                                            },
                                                             child: ListView.builder(
                                                                 padding: const EdgeInsets.only(left: 16, right: 16, top: 8, bottom: 120),
                                                                 itemCount: _inProgressEpisodes.length,

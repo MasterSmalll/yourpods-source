@@ -4,10 +4,11 @@ import 'package:shared_preferences/shared_preferences.dart'; // Tutorial
 import 'package:audio_service/audio_service.dart';
 import '../providers/player_provider.dart';
 import '../providers/download_provider.dart';
-// import '../providers/podcast_provider.dart'; // import for future improved filtering
+// PodcastProvider / ProfileProvider not needed here — auto-queue buffer is
+// drained without a feed refresh (Library screen handles the heavy refresh).
 import 'queue_episode_tile.dart';
 import 'conflict_resolution_dialog.dart';
-import '../models/sync_conflict.dart';
+import 'queue_sync_dialog.dart';
 
 class QueueList extends StatefulWidget {
   final String currentFilter;
@@ -25,6 +26,8 @@ class QueueList extends StatefulWidget {
 
 class _QueueListState extends State<QueueList> {
   // Filter state moved to parent
+  bool _isSelectionMode = false;
+  final Set<String> _selectedItemIds = {};
 
   @override
   void initState() {
@@ -40,7 +43,7 @@ class _QueueListState extends State<QueueList> {
             context: context,
             builder: (context) => AlertDialog(
                 title: const Text('Reordering Episodes', style: TextStyle(color: Colors.white)),
-                content: const Text('You can long-press on any episode in the "All" list to drag and reorder it.', style: TextStyle(color: Colors.white70)),
+                content: const Text('Use the drag handle (≡) on the right to reorder episodes. Long-press to select multiple episodes for bulk actions.', style: TextStyle(color: Colors.white70)),
                 backgroundColor: const Color(0xFF2A2935),
                 actions: [
                     TextButton(
@@ -56,10 +59,64 @@ class _QueueListState extends State<QueueList> {
     }
   }
 
+  void _toggleSelection(String itemId) {
+    setState(() {
+      if (_selectedItemIds.contains(itemId)) {
+        _selectedItemIds.remove(itemId);
+        if (_selectedItemIds.isEmpty) _isSelectionMode = false;
+      } else {
+        _selectedItemIds.add(itemId);
+        _isSelectionMode = true;
+      }
+    });
+  }
+
+  void _exitSelectionMode() {
+    setState(() {
+      _isSelectionMode = false;
+      _selectedItemIds.clear();
+    });
+  }
+
+  Future<void> _removeSelected(PlayerProvider player) async {
+    final queue = player.queue;
+    final itemsToRemove = queue.where((item) => _selectedItemIds.contains(item.id)).toList();
+    for (var item in itemsToRemove) {
+      await player.removeFromQueue(item);
+    }
+    _exitSelectionMode();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Column(
       children: [
+        // Selection Mode Action Bar
+        if (_isSelectionMode)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            color: Colors.deepPurple.withOpacity(0.3),
+            child: Consumer<PlayerProvider>(
+              builder: (context, player, _) => Row(
+                children: [
+                  Text(
+                    '${_selectedItemIds.length} selected',
+                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                  ),
+                  const Spacer(),
+                  TextButton.icon(
+                    icon: const Icon(Icons.delete, color: Colors.redAccent, size: 18),
+                    label: const Text('Remove', style: TextStyle(color: Colors.redAccent)),
+                    onPressed: _selectedItemIds.isEmpty ? null : () => _removeSelected(player),
+                  ),
+                  TextButton(
+                    onPressed: _exitSelectionMode,
+                    child: const Text('Cancel', style: TextStyle(color: Colors.white70)),
+                  ),
+                ],
+              ),
+            ),
+          ),
         // Filter Dropdown moved to parent
         
         Expanded(
@@ -94,10 +151,29 @@ class _QueueListState extends State<QueueList> {
                       }
                   }
                   
-                  // If we didn't find current in queue (e.g. queue cleared but playing), 
-                  // maybe we should just show the queue as is?
-                  // But usually current IS in queue. 
-                  // If currentId is null (nothing playing), everything is Up Next.
+                  // If the currently playing episode isn't in the queue
+                  // (e.g. direct play from episode list), use the audio
+                  // handler's mediaItem so "Now Playing" still appears.
+                  if (nowPlayingItem == null && currentId != null) {
+                      final handlerItem = player.queue.cast<MediaItem?>().firstWhere(
+                          (i) => i?.id == currentId, orElse: () => null);
+                      if (handlerItem != null) {
+                          nowPlayingItem = handlerItem;
+                      } else {
+                          // Build a synthetic MediaItem from currentEpisode
+                          final ep = player.currentEpisode;
+                          if (ep != null) {
+                              nowPlayingItem = MediaItem(
+                                  id: ep.guid,
+                                  title: ep.title,
+                                  album: player.currentPodcast?.title ?? '',
+                                  artUri: ep.imageUrl != null ? Uri.tryParse(ep.imageUrl!) : null,
+                                  duration: ep.duration,
+                                  extras: {'url': ep.audioUrl},
+                              );
+                          }
+                      }
+                  }
 
                   // 3. Apply Filters to *Up Next* (Now Playing is always shown if it matches, or maybe specifically handled?)
                   // The user likely wants to see Now Playing regardless of filter, OR matching filter.
@@ -138,7 +214,7 @@ class _QueueListState extends State<QueueList> {
                   
                   bool showNowPlaying = false;
                   if (nowPlayingItem != null) {
-                      showNowPlaying = matchesFilter(nowPlayingItem!);
+                      showNowPlaying = matchesFilter(nowPlayingItem);
                   }
 
                   if (!showNowPlaying && filteredUpNext.isEmpty) {
@@ -159,9 +235,28 @@ class _QueueListState extends State<QueueList> {
                   if (widget.currentFilter == 'All') {
                       return RefreshIndicator(
                         onRefresh: () async {
-                            final conflicts = await player.syncPlaybackState(force: true);
-                            if (context.mounted && conflicts.isNotEmpty) {
-                                ConflictResolutionDialog.show(context, conflicts);
+                            final result = await player.syncPlaybackState(force: true);
+                            if (context.mounted && result.hasConflicts) {
+                                ConflictResolutionDialog.show(context, result.conflicts);
+                            }
+                            if (context.mounted && result.hasQueueChanges) {
+                                final accepted = await QueueSyncDialog.show(context, result.queueChanges);
+                                if (accepted != null && context.mounted) {
+                                    await player.applyQueueSyncChanges(accepted.where((c) => c.accepted).toList());
+                                }
+                            }
+                            // Auto-queue: drain any pending episodes from buffer
+                            // (buffer is populated by Library refresh, background refresh, or app resume)
+                            if (context.mounted) {
+                                final autoQueued = await player.drainPendingAutoQueue();
+                                if (autoQueued > 0 && context.mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                        SnackBar(
+                                            content: Text('Auto-queued $autoQueued new episodes'),
+                                            behavior: SnackBarBehavior.floating,
+                                        ),
+                                    );
+                                }
                             }
                         },
                         child: CustomScrollView(
@@ -175,8 +270,8 @@ class _QueueListState extends State<QueueList> {
                                           children: [
                                               _buildSectionHeader("Now Playing"),
                                               QueueEpisodeTile(
-                                                  key: ValueKey(nowPlayingItem!.id),
-                                                  item: nowPlayingItem!,
+                                                  key: ValueKey(nowPlayingItem.id),
+                                                  item: nowPlayingItem,
                                                   index: -1, // Not reorderable
                                                   isReorderingAllowed: false,
                                                   onTap: () => player.playMediaItem(nowPlayingItem!),
@@ -197,6 +292,22 @@ class _QueueListState extends State<QueueList> {
                                    SliverToBoxAdapter(child: _buildSectionHeader("Up Next")),
 
                               SliverReorderableList(
+                                  proxyDecorator: (child, index, animation) {
+                                      return AnimatedBuilder(
+                                          animation: animation,
+                                          builder: (context, child) {
+                                              final double elevation = Tween<double>(begin: 0, end: 6).animate(animation).value;
+                                              return Material(
+                                                  elevation: elevation,
+                                                  color: const Color(0xFF2A2935),
+                                                  shadowColor: Colors.black54,
+                                                  borderRadius: BorderRadius.circular(12),
+                                                  child: child,
+                                              );
+                                          },
+                                          child: child,
+                                      );
+                                  },
                                   itemBuilder: (context, index) {
                                       final item = filteredUpNext[index];
                                       return QueueEpisodeTile(
@@ -205,15 +316,13 @@ class _QueueListState extends State<QueueList> {
                                           index: index,
                                           isReorderingAllowed: true,
                                           onTap: () => player.playMediaItem(item), 
+                                          onRemove: () => player.removeFromQueue(item),
+                                          isSelectionMode: _isSelectionMode,
+                                          isSelected: _selectedItemIds.contains(item.id),
+                                          onSelectChanged: (_) => _toggleSelection(item.id),
                                           onMoveToTop: () {
-                                              // We need absolute index in original queue
                                               final originalIndex = queue.indexOf(item);
-                                              if (originalIndex != -1) player.reorderQueue(originalIndex, 0); // Logic might differ if Now Playing is at 0?
-                                              // reorderQueue(old, new). 
-                                              // If Now Playing is at 0, moving to 0 replaces it? 
-                                              // Usually Now Playing is index 0. 
-                                              // If we move to 0, does it become Now Playing?
-                                              // Yes.
+                                              if (originalIndex != -1) player.reorderQueue(originalIndex, 0);
                                           },
                                           onMoveToBottom: () {
                                                final originalIndex = queue.indexOf(item);
@@ -259,9 +368,28 @@ class _QueueListState extends State<QueueList> {
                       // Filtered View (No reorder)
                       return RefreshIndicator(
                         onRefresh: () async {
-                            final conflicts = await player.syncPlaybackState(force: true);
-                            if (context.mounted && conflicts.isNotEmpty) {
-                                ConflictResolutionDialog.show(context, conflicts);
+                            final result = await player.syncPlaybackState(force: true);
+                            if (context.mounted && result.hasConflicts) {
+                                ConflictResolutionDialog.show(context, result.conflicts);
+                            }
+                            if (context.mounted && result.hasQueueChanges) {
+                                final accepted = await QueueSyncDialog.show(context, result.queueChanges);
+                                if (accepted != null && context.mounted) {
+                                    await player.applyQueueSyncChanges(accepted.where((c) => c.accepted).toList());
+                                }
+                            }
+                            // Auto-queue: drain any pending episodes from buffer
+                            // (buffer is populated by Library refresh, background refresh, or app resume)
+                            if (context.mounted) {
+                                final autoQueued = await player.drainPendingAutoQueue();
+                                if (autoQueued > 0 && context.mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                        SnackBar(
+                                            content: Text('Auto-queued $autoQueued new episodes'),
+                                            behavior: SnackBarBehavior.floating,
+                                        ),
+                                    );
+                                }
                             }
                         },
                         child: CustomScrollView(
@@ -275,8 +403,8 @@ class _QueueListState extends State<QueueList> {
                                           children: [
                                               _buildSectionHeader("Now Playing"),
                                               QueueEpisodeTile(
-                                                  key: ValueKey(nowPlayingItem!.id),
-                                                  item: nowPlayingItem!,
+                                                  key: ValueKey(nowPlayingItem.id),
+                                                  item: nowPlayingItem,
                                                   index: -1,
                                                   isReorderingAllowed: false,
                                                   onTap: () => player.playMediaItem(nowPlayingItem!),
@@ -297,6 +425,10 @@ class _QueueListState extends State<QueueList> {
                                               index: index,
                                               isReorderingAllowed: false,
                                               onTap: () => player.playMediaItem(item),
+                                              onRemove: () => player.removeFromQueue(item),
+                                              isSelectionMode: _isSelectionMode,
+                                              isSelected: _selectedItemIds.contains(item.id),
+                                              onSelectChanged: (_) => _toggleSelection(item.id),
                                           );
                                       },
                                       childCount: filteredUpNext.length,

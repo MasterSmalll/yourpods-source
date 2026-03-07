@@ -47,6 +47,19 @@ struct ContentView: View {
                     }
                 }
                 
+                // MARK: - Library
+                Section {
+                    NavigationLink(destination: WatchLibraryView()) {
+                        HStack {
+                            Image(systemName: "books.vertical.fill")
+                                .foregroundColor(.blue)
+                                .font(.title3)
+                            Text("Library")
+                                .font(.headline)
+                        }
+                    }
+                }
+                
                 // MARK: - Episode Queue
                 if sessionManager.episodes.isEmpty {
                     Section {

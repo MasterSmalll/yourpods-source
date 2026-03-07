@@ -56,12 +56,14 @@ YourPods is a clean, simple, and refreshing podcast experience. No app ads. Ever
 
 ---
 
-## What's New in 1.3.0
+## What's New in 1.3.1
 
-- **Audio Engine 2.0** — Rewritten audio handling to resolve Bluetooth dropouts and improve stability
-- **Queue Redesign** — Distinguished "Now Playing" and "Up Next" sections with visible episode lengths
-- **Sync Conflict Management** — Smart conflict resolution with options to keep local or server state
-- **CarPlay & WatchOS Polish** — Smoother UI updates, reliable progress bars, and performance optimizations
+- **Cross-Device Queue Sync** — Your queue now syncs across devices via your gPodder server
+- **OPML Import & Export** — Easily migrate subscriptions to or from other apps, or back up your library
+- **Password-Protected Feeds** — Subscribe to private RSS feeds (Patreon, premium podcasts)
+- **Local Accounts** — Use YourPods without a sync server for fully offline podcast management
+- **Bluetooth & Car Display Metadata** — Podcast author name now appears on car dashboards and speakers
+- **Streaming Resilience** — Playback recovers gracefully from network drops
 
 ---
 

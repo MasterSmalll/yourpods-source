@@ -49,6 +49,8 @@ ios/*.mobileprovision
 ios/*.p12
 ios/*.sks
 ios/Pods/
+mcp_test/
+test/
 
 # Mac
 macos/Flutter/ephemeral/
@@ -71,3 +73,7 @@ linux/flutter/ephemeral/
 !.env.example
 secrets.json
 antigravity/
+ROADMAP.md
+Payload/
+SwiftSupport/
+Symbols/

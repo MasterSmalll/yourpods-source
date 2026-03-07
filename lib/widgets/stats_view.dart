@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../services/listening_stats_service.dart';
-import '../models/podcast.dart';
 
 class StatsView extends StatelessWidget {
   final ListeningStats stats;

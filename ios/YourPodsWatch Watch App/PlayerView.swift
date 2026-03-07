@@ -32,6 +32,17 @@ struct PlayerView: View {
     @State private var hasSetupAudio = false
     @State private var chaptersExpanded = false
     @State private var lastSyncTime = Date()
+    @State private var bufferStallStart: Date? = nil
+    
+    /// Max seconds of continuous buffering before we stop playback
+    private let maxBufferStallSeconds: TimeInterval = 30
+    
+    /// Check if battery is too low for streaming
+    private var isBatteryTooLow: Bool {
+        let device = WKInterfaceDevice.current()
+        device.isBatteryMonitoringEnabled = true
+        return device.batteryLevel >= 0 && device.batteryLevel < 0.10
+    }
 
     var body: some View {
         ScrollView {
@@ -287,10 +298,16 @@ struct PlayerView: View {
         
         // 2. Fallback to Stream
         if urlToPlay == nil {
-            if let streamUrl = episode.streamUrl, let remote = URL(string: streamUrl) {
-                playbackSource = .streaming
-                urlToPlay = remote
-            } else {
+           if let streamUrl = episode.streamUrl, let remote = URL(string: streamUrl) {
+               // Battery guard for streaming
+               if isBatteryTooLow {
+                   playbackSource = .none
+                   statusText = "Battery too low to stream"
+                   return
+               }
+               playbackSource = .streaming
+               urlToPlay = remote
+           } else {
                 playbackSource = .none
                 statusText = "No audio source"
                 return
@@ -367,15 +384,31 @@ struct PlayerView: View {
 
                 if let error = p.currentItem?.error {
                     statusText = "Error: \(error.localizedDescription)"
+                    bufferStallStart = nil
                 } else if p.status == .failed {
                     statusText = "Failed"
+                    bufferStallStart = nil
                 } else if p.timeControlStatus == .playing {
+                    bufferStallStart = nil
                     let mins = Int(progress) / 60
                     let secs = Int(progress) % 60
                     statusText = playbackSource == .streaming 
                         ? "Streaming \(mins):\(String(format: "%02d", secs))"
                         : "Playing \(mins):\(String(format: "%02d", secs))"
                 } else if p.timeControlStatus == .waitingToPlayAtSpecifiedRate {
+                    // Buffer stall detection
+                    if bufferStallStart == nil {
+                        bufferStallStart = Date()
+                    } else if let start = bufferStallStart,
+                              Date().timeIntervalSince(start) > maxBufferStallSeconds {
+                        // Stalled too long, stop playback
+                        p.pause()
+                        isPlaying = false
+                        timer?.invalidate()
+                        statusText = "Stopped: buffering too long"
+                        bufferStallStart = nil
+                        return
+                    }
                     statusText = "Buffering..."
                 }
             }

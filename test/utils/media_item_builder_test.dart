@@ -9,6 +9,7 @@ void main() {
         url: 'https://test.com/feed.xml',
         title: 'Test Podcast',
         logoUrl: 'https://test.com/logo.png',
+        author: 'Test Author',
       );
       
       final episode = Episode(
@@ -25,6 +26,7 @@ void main() {
       expect(item.id, 'ep1');
       expect(item.title, 'Episode 1');
       expect(item.album, 'Test Podcast');
+      expect(item.artist, 'Test Author');
       expect(item.duration, const Duration(seconds: 300));
       expect(item.artUri.toString(), 'https://test.com/ep1.png');
       expect(item.extras?['url'], 'https://test.com/ep1.mp3');
@@ -58,6 +60,47 @@ void main() {
        
        expect(item.extras?['custom_key'], 123);
        expect(item.extras?['url'], 'a'); // Standard key still added
+    });
+
+    test('artist falls back to empty string when podcast author is null', () {
+      final podcast = Podcast(url: 'p', title: 'P');
+      final episode = Episode(guid: 'e', title: 'E');
+
+      final item = MediaItemBuilder.fromEpisode(podcast, episode);
+
+      expect(item.artist, '');
+    });
+
+    test('artist falls back to empty string when podcast is null', () {
+      final episode = Episode(guid: 'e', title: 'E');
+
+      final item = MediaItemBuilder.fromEpisode(null, episode);
+
+      expect(item.artist, '');
+    });
+
+    test('pubDate is included in extras as ISO 8601 string', () {
+      final pubDate = DateTime.utc(2025, 6, 15, 10, 30);
+      final podcast = Podcast(url: 'p', title: 'P');
+      final episode = Episode(
+        guid: 'e',
+        title: 'E',
+        audioUrl: 'a',
+        pubDate: pubDate,
+      );
+
+      final item = MediaItemBuilder.fromEpisode(podcast, episode);
+
+      expect(item.extras?['pubDate'], pubDate.toIso8601String());
+    });
+
+    test('pubDate is absent from extras when episode has no pubDate', () {
+      final podcast = Podcast(url: 'p', title: 'P');
+      final episode = Episode(guid: 'e', title: 'E', audioUrl: 'a');
+
+      final item = MediaItemBuilder.fromEpisode(podcast, episode);
+
+      expect(item.extras?.containsKey('pubDate'), isFalse);
     });
   });
 }

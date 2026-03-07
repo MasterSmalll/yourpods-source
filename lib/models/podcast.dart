@@ -36,6 +36,8 @@ class Podcast {
   final String? description;
   final String? logoUrl;
   final String? website;
+  final String? author;
+  final bool requiresAuth;
 
   Podcast({
     required this.url,
@@ -43,6 +45,8 @@ class Podcast {
     this.description,
     this.logoUrl,
     this.website,
+    this.author,
+    this.requiresAuth = false,
   });
 
   factory Podcast.fromJson(Map<String, dynamic> json) {
@@ -52,6 +56,8 @@ class Podcast {
       description: json['description'],
       logoUrl: json['logo_url'],
       website: json['website'],
+      author: json['author'],
+      requiresAuth: json['requires_auth'] ?? false,
     );
   }
 
@@ -62,6 +68,8 @@ class Podcast {
       'description': description,
       'logo_url': logoUrl,
       'website': website,
+      'author': author,
+      'requires_auth': requiresAuth,
     };
   }
 }

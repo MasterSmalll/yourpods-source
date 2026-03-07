@@ -57,6 +57,8 @@
 	</dict>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>This app links to a library that references the microphone, but it is not used.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>This app links to a library that references the photo library, but it is not used.</string>
 	<key>NSSiriUsageDescription</key>
 	<string>Play podcasts using Siri.</string>
 	<key>NSSupportsLiveActivities</key>

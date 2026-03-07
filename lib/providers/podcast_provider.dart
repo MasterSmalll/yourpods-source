@@ -5,6 +5,7 @@ import 'package:path_provider/path_provider.dart';
 import '../api/gpodder_api.dart';
 import '../api/rss_service.dart';
 import '../models/podcast.dart';
+import '../services/opml_service.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
@@ -20,14 +21,18 @@ class PodcastProvider with ChangeNotifier {
   List<Podcast> get subscriptions => _subscriptions;
   bool get isLoading => _isLoading;
   String? get error => _error;
+  DateTime? get lastSyncedAt => _lastSyncedAt;
   
   int _lastSyncTimestamp = 0;
+  DateTime? _lastSyncedAt;
   
   // Episode Action Cache
   List<EpisodeAction> _cachedEpisodeActions = [];
   int _lastActionsFetchTime = 0;
   static const int _actionsCacheDuration = 300; // 5 minutes fresh
-  final Map<String, EpisodeAction> _actionMap = {}; // Quick lookup by guid
+  final Map<String, EpisodeAction> _actionMap = {}; // Quick lookup by episode URL (or GUID for legacy entries)
+  final Map<String, String> _guidToEpisodeUrl = {}; // Reverse map: GUID -> episode URL for dual-key lookup
+  Map<String, EpisodeAction> get actionMap => Map.unmodifiable(_actionMap);
 
   // B4: Cached documents directory
   Directory? _docsDir;
@@ -77,6 +82,17 @@ class PodcastProvider with ChangeNotifier {
     return episodes; // fetchEpisodes updates memory cache now
   }
 
+  /// Synchronous lookup of an episode in the memory cache.
+  /// Returns null if the podcast or episode is not cached in memory.
+  Episode? findEpisodeInCache(String podcastUrl, String guid) {
+    final episodes = _memoryEpisodeCache[podcastUrl];
+    if (episodes == null) return null;
+    for (final ep in episodes) {
+      if (ep.guid == guid) return ep;
+    }
+    return null;
+  }
+
   GPodderApi? _api;
   final _rssService = RssService();
   String? _currentProfileId;
@@ -114,25 +130,45 @@ class PodcastProvider with ChangeNotifier {
       }
   }
 
-  void setApi(GPodderApi api, String profileId) {
-    if (_currentProfileId == profileId && _api != null) {
-        _api = api;
-        return;
-    }
-    
-    _api = api;
-    _currentProfileId = profileId;
-    _subscriptions = [];
-    _lastSyncTimestamp = 0;
-    
-    // Load local data immediately for start UI
-    _loadSubscriptions();
-    _loadSyncTimestamp(); 
-    _loadAutoQueueSettings();
-    _loadGroups();
-    syncEpisodeActions(profileId, force: true);
-    notifyListeners();
+  void setApi(GPodderApi? api, String profileId) async {
+  if (_currentProfileId == profileId && _api != null) {
+      return;
   }
+  
+  Log.i('PodcastProvider', 'Switching to profile: $profileId (from $_currentProfileId)');
+  
+  // Clear memory caches so data doesn't leak between profiles
+  _subscriptions = [];
+  _groups = {};
+  _autoQueuePodcastUrls.clear();
+  _autoQueuePriorityUrls.clear();
+  _actionMap.clear();
+  _guidToEpisodeUrl.clear();
+  _cachedEpisodeActions = [];
+  _memoryEpisodeCache.clear();
+  _memoryCacheKeys.clear();
+  _lastSyncTimestamp = 0;
+  
+  // For local profiles, api might be null, but we still set profileId
+  _api = api;
+  _currentProfileId = profileId;
+  
+  // Load local data for the new profile
+  _loadSubscriptions();
+  _loadSyncTimestamp(); 
+  await _loadAutoQueueSettings();
+  _loadGroups();
+  
+  // Explicitly wait for action cache to load before doing subsequent sync operations
+  // This ensures a clean slate before PlayerProvider tries to read actions
+  await _loadActionCache();
+  
+  // Run one-time migration to fix GUID-based episode fields (fire-and-forget)
+  _migrateEpisodeUrls().catchError((e) { Log.e('PodcastProvider', 'Episode URL migration failed: $e'); });
+  
+  syncEpisodeActions(profileId, force: true);
+  notifyListeners();
+}
 
   // Action Persistence
   Future<File> get _actionsFile async {
@@ -142,22 +178,99 @@ class PodcastProvider with ChangeNotifier {
   }
 
   Future<void> _loadActionCache() async {
-      try {
-          final file = await _actionsFile;
-          if (await file.exists()) {
-              final jsonString = await file.readAsString();
-              final List<dynamic> jsonList = json.decode(jsonString);
-              _cachedEpisodeActions = jsonList.map((j) => EpisodeAction.fromJson(j)).toList();
-              
-              _actionMap.clear();
-              for (var action in _cachedEpisodeActions) {
-                  _actionMap[action.episode] = action;
-              }
-              notifyListeners();
+    try {
+        final file = await _actionsFile;
+        if (await file.exists()) {
+            final jsonString = await file.readAsString();
+            final List<dynamic> jsonList = json.decode(jsonString);
+            _cachedEpisodeActions = jsonList.map((j) => EpisodeAction.fromJson(j)).toList();
+            
+            _actionMap.clear();
+            for (var action in _cachedEpisodeActions) {
+                _actionMap[action.episode] = action;
+            }
+            _rebuildGuidToUrlMap();
+            notifyListeners();
+        } else {
+            // CRITICAL: if no file exists for this profile, ensure memory state is empty
+            _cachedEpisodeActions = [];
+            _actionMap.clear();
+            _guidToEpisodeUrl.clear();
+        }
+    } catch (e) {
+        Log.e('PodcastProvider', 'Error loading action cache: $e');
+        _cachedEpisodeActions = [];
+        _actionMap.clear();
+        _guidToEpisodeUrl.clear();
+    }
+  }
+
+  /// Rebuild the GUID -> episode URL reverse map from _actionMap.
+  /// Called whenever _actionMap is fully rebuilt (load, sync).
+  void _rebuildGuidToUrlMap() {
+      _guidToEpisodeUrl.clear();
+      for (var action in _actionMap.values) {
+          if (action.guid != null && action.guid != action.episode) {
+              _guidToEpisodeUrl[action.guid!] = action.episode;
           }
-      } catch (e) {
-          Log.e('PodcastProvider', 'Error loading action cache: $e');
       }
+  }
+
+  /// One-time migration: re-upload cached episode actions that have a GUID
+  /// as the `episode` field instead of the audio URL.
+  /// This fixes compatibility with Repod and other gPodder clients.
+  Future<void> _migrateEpisodeUrls() async {
+      final prefs = await SharedPreferences.getInstance();
+      final key = 'episode_url_migration_done_$_currentProfileId';
+      if (prefs.getBool(key) == true) return;
+      if (_api == null) return; // Only migrate for synced profiles
+      
+      final toMigrate = <EpisodeAction>[];
+      for (var action in _cachedEpisodeActions) {
+          // Heuristic: if 'episode' doesn't contain '://', it's a GUID not a URL
+          if (!action.episode.contains('://')) {
+              final episodes = await _loadEpisodeCache(action.podcast);
+              final match = episodes.where((e) => e.guid == action.episode).firstOrNull;
+              if (match?.audioUrl != null) {
+                  toMigrate.add(EpisodeAction(
+                      podcast: action.podcast,
+                      episode: match!.audioUrl!,
+                      guid: action.guid ?? action.episode,
+                      action: action.action,
+                      timestamp: action.timestamp,
+                      position: action.position,
+                      started: action.started,
+                      total: action.total,
+                      device: action.device,
+                  ));
+              }
+          }
+      }
+      
+      if (toMigrate.isNotEmpty) {
+          Log.i('PodcastProvider', 'Migrating ${toMigrate.length} episode actions from GUID to URL format');
+          // Update local state
+          for (var fixed in toMigrate) {
+              _actionMap[fixed.episode] = fixed;
+          }
+          _cachedEpisodeActions = _actionMap.values.toList();
+          _rebuildGuidToUrlMap();
+          await _saveActionCache();
+          
+          // Upload to server in batches of 50
+          for (var i = 0; i < toMigrate.length; i += 50) {
+              final batch = toMigrate.skip(i).take(50).toList();
+              try {
+                  await _api!.uploadEpisodeActions(batch);
+              } catch (e) {
+                  Log.e('PodcastProvider', 'Migration batch upload failed: $e');
+                  // Continue with next batch — partial migration is better than none
+              }
+          }
+          Log.i('PodcastProvider', 'Episode URL migration complete');
+      }
+      
+      await prefs.setBool(key, true);
   }
 
   Future<void> _saveActionCache() async {
@@ -177,6 +290,7 @@ class PodcastProvider with ChangeNotifier {
   /// 3. Merges with local cache
   /// 4. Persists to disk
   Future<List<SyncConflict>> syncEpisodeActions(String deviceId, {bool force = false, SyncStrategy strategy = SyncStrategy.serverWins}) async {
+      // Local account support: if no API, we just ensure local consistency if needed, but no sync
       if (_api == null) return [];
       
       // Rate limit unless forced
@@ -193,7 +307,8 @@ class PodcastProvider with ChangeNotifier {
           await _loadSyncTimestamp(); // Ensure we have latest timestamp
           
           final prefs = await SharedPreferences.getInstance();
-          int lastActionSync = prefs.getInt('last_action_sync_timestamp') ?? 0;
+          final suffix = _currentProfileId != null ? '_$_currentProfileId' : '';
+          int lastActionSync = prefs.getInt('last_action_sync_timestamp$suffix') ?? 0;
           
           Log.d('PodcastProvider', 'Syncing actions (since: $lastActionSync)...');
           
@@ -265,12 +380,26 @@ class PodcastProvider with ChangeNotifier {
               // 3. Rebuild list and save
               if (changed) {
                   _cachedEpisodeActions = _actionMap.values.toList();
+                  _rebuildGuidToUrlMap();
                   await _saveActionCache();
+                  
+                  // Mark played episodes as interacted so NEW badge disappears
+                  final playedByPodcast = <String, List<String>>{};
+                  for (var action in remoteActions) {
+                      final guid = action.guid ?? action.episode;
+                      if (_isEpisodePlayed(guid)) {
+                          playedByPodcast.putIfAbsent(action.podcast, () => []);
+                          playedByPodcast[action.podcast]!.add(guid);
+                      }
+                  }
+                  for (var entry in playedByPodcast.entries) {
+                      await markAllEpisodesAsInteracted(entry.key, entry.value);
+                  }
                   
                   // Update timestamp
                   final maxTs = remoteActions.last.timestamp;
                   if (maxTs > lastActionSync) {
-                      await prefs.setInt('last_action_sync_timestamp', maxTs);
+                      await prefs.setInt('last_action_sync_timestamp$suffix', maxTs);
                   }
                   
                   notifyListeners();
@@ -281,6 +410,8 @@ class PodcastProvider with ChangeNotifier {
           }
           
           _lastActionsFetchTime = now;
+          _lastSyncedAt = DateTime.now();
+          notifyListeners();
           
       } catch (e) {
           Log.e('PodcastProvider', 'Action sync failed: $e');
@@ -303,7 +434,10 @@ class PodcastProvider with ChangeNotifier {
   
   Future<void> applyConflictResolution(SyncConflict conflict, bool keepRemote) async {
       if (keepRemote && conflict.remoteAction != null) {
-          _actionMap[conflict.episodeGuid] = conflict.remoteAction!;
+          _actionMap[conflict.remoteAction!.episode] = conflict.remoteAction!;
+          if (conflict.remoteAction!.guid != null && conflict.remoteAction!.guid != conflict.remoteAction!.episode) {
+              _guidToEpisodeUrl[conflict.remoteAction!.guid!] = conflict.remoteAction!.episode;
+          }
           _cachedEpisodeActions = _actionMap.values.toList();
           await _saveActionCache();
           notifyListeners();
@@ -313,24 +447,76 @@ class PodcastProvider with ChangeNotifier {
       }
   }
 
-  /// Get the latest known state for an episode
+  /// Get the latest known state for an episode.
+  /// Supports dual-key lookup: checks direct match (GUID or URL key),
+  /// then falls back to reverse map (GUID -> URL -> action).
   EpisodeAction? getLatestAction(String episodeGuid) {
-      return _actionMap[episodeGuid];
+      final direct = _actionMap[episodeGuid];
+      if (direct != null) return direct;
+      // Reverse lookup: GUID -> URL -> action
+      final url = _guidToEpisodeUrl[episodeGuid];
+      if (url != null) return _actionMap[url];
+      return null;
+  }
+
+  /// Resolve episode and podcast titles for display in sync UI.
+  /// Checks local cache first, falls back to fetching from RSS.
+  /// Returns null values for titles that can't be resolved.
+  Future<Map<String, String?>> resolveEpisodeInfo(String podcastUrl, String episodeGuid) async {
+      String? podTitle;
+      String? epTitle;
+
+      // 1. Check subscriptions for podcast title
+      try {
+          final podcast = _subscriptions.firstWhere((p) => p.url == podcastUrl);
+          podTitle = podcast.title;
+      } catch (_) {
+          // Not subscribed — will try RSS below
+      }
+
+      // 2. Check local episode cache
+      final cachedEpisodes = await _loadEpisodeCache(podcastUrl);
+      if (cachedEpisodes.isNotEmpty) {
+          try {
+              final ep = cachedEpisodes.firstWhere((e) => e.guid == episodeGuid);
+              epTitle = ep.title;
+          } catch (_) {}
+      }
+
+      // 3. If episode title still missing, try fetching from RSS
+      if (epTitle == null) {
+          try {
+              final episodes = await fetchEpisodes(podcastUrl, forceRefresh: true);
+              final ep = episodes.firstWhere((e) => e.guid == episodeGuid);
+              epTitle = ep.title;
+              
+              // Bonus: if we didn't have podcast title, we might get it from RSS metadata
+              // (fetchEpisodes doesn't return podcast info, but at least we tried)
+          } catch (_) {
+              // Feed unavailable or episode not found — title stays null
+          }
+      }
+
+      return {'episodeTitle': epTitle, 'podcastTitle': podTitle};
   }
 
   /// Send an action (played/progress) to the server and update local cache
   Future<void> sendEpisodeAction(EpisodeAction action) async {
-      if (_api == null) return;
-      
-      // Optimistic update
+      // Always update local cache first (critical for local-only accounts
+      // and for sync resilience when the server is unreachable)
       _actionMap[action.episode] = action;
+      // Update reverse map for dual-key lookup
+      if (action.guid != null && action.guid != action.episode) {
+          _guidToEpisodeUrl[action.guid!] = action.episode;
+      }
       _cachedEpisodeActions = _actionMap.values.toList();
       notifyListeners(); // Notify UI immediately
+      _saveActionCache(); // Persist to disk before attempting upload
       
+      // Upload to server if connected
+      if (_api == null) return;
       try {
           await _api!.uploadEpisodeActions([action]);
-          // Don't await save, just do it
-          _saveActionCache(); 
       } catch (e) {
           Log.e('PodcastProvider', 'Failed to upload action: $e');
           // TODO: Queue for retry? For now, we rely on next sync or user retry.
@@ -438,29 +624,46 @@ class PodcastProvider with ChangeNotifier {
   
   Future<void> _loadAutoQueueSettings() async {
       final prefs = await SharedPreferences.getInstance();
+      final suffix = _currentProfileId != null ? '_$_currentProfileId' : '';
       
-      // Subscriptions
-      final List<String>? stored = prefs.getStringList('auto_queue_subscriptions');
+      // Subscriptions (with migration from global key)
+      final scopedKey = 'auto_queue_subscriptions$suffix';
+      List<String>? stored = prefs.getStringList(scopedKey);
+      if (stored == null && suffix.isNotEmpty && prefs.containsKey('auto_queue_subscriptions')) {
+          stored = prefs.getStringList('auto_queue_subscriptions');
+          if (stored != null) await prefs.setStringList(scopedKey, stored);
+      }
       if (stored != null) {
           _autoQueuePodcastUrls = stored.toSet();
       }
       
-      // Priority
-      final List<String>? storedPriority = prefs.getStringList('auto_queue_priority_subscriptions');
+      // Priority (with migration)
+      final priorityKey = 'auto_queue_priority_subscriptions$suffix';
+      List<String>? storedPriority = prefs.getStringList(priorityKey);
+      if (storedPriority == null && suffix.isNotEmpty && prefs.containsKey('auto_queue_priority_subscriptions')) {
+          storedPriority = prefs.getStringList('auto_queue_priority_subscriptions');
+          if (storedPriority != null) await prefs.setStringList(priorityKey, storedPriority);
+      }
       if (storedPriority != null) {
           _autoQueuePriorityUrls = storedPriority.toSet();
       }
 
-      // Help Dialog
-      _showQueueHelpDialog = !(prefs.getBool('queue_help_dialog_shown') ?? false); // key stores if *shown*, so invert
+      // Help Dialog (with migration)
+      final helpKey = 'queue_help_dialog_shown$suffix';
+      if (!prefs.containsKey(helpKey) && suffix.isNotEmpty && prefs.containsKey('queue_help_dialog_shown')) {
+          final val = prefs.getBool('queue_help_dialog_shown');
+          if (val != null) await prefs.setBool(helpKey, val);
+      }
+      _showQueueHelpDialog = !(prefs.getBool(helpKey) ?? false);
 
       notifyListeners();
   }
 
   Future<void> _saveAutoQueueSettings() async {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setStringList('auto_queue_subscriptions', _autoQueuePodcastUrls.toList());
-      await prefs.setStringList('auto_queue_priority_subscriptions', _autoQueuePriorityUrls.toList());
+      final suffix = _currentProfileId != null ? '_$_currentProfileId' : '';
+      await prefs.setStringList('auto_queue_subscriptions$suffix', _autoQueuePodcastUrls.toList());
+      await prefs.setStringList('auto_queue_priority_subscriptions$suffix', _autoQueuePriorityUrls.toList());
       notifyListeners();
   }
 
@@ -480,7 +683,8 @@ class PodcastProvider with ChangeNotifier {
   Future<void> setQueueHelpDialogShown(bool value) async {
       // value = true means "Don't show again" basically (we record that it WAS shown/handled)
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setBool('queue_help_dialog_shown', value);
+      final suffix = _currentProfileId != null ? '_$_currentProfileId' : '';
+      await prefs.setBool('queue_help_dialog_shown$suffix', value);
       _showQueueHelpDialog = !value;
       notifyListeners();
   }
@@ -492,11 +696,19 @@ class PodcastProvider with ChangeNotifier {
   Future<void> _loadGroups() async {
       try {
           final prefs = await SharedPreferences.getInstance();
-          final storedString = prefs.getString('podcast_groups');
+          final suffix = _currentProfileId != null ? '_$_currentProfileId' : '';
+          final scopedKey = 'podcast_groups$suffix';
+          String? storedString = prefs.getString(scopedKey);
+          // Migration from global key
+          if (storedString == null && suffix.isNotEmpty && prefs.containsKey('podcast_groups')) {
+              storedString = prefs.getString('podcast_groups');
+              if (storedString != null) await prefs.setString(scopedKey, storedString);
+          }
           if (storedString != null) {
               final Map<String, dynamic> jsonMap = json.decode(storedString);
-              // Convert dynamic list to String list
               _groups = jsonMap.map((key, value) => MapEntry(key, List<String>.from(value)));
+          } else {
+              _groups = {};
           }
       } catch (e) {
           Log.d('PodcastProvider', 'Error loading groups: $e');
@@ -507,8 +719,9 @@ class PodcastProvider with ChangeNotifier {
   Future<void> _saveGroups() async {
       try {
           final prefs = await SharedPreferences.getInstance();
+          final suffix = _currentProfileId != null ? '_$_currentProfileId' : '';
           final jsonString = json.encode(_groups);
-          await prefs.setString('podcast_groups', jsonString);
+          await prefs.setString('podcast_groups$suffix', jsonString);
       } catch (e) {
           Log.e('PodcastProvider', 'Error saving groups: $e');
       }
@@ -551,50 +764,167 @@ class PodcastProvider with ChangeNotifier {
   }
 
   /// Forces a refresh of all subscribed feeds.
-  /// If auto-queue is enabled for a podcast, it detects new episodes and returns them.
+  /// If auto-queue is enabled for a podcast, it detects new episodes,
+  /// persists them to the pending auto-queue buffer, and returns them.
   Future<List<Map<String, dynamic>>> refreshAllFeeds(String deviceId) async {
        await _ensureInteractedKeysLoaded();
+       await _ensureAutoQueuedKeysLoaded();
        final List<Map<String, dynamic>> newFoundEpisodes = [];
 
        for (var podcast in _subscriptions) {
            final url = podcast.url;
            try {
-               // If Auto-Queue is enabled, we need "Diff" logic
+               // Force fetch latest episodes from network
+               final episodes = await fetchEpisodes(url, forceRefresh: true);
+
+               // If Auto-Queue is enabled, detect candidates using interacted-keys
                if (_autoQueuePodcastUrls.contains(url)) {
-                   // 1. Load current cache (Old state)
-                   final oldEpisodes = await _loadEpisodeCache(url);
-                   final oldGuids = oldEpisodes.map((e) => e.guid).toSet();
-
-                   // 2. Force fetch (New state)
-                   // forceRefresh: true ensures we hit the network regardless of cache age
-                   final newEpisodes = await fetchEpisodes(url, forceRefresh: true);
-                   
-                   // 3. Find diff (Present in New, NOT in Old)
-                   final diff = newEpisodes.where((e) => !oldGuids.contains(e.guid)).toList();
-
-                   if (diff.isNotEmpty) {
-                       for (var episode in diff) {
-                           newFoundEpisodes.add({
-                               'podcast': podcast,
-                               'episode': episode,
-                           });
-                       }
-                   }
-               } else {
-                   // Just refresh cache, minimal processing
-                   await fetchEpisodes(url, forceRefresh: true);
+                   final candidates = await getAutoQueueCandidates(podcast, episodes);
+                   newFoundEpisodes.addAll(candidates);
                }
            } catch (e) {
                Log.e('PodcastProvider', 'Feed refresh failed for $url: $e');
            }
        }
        
-       // Update filters after content refresh
-       // Need downloadedUrls... slightly inefficient to fetch here but safer for consistency.
-       // Ideally LibraryScreen calls it, but let's leave it to the caller (LibraryScreen) 
-       // to allow UI feedback before/after filters update.
+       // Persist new episodes to the pending auto-queue buffer so they
+       // survive background fetch and are drained on next app launch/resume.
+       if (newFoundEpisodes.isNotEmpty) {
+           await _savePendingAutoQueue(newFoundEpisodes);
+           // Mark these episodes as auto-queued so they won't be re-queued
+           for (var item in newFoundEpisodes) {
+               final podcast = item['podcast'] as Podcast;
+               final episode = item['episode'] as Episode;
+               await markAsAutoQueued(podcast.url, episode.guid);
+           }
+           Log.i('PodcastProvider', 'Persisted ${newFoundEpisodes.length} episodes to pending auto-queue');
+       }
        
        return newFoundEpisodes;
+  }
+
+  /// Determine which episodes from a podcast are candidates for auto-queueing.
+  /// Uses interacted-keys (same as NEW badge) rather than cache-diff.
+  /// Skips played and already-auto-queued episodes. Caps at 3 most recent.
+  Future<List<Map<String, dynamic>>> getAutoQueueCandidates(
+      Podcast podcast, List<Episode> episodes) async {
+      await _ensureInteractedKeysLoaded();
+      await _ensureAutoQueuedKeysLoaded();
+
+      final candidates = <Map<String, dynamic>>[];
+      for (var episode in episodes) {
+          final interactedKey = 'interacted_${podcast.url}_${episode.guid}';
+          final autoQueuedKey = 'auto_queued_${podcast.url}_${episode.guid}';
+
+          // Skip interacted, played, or already-auto-queued episodes
+          if (_interactedKeys.contains(interactedKey)) continue;
+          if (_isEpisodePlayed(episode.guid)) continue;
+          if (_autoQueuedKeys.contains(autoQueuedKey)) continue;
+
+          candidates.add({
+              'podcast': podcast,
+              'episode': episode,
+          });
+      }
+
+      // Sort by pubDate descending, cap at 3
+      candidates.sort((a, b) {
+          final dateA = (a['episode'] as Episode).pubDate ?? DateTime(1970);
+          final dateB = (b['episode'] as Episode).pubDate ?? DateTime(1970);
+          return dateB.compareTo(dateA);
+      });
+
+      return candidates.take(3).toList();
+  }
+
+  /// Mark an episode as auto-queued to prevent re-queueing on subsequent refreshes.
+  Future<void> markAsAutoQueued(String podcastUrl, String episodeGuid) async {
+      try {
+          final prefs = await SharedPreferences.getInstance();
+          final key = 'auto_queued_${podcastUrl}_$episodeGuid';
+          await prefs.setBool(key, true);
+
+          await _ensureAutoQueuedKeysLoaded();
+          _autoQueuedKeys.add(key);
+      } catch (e) {
+          Log.e('PodcastProvider', 'Error marking episode as auto-queued: $e');
+      }
+  }
+
+  // --- Pending Auto-Queue Buffer ---
+
+  String get _pendingAutoQueueKey {
+      final suffix = _currentProfileId != null ? '_$_currentProfileId' : '';
+      return 'pending_auto_queue$suffix';
+  }
+
+  /// Append new episodes to the pending auto-queue list in SharedPreferences.
+  /// Each entry is serialized with enough metadata for PlayerProvider to
+  /// build MediaItems without any network calls.
+  Future<void> _savePendingAutoQueue(List<Map<String, dynamic>> items) async {
+      try {
+          final prefs = await SharedPreferences.getInstance();
+          
+          // Load existing pending items to append (don't overwrite)
+          final existing = prefs.getString(_pendingAutoQueueKey);
+          final List<Map<String, dynamic>> pending = existing != null
+              ? List<Map<String, dynamic>>.from(
+                    (json.decode(existing) as List).map((e) => Map<String, dynamic>.from(e)))
+              : [];
+
+          for (var item in items) {
+              final podcast = item['podcast'] as Podcast;
+              final episode = item['episode'] as Episode;
+              
+              // Skip if already pending (by guid)
+              if (pending.any((p) => p['guid'] == episode.guid)) continue;
+              
+              pending.add({
+                  'guid': episode.guid,
+                  'title': episode.title,
+                  'audioUrl': episode.audioUrl,
+                  'imageUrl': episode.imageUrl,
+                  'duration': episode.duration?.inSeconds,
+                  'pubDate': episode.pubDate?.toIso8601String(),
+                  'chaptersUrl': episode.chaptersUrl,
+                  'transcriptUrl': episode.transcriptUrl,
+                  'podcastUrl': podcast.url,
+                  'podcastTitle': podcast.title,
+                  'podcastLogoUrl': podcast.logoUrl,
+                  'priority': _autoQueuePriorityUrls.contains(podcast.url),
+              });
+          }
+          
+          await prefs.setString(_pendingAutoQueueKey, json.encode(pending));
+      } catch (e) {
+          Log.e('PodcastProvider', 'Error saving pending auto-queue: $e');
+      }
+  }
+
+  /// Load all pending auto-queue episodes. Returns a list of serialized maps.
+  /// Does NOT clear the list — call [clearPendingAutoQueue] after processing.
+  Future<List<Map<String, dynamic>>> loadPendingAutoQueue() async {
+      try {
+          final prefs = await SharedPreferences.getInstance();
+          final stored = prefs.getString(_pendingAutoQueueKey);
+          if (stored == null) return [];
+          
+          final List<dynamic> jsonList = json.decode(stored);
+          return jsonList.map((e) => Map<String, dynamic>.from(e)).toList();
+      } catch (e) {
+          Log.e('PodcastProvider', 'Error loading pending auto-queue: $e');
+          return [];
+      }
+  }
+
+  /// Clear the pending auto-queue buffer after episodes have been queued.
+  Future<void> clearPendingAutoQueue() async {
+      try {
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.remove(_pendingAutoQueueKey);
+      } catch (e) {
+          Log.e('PodcastProvider', 'Error clearing pending auto-queue: $e');
+      }
   }
 
   // Deprecated/Internal: Use refreshAllFeeds instead for global checks
@@ -612,16 +942,18 @@ class PodcastProvider with ChangeNotifier {
               // 2. Force fetch (New state)
               final newEpisodes = await fetchEpisodes(url, forceRefresh: true);
               
-              // 3. Find diff (Present in New, NOT in Old)
+              // 3. Find diff (Present in New, NOT in Old), cap at 3 most recent
               final diff = newEpisodes.where((e) => !oldGuids.contains(e.guid)).toList();
+              diff.sort((a, b) => (b.pubDate ?? DateTime(1970)).compareTo(a.pubDate ?? DateTime(1970)));
+              final capped = diff.take(3);
 
-              if (diff.isNotEmpty) {
+              if (capped.isNotEmpty) {
                   final podcast = _subscriptions.firstWhere(
                       (p) => p.url == url,
                       orElse: () => Podcast(url: url, title: 'Unknown Podcast'),
                   );
 
-                  for (var episode in diff) {
+                  for (var episode in capped) {
                       newFoundEpisodes.add({
                           'podcast': podcast,
                           'episode': episode,
@@ -733,7 +1065,9 @@ class PodcastProvider with ChangeNotifier {
 
     // 2. Network fetch
     try {
-        final episodes = await _rssService.fetchEpisodes(rssUrl);
+        // Look up feed credentials for authenticated feeds
+        final creds = await getFeedCredentials(rssUrl);
+        final episodes = await _rssService.fetchEpisodes(rssUrl, username: creds?['username'], password: creds?['password']);
         // Cache success
         await _saveEpisodeCache(rssUrl, episodes);
         _updateMemoryCache(rssUrl, episodes);
@@ -762,7 +1096,12 @@ class PodcastProvider with ChangeNotifier {
   }
 
   Future<void> refreshSubscriptions(String deviceId) async {
-    if (_api == null) return;
+    // Local account support: if no API, we just refresh feeds locally
+    if (_api == null) {
+       // Just refresh all feeds metadata/content
+       await refreshAllFeeds(deviceId);
+       return;
+    }
 
     _isLoading = true;
     _error = null;
@@ -801,7 +1140,8 @@ class PodcastProvider with ChangeNotifier {
              // Fetch metadata in parallel
              final futures = finalNewUrls.map((url) async {
                 try {
-                  return await _rssService.getFeedMetadata(url);
+                  final creds = await getFeedCredentials(url);
+                  return await _rssService.getFeedMetadata(url, username: creds?['username'], password: creds?['password']);
                 } catch (e) {
                   Log.e('PodcastProvider', 'Failed to fetch metadata for $url: $e');
                   return Podcast(url: url, title: url);
@@ -833,8 +1173,9 @@ class PodcastProvider with ChangeNotifier {
     }
   }
 
-  Future<void> subscribe(String url, String deviceId) async {
-    if (_api == null) return;
+  Future<void> subscribe(String url, String deviceId, {String? feedUsername, String? feedPassword}) async {
+    // Local support: Allow if no API
+    // if (_api == null) return;
 
     _isLoading = true;
     notifyListeners();
@@ -848,18 +1189,37 @@ class PodcastProvider with ChangeNotifier {
           return;
       }
 
-      // 1. Tell API to add subscription
-      await _api!.updateSubscriptions(
-        deviceId,
-        add: [url],
-      );
+      // 1. Store feed credentials securely if provided (Approach 2)
+      final bool hasExplicitAuth = feedUsername != null && feedPassword != null;
+      if (hasExplicitAuth) {
+          await saveFeedCredentials(url, feedUsername, feedPassword);
+      }
 
-      // 2. Fetch metadata for local use
-      final newPodcast = await _rssService.getFeedMetadata(url);
+      // 2. Tell API to add subscription (if syncing)
+      if (_api != null) {
+          await _api!.updateSubscriptions(
+            deviceId,
+            add: [url],
+          );
+      }
+
+      // 3. Fetch metadata for local use (with auth if needed)
+      final newPodcast = await _rssService.getFeedMetadata(
+        url, 
+        username: feedUsername, 
+        password: feedPassword,
+      );
       
-      // 3. Add to local list if not already there (check again)
+      // 4. Add to local list with requiresAuth flag
       if (!_subscriptions.any((p) => _normalizeUrl(p.url) == _normalizeUrl(newPodcast.url))) {
-        _subscriptions.add(newPodcast);
+        _subscriptions.add(Podcast(
+          url: newPodcast.url,
+          title: newPodcast.title,
+          description: newPodcast.description,
+          logoUrl: newPodcast.logoUrl,
+          website: newPodcast.website,
+          requiresAuth: hasExplicitAuth || Uri.parse(url).userInfo.isNotEmpty,
+        ));
         await _saveSubscriptions();
       }
     } catch (e) {
@@ -871,21 +1231,63 @@ class PodcastProvider with ChangeNotifier {
     }
   }
 
+  // --- Feed Credential Storage (Approach 2) ---
+  
+  /// Save per-feed credentials to secure storage.
+  Future<void> saveFeedCredentials(String feedUrl, String username, String password) async {
+      final key = 'feed_auth_${feedUrl.hashCode}';
+      await _storage.write(key: '${key}_user', value: username);
+      await _storage.write(key: '${key}_pass', value: password);
+  }
+
+  /// Retrieve per-feed credentials from secure storage.
+  /// Returns null if no credentials are stored.
+  Future<Map<String, String>?> getFeedCredentials(String feedUrl) async {
+      final key = 'feed_auth_${feedUrl.hashCode}';
+      final username = await _storage.read(key: '${key}_user');
+      final password = await _storage.read(key: '${key}_pass');
+      if (username != null && password != null) {
+          return {'username': username, 'password': password};
+      }
+      // Also check for URL-embedded credentials
+      final uri = Uri.parse(feedUrl);
+      if (uri.userInfo.isNotEmpty) {
+          final parts = uri.userInfo.split(':');
+          return {
+              'username': Uri.decodeComponent(parts[0]),
+              'password': parts.length > 1 ? Uri.decodeComponent(parts.sublist(1).join(':')) : '',
+          };
+      }
+      return null;
+  }
+
+  /// Delete per-feed credentials from secure storage.
+  Future<void> deleteFeedCredentials(String feedUrl) async {
+      final key = 'feed_auth_${feedUrl.hashCode}';
+      await _storage.delete(key: '${key}_user');
+      await _storage.delete(key: '${key}_pass');
+  }
+
   Future<void> removePodcast(String url, String deviceId) async {
-    if (_api == null) return;
+    // Local support
+    // if (_api == null) return;
 
     _isLoading = true;
     notifyListeners();
 
     try {
       // 1. Tell API to remove subscription
-      await _api!.updateSubscriptions(
-        deviceId,
-        remove: [url],
-      );
+      if (_api != null) {
+          await _api!.updateSubscriptions(
+            deviceId,
+            remove: [url],
+          );
+      }
 
-      // 2. Remove from local list
+      // 2. Remove from local list and clean up credentials
       _subscriptions.removeWhere((p) => p.url == url);
+      await deleteFeedCredentials(url);
+      await _saveSubscriptions();
     } catch (e) {
       _error = e.toString();
       rethrow;
@@ -953,7 +1355,10 @@ class PodcastProvider with ChangeNotifier {
   }
 
   Future<List<Map<String, dynamic>>> fetchInProgressEpisodes(String deviceId) async {
-    if (_api == null) return [];
+    // Local account support: build in-progress from local cache
+    if (_api == null) {
+        return _fetchLocalInProgressEpisodes();
+    }
     
     try {
       final actions = await _api!.getEpisodeActions(deviceId);
@@ -1029,7 +1434,10 @@ class PodcastProvider with ChangeNotifier {
   }
 
   Future<List<Map<String, dynamic>>> fetchListeningHistory(String deviceId) async {
-    if (_api == null) return [];
+    // Local Support: Generate history from local cache if API missing
+    if (_api == null) {
+        return _fetchLocalListeningHistory();
+    }
 
     try {
       final actions = await _api!.getEpisodeActions(deviceId);
@@ -1082,15 +1490,14 @@ class PodcastProvider with ChangeNotifier {
   }
 
   Future<void> removeInProgressEpisode(Podcast podcast, Episode episode, String deviceId) async {
-    if (_api == null) return;
-    
     _isLoading = true;
     notifyListeners();
     
     try {
         final action = EpisodeAction(
             podcast: podcast.url,
-            episode: episode.guid,
+            episode: episode.audioUrl ?? episode.guid,
+            guid: episode.guid,
             action: 'play',
             device: deviceId,
             timestamp: DateTime.now().millisecondsSinceEpoch ~/ 1000,
@@ -1098,7 +1505,16 @@ class PodcastProvider with ChangeNotifier {
             position: 0,
             total: episode.duration?.inSeconds ?? 0,
         );
-        await _api!.uploadEpisodeActions([action]);
+
+        // Always update local cache first
+        _actionMap[action.episode] = action;
+        _cachedEpisodeActions = _actionMap.values.toList();
+        _saveActionCache();
+
+        // Upload to server if connected
+        if (_api != null) {
+          await _api!.uploadEpisodeActions([action]);
+        }
     } catch (e) {
        _error = e.toString();
        rethrow;
@@ -1109,8 +1525,6 @@ class PodcastProvider with ChangeNotifier {
   }
 
   Future<void> markEpisodesAsPlayed(List<Map<String, dynamic>> items, String deviceId) async {
-    if (_api == null) return;
-
     _isLoading = true;
     notifyListeners();
 
@@ -1119,27 +1533,34 @@ class PodcastProvider with ChangeNotifier {
         final podcast = item['podcast'] as Podcast;
         final episode = item['episode'] as Episode;
         final duration = episode.duration?.inSeconds ?? 0;
+        // Use sentinel 1 for episodes without duration metadata so
+        // getEpisodeStatuses recognizes them as fully played (total > 0).
+        final effectiveDuration = duration > 0 ? duration : 1;
         
         return EpisodeAction(
           podcast: podcast.url,
-          episode: episode.guid,
+          episode: episode.audioUrl ?? episode.guid,
+          guid: episode.guid,
           action: 'play',
           device: deviceId,
           timestamp: DateTime.now().millisecondsSinceEpoch ~/ 1000,
-          started: 0,
-          position: duration, // Mark as fully played
-          total: duration,
+          started: effectiveDuration,
+          position: effectiveDuration,
+          total: effectiveDuration,
         );
       }).toList();
 
-      await _api!.uploadEpisodeActions(actions);
-
-      // Update local cache immediately
+      // Always update local cache first (before server upload)
       for (var action in actions) {
           _actionMap[action.episode] = action;
       }
       _cachedEpisodeActions = _actionMap.values.toList();
-      _saveActionCache(); // Persist
+      _saveActionCache(); // Persist to disk
+
+      // Upload to server if connected
+      if (_api != null) {
+        await _api!.uploadEpisodeActions(actions);
+      }
 
       // Also mark as interacted locally so "New" badge disappears
       // Optimization: Group by podcast to batch updates
@@ -1172,6 +1593,10 @@ class PodcastProvider with ChangeNotifier {
   final Set<String> _interactedKeys = {};
   bool _interactedKeysLoaded = false;
 
+  // In-memory cache for auto-queued episode keys
+  final Set<String> _autoQueuedKeys = {};
+  bool _autoQueuedKeysLoaded = false;
+
   Future<void> _ensureInteractedKeysLoaded() async {
       if (_interactedKeysLoaded) return;
       try {
@@ -1184,6 +1609,31 @@ class PodcastProvider with ChangeNotifier {
       }
   }
 
+  Future<void> _ensureAutoQueuedKeysLoaded() async {
+      if (_autoQueuedKeysLoaded) return;
+      try {
+          final prefs = await SharedPreferences.getInstance();
+          final keys = prefs.getKeys();
+          _autoQueuedKeys.addAll(keys.where((k) => k.startsWith('auto_queued_')));
+          _autoQueuedKeysLoaded = true;
+      } catch (e) {
+          Log.d('PodcastProvider', 'Error loading auto-queued keys: $e');
+      }
+  }
+
+  /// Check if an episode has been fully played based on _actionMap.
+  bool _isEpisodePlayed(String episodeGuid) {
+      final action = getLatestAction(episodeGuid);
+      if (action == null) return false;
+      if (action.total == null || action.total! <= 0) return false;
+      if (action.position == null) return false;
+      // Within 15 seconds of end
+      if (action.position! >= action.total! - 15) return true;
+      // > 99% complete
+      if (action.position! / action.total! > 0.99) return true;
+      return false;
+  }
+
   Future<void> markAllEpisodesAsInteracted(String podcastUrl, List<String> episodeGuids) async {
       try {
           final prefs = await SharedPreferences.getInstance();
@@ -1192,7 +1642,7 @@ class PodcastProvider with ChangeNotifier {
           
           for (var guid in episodeGuids) {
               final key = 'interacted_${podcastUrl}_$guid';
-              await prefs.setBool(key, true);
+              prefs.setBool(key, true);  // Memory-sync, disk-async
               _interactedKeys.add(key);
           }
           
@@ -1235,7 +1685,10 @@ class PodcastProvider with ChangeNotifier {
   Future<bool> isEpisodeNew(String podcastUrl, String episodeGuid) async {
        await _ensureInteractedKeysLoaded();
        final key = 'interacted_${podcastUrl}_$episodeGuid';
-       return !_interactedKeys.contains(key);
+       if (_interactedKeys.contains(key)) return false;
+       // Also check if the episode has been fully played (e.g., on another device via sync)
+       if (_isEpisodePlayed(episodeGuid)) return false;
+       return true;
   }
 
   Future<bool> hasAnyNewEpisodes(String podcastUrl) async {
@@ -1250,15 +1703,7 @@ class PodcastProvider with ChangeNotifier {
 
           for (var episode in episodes) {
              final key = 'interacted_${podcastUrl}_${episode.guid}';
-             if (!_interactedKeys.contains(key)) {
-                 // Found one that we haven't interacted with!
-                 // Wait, we also need to check if it's "Played" or "In Progress" on server?
-                 // Technically "New" implies not played.
-                 // But fetching server status for every podcast in the library is too heavy.
-                 // Simplification: If local interaction is missing, we assume "New".
-                 // The standard behavior is: "New" means I haven't clicked it. 
-                 // If I listened on another device, it might still show as "New" here until a full sync.
-                 // That is acceptable for this feature (Library view).
+             if (!_interactedKeys.contains(key) && !_isEpisodePlayed(episode.guid)) {
                  return true;
              }
           }
@@ -1365,13 +1810,14 @@ class PodcastProvider with ChangeNotifier {
 
       try {
           // Filter actions for this podcast from CACHE
+          // Key by GUID (not action.episode which may be a URL after the Repod fix)
           final simpleActions = <String, EpisodeAction>{};
           for (var action in _cachedEpisodeActions) {
               if (action.podcast == podcastUrl) {
-                  final key = action.episode;
-                  final existing = simpleActions[key];
+                  final guid = action.guid ?? action.episode;
+                  final existing = simpleActions[guid];
                   if (existing == null || action.timestamp > existing.timestamp) {
-                      simpleActions[key] = action;
+                      simpleActions[guid] = action;
                   }
               }
           }
@@ -1474,5 +1920,199 @@ class PodcastProvider with ChangeNotifier {
       });
       
       return newEpisodes;
+  }
+
+
+  Future<List<Map<String, dynamic>>> _fetchLocalListeningHistory() async {
+      try {
+          // Sort cached actions by timestamp desc
+          final actions = List<EpisodeAction>.from(_cachedEpisodeActions);
+          actions.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+          
+          final history = <Map<String, dynamic>>[];
+          
+          // Take top 100 for local history
+          final recentActions = actions.take(100).toList();
+          final uniquePodcasts = recentActions.map((a) => a.podcast).toSet();
+          final feedCache = await _fetchFeedsWithCache(uniquePodcasts);
+
+          for (var action in recentActions) {
+              try {
+                 final podcast = _subscriptions.firstWhere(
+                   (p) => p.url == action.podcast, 
+                   orElse: () => Podcast(url: action.podcast, title: 'Unknown Podcast'),
+                 );
+                 final episodes = feedCache[action.podcast] ?? [];
+                 final episode = episodes.firstWhere(
+                    (e) => (e.guid == action.episode) || (e.audioUrl == action.episode) || (e.link == action.episode),
+                    orElse: () => Episode(guid: action.episode, title: action.episode, audioUrl: action.episode),
+                 );
+                 history.add({
+                   'podcast': podcast,
+                   'action': action,
+                   'episode': episode,
+                 });
+              } catch (e) {
+                  // ignore bad items
+              }
+          }
+          return history;
+      } catch (e) {
+          Log.e('PodcastProvider', 'Error fetching local history: $e');
+          return [];
+      }
+  }
+
+  Future<List<Map<String, dynamic>>> _fetchLocalInProgressEpisodes() async {
+      try {
+          // Build in-progress from local action cache (same logic as server version)
+          final Map<String, EpisodeAction> latestActions = {};
+          for (var action in _cachedEpisodeActions) {
+              final key = '${action.podcast}:${action.episode}';
+              final existing = latestActions[key];
+              if (existing == null || action.timestamp > existing.timestamp) {
+                  latestActions[key] = action;
+              }
+          }
+
+          final uniquePodcasts = <String>{};
+          final relevantActions = <EpisodeAction>[];
+
+          for (var action in latestActions.values) {
+              bool isFinished = false;
+              if (action.total != null && action.total! > 0 && action.position != null) {
+                  if (action.position! >= action.total! - 15) {
+                      isFinished = true;
+                  } else if (action.position! / action.total! > 0.99) {
+                      isFinished = true;
+                  }
+              }
+
+              if (action.position != null && action.position! > 0 && !isFinished) {
+                  uniquePodcasts.add(action.podcast);
+                  relevantActions.add(action);
+              }
+          }
+
+          final feedCache = await _fetchFeedsWithCache(uniquePodcasts);
+          final inProgress = <Map<String, dynamic>>[];
+
+          for (var action in relevantActions) {
+              try {
+                  final podcast = _subscriptions.firstWhere(
+                    (p) => p.url == action.podcast,
+                    orElse: () => Podcast(url: action.podcast, title: 'Unknown Podcast'),
+                  );
+                  final episodes = feedCache[action.podcast] ?? [];
+                  final episode = episodes.firstWhere(
+                      (e) => (e.guid == action.episode) || (e.audioUrl == action.episode) || (e.link == action.episode),
+                      orElse: () => Episode(guid: action.episode, title: 'Unknown Episode', audioUrl: action.episode, description: ''),
+                  );
+                  inProgress.add({
+                    'podcast': podcast,
+                    'action': action,
+                    'episode': episode,
+                  });
+              } catch (e) {
+                  Log.e('PodcastProvider', 'Error processing local in-progress item: $e');
+              }
+          }
+          return inProgress;
+      } catch (e) {
+          Log.e('PodcastProvider', 'Error fetching local in-progress: $e');
+          return [];
+      }
+  }
+
+  // --- OPML Import / Export ---
+
+  final OpmlService _opmlService = OpmlService();
+
+  /// Parse OPML content and return feeds that are NOT already in the user's subscriptions.
+  /// Returns all parsed feeds with an `isSubscribed` flag for UI display.
+  List<Map<String, dynamic>> parseOpmlForImport(String opmlContent) {
+    final feeds = _opmlService.parseOpml(opmlContent);
+    final existingUrls = _subscriptions.map((s) => _normalizeUrl(s.url)).toSet();
+
+    return feeds.map((feed) {
+      final isSubscribed = existingUrls.contains(_normalizeUrl(feed.xmlUrl));
+      return {
+        'feed': feed,
+        'isSubscribed': isSubscribed,
+      };
+    }).toList();
+  }
+
+  /// Subscribe to a list of OPML feeds in batch.
+/// Calls [onProgress] with (completed, total) for UI progress updates.
+/// Skips feeds that are already subscribed. Continues on individual failures.
+Future<ImportResult> subscribeToFeeds(
+  List<OpmlFeed> feeds,
+  String deviceId, {
+  Function(int completed, int total)? onProgress,
+}) async {
+  int successCount = 0;
+  int failureCount = 0;
+  int skippedCount = 0;
+  final failedFeeds = <String>[];
+  final existingUrls = _subscriptions.map((s) => _normalizeUrl(s.url)).toSet();
+
+  // Filter out already-subscribed feeds first
+  final feedsToProcess = <OpmlFeed>[];
+  for (var feed in feeds) {
+    if (existingUrls.contains(_normalizeUrl(feed.xmlUrl))) {
+      skippedCount++;
+    } else {
+      feedsToProcess.add(feed);
+    }
+  }
+
+  // Process in parallel batches of 3
+  const batchSize = 3;
+  int completed = skippedCount;
+  onProgress?.call(completed, feeds.length);
+
+  for (int i = 0; i < feedsToProcess.length; i += batchSize) {
+    final batch = feedsToProcess.skip(i).take(batchSize).toList();
+    final results = await Future.wait(
+      batch.map((feed) async {
+        try {
+          await subscribe(feed.xmlUrl, deviceId);
+          return (true, feed.title, feed.xmlUrl); // Include xmlUrl for existingUrls update
+        } catch (e) {
+          Log.e('PodcastProvider', 'Failed to import feed ${feed.xmlUrl}: $e');
+          return (false, feed.title, feed.xmlUrl);
+        }
+      }),
+    );
+
+    for (var (success, title, xmlUrl) in results) {
+      if (success) {
+        successCount++;
+        existingUrls.add(_normalizeUrl(xmlUrl));
+      } else {
+        failureCount++;
+        failedFeeds.add(title);
+      }
+    }
+
+    completed += batch.length;
+    onProgress?.call(completed, feeds.length);
+  }
+
+  onProgress?.call(feeds.length, feeds.length);
+  notifyListeners();
+
+  return ImportResult(
+    successCount: successCount,
+    failureCount: failureCount,
+    skippedCount: skippedCount,
+    failedFeeds: failedFeeds,
+  );
+}
+
+  /// Export current subscriptions as an OPML XML string.
+  String exportToOpml() {
+    return _opmlService.generateOpml(_subscriptions);
   }
 }

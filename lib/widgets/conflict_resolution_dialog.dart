@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../models/sync_conflict.dart';
 import '../providers/podcast_provider.dart';
 import '../providers/player_provider.dart'; // For formatProgress
+import '../providers/settings_provider.dart';
 
 class ConflictResolutionDialog extends StatefulWidget {
   final List<SyncConflict> conflicts;
@@ -39,16 +40,39 @@ class ConflictResolutionDialog extends StatefulWidget {
 class _ConflictResolutionDialogState extends State<ConflictResolutionDialog> {
   // Map of EpisodeGUID -> keepRemote (true = keep remote, false = keep local)
   final Map<String, bool> _decisions = {};
+  bool _setAsDefault = false;
 
   @override
   void initState() {
     super.initState();
-    // Default to Keep Remote (Server) as it's usually the "sync" goal, 
-    // unless local is strictly newer? But time diffs are the issue.
-    // Let's default to Remote for now.
     for (var conflict in widget.conflicts) {
       _decisions[conflict.episodeGuid] = true; 
     }
+  }
+
+  /// Extract a human-readable name from an episode GUID.
+  /// GUIDs are often URLs like "https://example.com/episodes/my-episode.mp3"
+  /// This extracts "my episode" from such URLs.
+  String _displayName(SyncConflict conflict) {
+    if (conflict.episodeTitle != null && conflict.episodeTitle!.isNotEmpty) {
+      return conflict.episodeTitle!;
+    }
+    final guid = conflict.episodeGuid;
+    // If it looks like a URL, extract the last path segment
+    if (guid.contains('/')) {
+      try {
+        final uri = Uri.parse(guid);
+        var segment = uri.pathSegments.isNotEmpty ? uri.pathSegments.last : guid;
+        // Decode percent-encoding
+        segment = Uri.decodeComponent(segment);
+        // Strip common audio extensions
+        segment = segment.replaceAll(RegExp(r'\.(mp3|m4a|ogg|opus|wav|aac)$', caseSensitive: false), '');
+        // Replace dashes/underscores with spaces
+        segment = segment.replaceAll(RegExp(r'[-_]'), ' ').trim();
+        if (segment.isNotEmpty) return segment;
+      } catch (_) {}
+    }
+    return guid;
   }
 
   void _resolveAll(bool keepRemote) {
@@ -57,6 +81,10 @@ class _ConflictResolutionDialogState extends State<ConflictResolutionDialog> {
               _decisions[key] = keepRemote;
           }
       });
+      if (_setAsDefault) {
+          final strategy = keepRemote ? SyncStrategy.serverWins : SyncStrategy.deviceWins;
+          Provider.of<SettingsProvider>(context, listen: false).setSyncConflictStrategy(strategy);
+      }
   }
 
   @override
@@ -99,9 +127,9 @@ class _ConflictResolutionDialogState extends State<ConflictResolutionDialog> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                        Text(
-                         conflict.episodeTitle ?? conflict.episodeGuid,
+                         _displayName(conflict),
                          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-                         maxLines: 1, overflow: TextOverflow.ellipsis,
+                         maxLines: 2, overflow: TextOverflow.ellipsis,
                        ),
                        if (conflict.podcastTitle != null)
                            Text(
@@ -165,6 +193,24 @@ class _ConflictResolutionDialogState extends State<ConflictResolutionDialog> {
               ),
             ),
             const SizedBox(height: 16),
+            // Set as default checkbox
+            Row(
+              children: [
+                Checkbox(
+                  value: _setAsDefault,
+                  onChanged: (val) => setState(() => _setAsDefault = val ?? false),
+                  activeColor: Colors.deepPurpleAccent,
+                  side: const BorderSide(color: Colors.white54),
+                ),
+                const Expanded(
+                  child: Text(
+                    'Set as default for future conflicts',
+                    style: TextStyle(color: Colors.white70, fontSize: 12),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
             Row(
                 mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                 children: [
@@ -182,7 +228,15 @@ class _ConflictResolutionDialogState extends State<ConflictResolutionDialog> {
         ),
         ElevatedButton(
           onPressed: () {
-             // Return the decisions
+             // Save default if checkbox is checked
+             if (_setAsDefault) {
+               final allRemote = _decisions.values.every((v) => v);
+               final allLocal = _decisions.values.every((v) => !v);
+               if (allRemote || allLocal) {
+                 final strategy = allRemote ? SyncStrategy.serverWins : SyncStrategy.deviceWins;
+                 Provider.of<SettingsProvider>(context, listen: false).setSyncConflictStrategy(strategy);
+               }
+             }
              Navigator.pop(context, _decisions);
           },
           style: ElevatedButton.styleFrom(backgroundColor: Colors.deepPurpleAccent),

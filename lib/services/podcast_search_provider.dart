@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 import '../models/podcast_search_result.dart';
+import '../utils/user_agent.dart';
 import 'log_service.dart';
 
 /// Abstract base class for podcast search providers.
@@ -36,7 +37,7 @@ class ITunesSearchProvider extends PodcastSearchProvider {
     });
 
     try {
-      final response = await http.get(uri);
+      final response = await http.get(uri, headers: withUserAgent());
       if (response.statusCode != 200) {
         Log.e('ITunesSearch', 'HTTP ${response.statusCode}');
         return [];
@@ -46,12 +47,15 @@ class ITunesSearchProvider extends PodcastSearchProvider {
       final List results = data['results'] ?? [];
 
       return results.map((item) {
+        final List genres = item['genres'] ?? [];
         return PodcastSearchResult(
           title: item['collectionName'] ?? item['trackName'] ?? 'Unknown',
           feedUrl: item['feedUrl'] ?? '',
           artworkUrl: item['artworkUrl600'] ?? item['artworkUrl100'],
           author: item['artistName'],
-          description: item['collectionName'],
+          description: null,
+          websiteUrl: item['collectionViewUrl'],
+          genre: genres.where((g) => g != 'Podcasts').join(', '),
         );
       }).where((r) => r.feedUrl.isNotEmpty).toList();
     } catch (e) {
@@ -94,7 +98,7 @@ class PodcastIndexSearchProvider extends PodcastSearchProvider {
       'X-Auth-Date': '$epoch',
       'X-Auth-Key': apiKey,
       'Authorization': hash,
-      'User-Agent': 'YourPods/1.0',
+      'User-Agent': yourPodsUserAgent,
     };
   }
 
@@ -121,12 +125,16 @@ class PodcastIndexSearchProvider extends PodcastSearchProvider {
       final List feeds = data['feeds'] ?? [];
 
       return feeds.map((item) {
+        // Categories come as a map of id->name pairs
+        final Map cats = item['categories'] ?? {};
         return PodcastSearchResult(
           title: item['title'] ?? 'Unknown',
           feedUrl: item['url'] ?? '',
           artworkUrl: item['artwork'] ?? item['image'],
           author: item['author'],
           description: item['description'],
+          websiteUrl: item['link'],
+          genre: cats.values.join(', '),
         );
       }).where((r) => r.feedUrl.isNotEmpty).toList();
     } catch (e) {

@@ -1,14 +1,45 @@
+import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:dart_rss/dart_rss.dart';
 import 'dart:io';
 import 'package:intl/intl.dart';
 import 'package:xml/xml.dart' as xml;
 import '../models/podcast.dart';
+import '../utils/user_agent.dart';
 
 class RssService {
-  Future<List<Episode>> fetchEpisodes(String rssUrl) async {
+  /// Build auth headers from URL userinfo or explicit credentials.
+  /// Handles both `https://user:pass@host/feed` and separate username/password.
+  Map<String, String> _buildAuthHeaders(String url, {String? username, String? password}) {
+    final uri = Uri.parse(url);
+    // Check URL-embedded credentials first
+    if (uri.userInfo.isNotEmpty) {
+        final parts = uri.userInfo.split(':');
+        final user = Uri.decodeComponent(parts[0]);
+        final pass = parts.length > 1 ? Uri.decodeComponent(parts.sublist(1).join(':')) : '';
+        final encoded = base64Encode(utf8.encode('$user:$pass'));
+        return {'Authorization': 'Basic $encoded'};
+    }
+    // Check explicit credentials
+    if (username != null && password != null) {
+        final encoded = base64Encode(utf8.encode('$username:$password'));
+        return {'Authorization': 'Basic $encoded'};
+    }
+    return {};
+  }
+
+  /// Strip userinfo from URL for clean API calls (just_audio, etc.)
+  String _stripUserInfo(String url) {
+    final uri = Uri.parse(url);
+    if (uri.userInfo.isEmpty) return url;
+    return uri.replace(userInfo: '').toString();
+  }
+
+  Future<List<Episode>> fetchEpisodes(String rssUrl, {String? username, String? password}) async {
     try {
-      final response = await http.get(Uri.parse(rssUrl)).timeout(const Duration(seconds: 30));
+      final headers = _buildAuthHeaders(rssUrl, username: username, password: password);
+      final cleanUrl = _stripUserInfo(rssUrl);
+      final response = await http.get(Uri.parse(cleanUrl), headers: withUserAgent(headers)).timeout(const Duration(seconds: 30));
     
       if (response.statusCode == 200) {
       final feed = RssFeed.parse(response.body);
@@ -116,8 +147,10 @@ class RssService {
     return map;
   }
 
-  Future<Podcast> getFeedMetadata(String rssUrl) async {
-    final response = await http.get(Uri.parse(rssUrl));
+  Future<Podcast> getFeedMetadata(String rssUrl, {String? username, String? password}) async {
+    final headers = _buildAuthHeaders(rssUrl, username: username, password: password);
+    final cleanUrl = _stripUserInfo(rssUrl);
+    final response = await http.get(Uri.parse(cleanUrl), headers: withUserAgent(headers));
     
     if (response.statusCode == 200) {
       final feed = RssFeed.parse(response.body);
@@ -127,6 +160,7 @@ class RssService {
         description: feed.description,
         logoUrl: feed.itunes?.image?.href ?? feed.image?.url,
         website: feed.link,
+        author: feed.itunes?.author ?? feed.author,
       );
     } else {
       // Return a basic object if fetch fails

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../utils/safe_int.dart';
 import 'dart:async';
 import 'dart:io';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -17,8 +18,23 @@ import '../services/id3_chapter_service.dart';
 import '../services/log_service.dart';
 import '../services/siri_service.dart';
 import '../utils/media_item_builder.dart';
-import '../utils/episode_action_cache.dart';
 import '../models/sync_conflict.dart';
+import '../models/queue_sync_change.dart';
+import '../services/queue_sync_service.dart';
+
+/// Result from syncPlaybackState containing both episode conflicts and queue sync changes.
+class SyncResult {
+  final List<SyncConflict> conflicts;
+  final List<QueueSyncChange> queueChanges;
+
+  SyncResult({required this.conflicts, required this.queueChanges});
+  
+  factory SyncResult.empty() => SyncResult(conflicts: [], queueChanges: []);
+  
+  bool get hasConflicts => conflicts.isNotEmpty;
+  bool get hasQueueChanges => queueChanges.isNotEmpty;
+  bool get isEmpty => !hasConflicts && !hasQueueChanges;
+}
 
 class PlayerProvider with ChangeNotifier {
   final PodcastAudioHandler _audioHandler;
@@ -57,6 +73,13 @@ class PlayerProvider with ChangeNotifier {
   // Expose queue
   Stream<List<MediaItem>> get queueStream => _audioHandler.queue;
   List<MediaItem> get queue => _audioHandler.queue.value;
+
+  /// Stream of user-visible error messages from the audio handler
+  /// (e.g. network failures during auto-advance or stream recovery).
+  Stream<String> get playbackErrorStream => _audioHandler.playbackError;
+
+  /// Retry the last failed auto-advance (called from Retry SnackBar).
+  Future<void> retryPlayback() => _audioHandler.retryLastAutoAdvance();
   
   DateTime _lastSyncTime = DateTime.fromMillisecondsSinceEpoch(0);
   int? _lastSyncedPosition;
@@ -93,6 +116,22 @@ class PlayerProvider with ChangeNotifier {
 
   void updatePodcastProvider(PodcastProvider provider) {
     _podcastProvider = provider;
+    
+    // Re-sync _currentPodcast from subscriptions if we have a mediaItem
+    // but _currentPodcast has incomplete data (e.g., on cold start,
+    // _syncFromMediaItem built a fallback Podcast from item.album before
+    // subscriptions loaded — now that subs are available, upgrade to full data).
+    final current = _audioHandler.mediaItem.value;
+    if (current != null && provider.subscriptions.isNotEmpty) {
+        final pUrl = current.extras?['podcastUrl'] as String?;
+        if (pUrl != null) {
+            final sub = provider.subscriptions.where((p) => p.url == pUrl).firstOrNull;
+            if (sub != null && (_currentPodcast == null || _currentPodcast!.logoUrl == null)) {
+                _currentPodcast = sub;
+                notifyListeners();
+            }
+        }
+    }
   }
   
   DownloadProvider? _downloadProvider;
@@ -100,7 +139,61 @@ class PlayerProvider with ChangeNotifier {
   LiveActivityService? _liveActivityService;
   
   void updateDownloadProvider(DownloadProvider provider) {
-      _downloadProvider = provider;
+      if (_downloadProvider != provider) {
+          _downloadProvider?.removeListener(_onDownloadProviderChanged);
+          _downloadProvider = provider;
+          _downloadProvider!.addListener(_onDownloadProviderChanged);
+      }
+  }
+
+  /// React to download state changes. When the currently playing episode
+  /// finishes downloading, seamlessly swap from the network stream to the
+  /// local file to save battery and data.
+  void _onDownloadProviderChanged() {
+    if (_currentEpisode == null || _downloadProvider == null) return;
+    final url = _currentEpisode!.audioUrl;
+    if (url == null) return;
+
+    final status = _downloadProvider!.getStatus(url);
+    if (status == DownloadState.downloaded) {
+      // Check if we're currently streaming (not already playing a local file)
+      final currentUrl = _audioHandler.mediaItem.value?.extras?['url'] as String?;
+      if (currentUrl != null && !currentUrl.startsWith('/')) {
+        _swapToLocalFile(url);
+      }
+    }
+  }
+
+  /// Swap the currently streaming episode to its newly downloaded local file.
+  Future<void> _swapToLocalFile(String url) async {
+    try {
+      final localPath = await _downloadProvider!.getDownloadedPath(url);
+      if (localPath == null) return;
+
+      final wasPlaying = _player.playing;
+      final position = _player.position;
+
+      Log.i('PlayerProvider', 'Swapping stream → local file at ${position.inSeconds}s');
+
+      // Update the media item extras to reflect the local path
+      final current = _audioHandler.mediaItem.value;
+      if (current != null) {
+        final newExtras = Map<String, dynamic>.from(current.extras ?? {});
+        newExtras['url'] = localPath;
+        final updated = current.copyWith(extras: newExtras);
+        _audioHandler.mediaItem.add(updated);
+      }
+
+      // Reload the player with the local file at the same position
+      await _audioHandler.playEpisode(
+        _audioHandler.mediaItem.value!,
+        localPath,
+        initialPosition: position,
+        autoPlay: wasPlaying,
+      );
+    } catch (e) {
+      Log.e('PlayerProvider', 'Stream→local swap failed (non-fatal): $e');
+    }
   }
   
   void setLiveActivityService(LiveActivityService service) {
@@ -130,6 +223,9 @@ class PlayerProvider with ChangeNotifier {
       _watchService = service;
       // Start listening for commands from watch
       _watchService!.listenForCommands(_audioHandler);
+      if (_podcastProvider != null) {
+          _watchService!.setPodcastProvider(_podcastProvider!);
+      }
       _watchService!.setCustomCommandHandler((command, args) {
           final episodeId = args['episodeId'] as String?;
           
@@ -148,32 +244,41 @@ class PlayerProvider with ChangeNotifier {
               final episodeId = args['episodeId'] as String?;
               final position = args['position'] as int?;
               if (episodeId != null && position != null && _podcastProvider != null) {
-                  // Get current episode info if possible to populate action fields
-                  // If not current, we might need to look it up or just send minimal info
-                  // For minimal sync, we need podcast URL. 
-                  // If it's in the queue, we can find it.
                   final item = _audioHandler.queue.value.where((i) => i.id == episodeId).firstOrNull;
                   if (item != null) {
                        final podcastUrl = item.extras?['podcastUrl'] as String?;
                        if (podcastUrl != null) {
                            Log.d('PlayerProvider', 'Syncing watch progress for $episodeId: $position');
+                           final audioUrl = item.extras?['url'] as String?;
                            final action = EpisodeAction(
                                podcast: podcastUrl,
-                               episode: episodeId,
+                               episode: audioUrl ?? episodeId,
                                guid: episodeId,
                                action: 'play',
                                timestamp: DateTime.now().millisecondsSinceEpoch ~/ 1000,
                                position: position,
                                started: 0,
                                total: item.duration?.inSeconds ?? 0,
-                               device: 'apple-watch', // Distinguish device
+                               device: 'apple-watch',
                            );
                            _podcastProvider!.sendEpisodeAction(action);
                        }
                   }
               }
+          } else if (command == 'request_library') {
+              _syncWatchLibrary();
+          } else if (command == 'request_episodes') {
+              final feedUrl = args['feedUrl'] as String?;
+              if (feedUrl != null) {
+                  _sendEpisodesToWatch(feedUrl);
+              }
+          } else if (command == 'refresh_queue') {
+              _checkWatchSync();
           }
       });
+      
+      // Trigger initial sync so the watch gets the current queue immediately
+      _checkWatchSync();
   }
   
 
@@ -201,7 +306,34 @@ class PlayerProvider with ChangeNotifier {
           );
       }
   }
-  
+
+  void _syncWatchLibrary() {
+      if (_watchService != null && _podcastProvider != null) {
+          _watchService!.syncLibrary(_podcastProvider!.subscriptions);
+      }
+  }
+
+  Future<void> _sendEpisodesToWatch(String feedUrl) async {
+      if (_watchService == null || _podcastProvider == null) return;
+
+      try {
+          final episodes = await _podcastProvider!.getEpisodes(feedUrl);
+          // Send top 3 episodes initially, watch can request more
+          final topEpisodes = episodes.take(3).map((e) => {
+              'guid': e.guid,
+              'title': e.title,
+              'audioUrl': e.audioUrl,
+              'duration': e.duration?.inSeconds ?? 0,
+              'imageUrl': e.imageUrl,
+              'pubDate': e.pubDate?.toIso8601String(),
+          }).toList();
+
+          await _watchService!.sendEpisodesToWatch(feedUrl, topEpisodes);
+      } catch (e) {
+          Log.e('PlayerProvider', 'Failed to send episodes to watch for $feedUrl: $e');
+      }
+  }
+
 
   static String formatDurationHuman(Duration d) {
     if (d.inHours > 0) {
@@ -257,7 +389,11 @@ class PlayerProvider with ChangeNotifier {
         final playing = state.playing;
         
         if (!playing && _currentEpisode != null) {
-             _syncProgress(action: 'play'); 
+             // Don't compete for bandwidth during error recovery
+             final ps = _audioHandler.playbackState.value.processingState;
+             if (ps != AudioProcessingState.error) {
+               _syncProgress(action: 'play');
+             }
         }
 
         // Detect Completion to mark as played
@@ -316,7 +452,7 @@ class PlayerProvider with ChangeNotifier {
        
        final episodeAction = EpisodeAction(
          podcast: _currentPodcast?.url ?? '', // Attempt to get url
-         episode: episode.guid, 
+         episode: episode.audioUrl ?? episode.guid, 
          guid: episode.guid,
          action: 'play',
          timestamp: DateTime.now().millisecondsSinceEpoch ~/ 1000,
@@ -345,75 +481,321 @@ class PlayerProvider with ChangeNotifier {
 
   Future<void> forceSync({String action = 'play'}) async {
       Log.i('PlayerProvider', 'Forcing sync with action: $action');
-      await _syncProgress(action: action);
+      // Force-save to disk first (survives force-quit)
+      await _audioHandler.forceSaveState();
+      // Then sync to server, bypassing the 30s debounce
+      await _syncProgress(action: action, bypassDebounce: true);
+  }
+
+  /// Force-save current queue and playback position to disk immediately.
+  /// Called from lifecycle handlers to ensure no data is lost on force-quit.
+  Future<void> forceSaveState() async {
+      await _audioHandler.forceSaveState();
   }
 
   GPodderApi? _api;
   String _deviceId = 'flutter-client'; // Default or injected
 
-  void setApi(GPodderApi api, String deviceId) {
-    Log.d('PlayerProvider', 'setApi called with deviceId: $deviceId');
+  void setApi(GPodderApi? api, String deviceId, {String? profileId}) async {
+    Log.d('PlayerProvider', 'setApi called with deviceId: $deviceId, profileId: $profileId');
     _api = api;
     _deviceId = deviceId;
     
+    // Set profile ID on audio handler for profile-scoped queue storage.
+    // MUST await so _loadLastState finishes and mediaItem is populated
+    // before we proceed — otherwise the state clear below wipes the
+    // just-restored episode.
+    if (profileId != null) {
+        await _audioHandler.setProfileId(profileId);
+        // Don't clear _currentEpisode here — _syncFromMediaItem from the
+        // mediaItem listener will populate it from the restored state.
+        // Clearing it causes a race: the mini player briefly shows nothing,
+        // and the queue listener re-enters _evaluateFallbackState with
+        // _currentEpisode == null, potentially loading the wrong episode.
+    }
+    
     // Timestamp loading handled in PodcastProvider now.
-    syncPlaybackState();
+    // Fire-and-forget: don't block startup/playback waiting for server sync.
+    // The sync enriches queue positions and resolves conflicts, but playback
+    // must be available immediately.
+    syncPlaybackState().catchError((e) {
+        Log.e('PlayerProvider', 'Background syncPlaybackState failed: $e');
+    });
   }
 
   Future<void> loadInitialState(PodcastProvider podcastProvider) async {
       await _evaluateFallbackState(podcastProvider);
+      // Drain any episodes queued by background refresh or previous sessions
+      await drainPendingAutoQueue();
       // Note: enrichQueueWithPositions() is called in setApi() when API is ready
+  }
+
+  /// Drain the pending auto-queue buffer and add episodes to the player queue.
+  /// Safe to call multiple times — clears the buffer after processing.
+  Future<int> drainPendingAutoQueue() async {
+      if (_podcastProvider == null) return 0;
+      
+      final pending = await _podcastProvider!.loadPendingAutoQueue();
+      if (pending.isEmpty) return 0;
+      
+      Log.i('PlayerProvider', 'Draining ${pending.length} pending auto-queue episodes');
+      
+      final priorityItems = <Map<String, dynamic>>[];
+      final standardItems = <Map<String, dynamic>>[];
+      
+      for (var item in pending) {
+          final audioUrl = item['audioUrl'] as String?;
+          if (audioUrl == null) continue;
+          
+          // Skip if already in queue
+          final guid = item['guid'] as String;
+          if (queue.any((q) => q.id == guid)) {
+              Log.d('PlayerProvider', 'Skipping pending episode $guid — already in queue');
+              continue;
+          }
+          
+          final podcast = Podcast(
+              url: item['podcastUrl'] as String? ?? '',
+              title: item['podcastTitle'] as String? ?? 'Unknown',
+              logoUrl: item['podcastLogoUrl'] as String?,
+          );
+          final episode = Episode(
+              guid: guid,
+              title: item['title'] as String? ?? '',
+              description: '',
+              audioUrl: audioUrl,
+              imageUrl: item['imageUrl'] as String?,
+              duration: item['duration'] != null 
+                  ? Duration(seconds: item['duration'] as int) 
+                  : null,
+              pubDate: item['pubDate'] != null 
+                  ? DateTime.tryParse(item['pubDate'] as String) 
+                  : null,
+              chaptersUrl: item['chaptersUrl'] as String?,
+              transcriptUrl: item['transcriptUrl'] as String?,
+          );
+          
+          final episodeMap = {'podcast': podcast, 'episode': episode};
+          
+          if (item['priority'] == true) {
+              priorityItems.add(episodeMap);
+          } else {
+              standardItems.add(episodeMap);
+          }
+      }
+      
+      final totalAdded = priorityItems.length + standardItems.length;
+      
+      if (priorityItems.isNotEmpty) {
+          await addEpisodesToQueue(priorityItems, playNext: true);
+      }
+      if (standardItems.isNotEmpty) {
+          await addEpisodesToQueue(standardItems, playNext: false);
+      }
+      
+      // Clear the buffer now that we've processed everything
+      await _podcastProvider!.clearPendingAutoQueue();
+      
+      if (totalAdded > 0) {
+          Log.i('PlayerProvider', 'Auto-queued $totalAdded episodes '
+              '(${priorityItems.length} priority, ${standardItems.length} standard)');
+      }
+      
+      return totalAdded;
   }
 
   /// Syncs playback state (Episode Actions) from the server.
   /// Delegates to PodcastProvider.
-  /// Syncs playback state (Episode Actions) from the server.
-  /// Delegates to PodcastProvider.
-  /// Returns a list of conflicts if any found (and strategy is Ask).
-  Future<List<SyncConflict>> syncPlaybackState({bool force = true}) async {
-      if (_podcastProvider == null) return [];
+  /// Returns a SyncResult with conflicts and queue sync changes.
+  Future<SyncResult> syncPlaybackState({bool force = true}) async {
+      // Deduplicate queue — remove episodes with duplicate GUIDs,
+      // keeping the first occurrence (which has the most recent position).
+      // Runs regardless of whether server sync is available.
+      await _deduplicateQueue();
+
+      if (_podcastProvider == null) return SyncResult.empty();
       
-      Log.d('PlayerProvider', 'Delegating playback sync to PodcastProvider...');
-      
-      final strategy = _settings?.syncConflictStrategy ?? SyncStrategy.serverWins;
-      final conflicts = await _podcastProvider!.syncEpisodeActions(_deviceId, force: force, strategy: strategy);
-      
-      // After sync, check if we need to seek current episode
-      // If there are conflicts for the CURRENT episode, we might not want to seek automatically?
-      // Or we wait for resolution?
-      // If strategy is ASK, syncEpisodeActions returns conflicts but DOES NOT update local yet for those items.
-      // So we shouldn't seek yet if current is conflicted.
-      
-      if (_currentEpisode != null && _audioHandler.mediaItem.value?.id == _currentEpisode!.guid) {
-           // Check if current is in conflicts
-           final isConflicted = conflicts.any((c) => c.episodeGuid == _currentEpisode!.guid);
-           
-           if (!isConflicted) {
-               final action = _podcastProvider!.getLatestAction(_currentEpisode!.guid);
-               if (action != null && action.position != null) {
-                   final currentPos = _player.position.inSeconds;
-                   if (action.position! > currentPos + 5) {
-                        Log.i('PlayerProvider', 'Remote position ahead ($currentPos -> ${action.position}), seeking...');
-                        await _audioHandler.seek(Duration(seconds: action.position!));
+      // Server sync requires an API connection; skip for local profiles
+      List<SyncConflict> conflicts = [];
+      if (_api != null) {
+          Log.d('PlayerProvider', 'Delegating playback sync to PodcastProvider...');
+          
+          final strategy = _settings?.syncConflictStrategy ?? SyncStrategy.serverWins;
+          conflicts = await _podcastProvider!.syncEpisodeActions(_deviceId, force: force, strategy: strategy);
+          
+          // After sync, check if we need to seek current episode
+          if (_currentEpisode != null && _audioHandler.mediaItem.value?.id == _currentEpisode!.guid) {
+               final isConflicted = conflicts.any((c) => c.episodeGuid == _currentEpisode!.guid);
+               
+               if (!isConflicted) {
+                   final action = _podcastProvider!.getLatestAction(_currentEpisode!.guid);
+                   if (action != null && action.position != null) {
+                       final currentPos = _player.position.inSeconds;
+                       if (action.position! > currentPos + 5) {
+                            Log.i('PlayerProvider', 'Remote position ahead ($currentPos -> ${action.position}), seeking...');
+                            await _audioHandler.seek(Duration(seconds: action.position!));
+                       }
                    }
                }
-           }
+          }
       }
       
-      // Enrich Queue with new actions
+      // Enrich Queue with new actions — runs for ALL profiles (uses PodcastProvider, not API)
       await _enrichQueueFromProvider();
       
-      return conflicts;
+      // Compute queue sync changes
+      final queueChanges = await _computeQueueSyncChanges();
+      
+      // Auto-apply if strategy is serverWins
+      final queueStrategy = _settings?.queueSyncStrategy ?? QueueSyncStrategy.ask;
+      if (queueStrategy == QueueSyncStrategy.serverWins && queueChanges.isNotEmpty) {
+          Log.i('PlayerProvider', 'Auto-applying ${queueChanges.length} queue sync changes (serverWins)');
+          await applyQueueSyncChanges(queueChanges);
+          return SyncResult(conflicts: conflicts, queueChanges: []);
+      } else if (queueStrategy == QueueSyncStrategy.deviceWins) {
+          Log.d('PlayerProvider', 'Ignoring ${queueChanges.length} queue sync changes (deviceWins)');
+          return SyncResult(conflicts: conflicts, queueChanges: []);
+      }
+      
+      return SyncResult(conflicts: conflicts, queueChanges: queueChanges);
+  }
+
+  /// Compute proposed queue changes from server episode actions.
+  Future<List<QueueSyncChange>> _computeQueueSyncChanges() async {
+      if (_podcastProvider == null) return [];
+      
+      final changes = QueueSyncService.computeChanges(
+          localQueue: queue,
+          actionMap: _podcastProvider!.actionMap,
+          subscriptions: _podcastProvider!.subscriptions,
+      );
+      
+      // Enrich changes with episode/podcast titles
+      for (final change in changes) {
+          if (change.episodeTitle == null) {
+              final info = await _podcastProvider!.resolveEpisodeInfo(
+                  change.podcastUrl, change.episodeGuid,
+              );
+              change.episodeTitle = info['episodeTitle'];
+              change.podcastTitle ??= info['podcastTitle'];
+          }
+      }
+      
+      if (changes.isNotEmpty) {
+          Log.d('PlayerProvider', 'Queue sync: ${changes.length} changes detected '
+              '(${changes.where((c) => c.type == QueueSyncChangeType.add).length} add, '
+              '${changes.where((c) => c.type == QueueSyncChangeType.remove).length} remove, '
+              '${changes.where((c) => c.type == QueueSyncChangeType.update).length} update)');
+      }
+      
+      return changes;
+  }
+
+  /// Apply accepted queue sync changes.
+  Future<void> applyQueueSyncChanges(List<QueueSyncChange> changes) async {
+      final processedGuids = <String>{};
+      for (final change in changes) {
+          if (!change.accepted) continue;
+          // Skip if we already processed this episode in this batch
+          if (!processedGuids.add(change.episodeGuid)) {
+              Log.d('PlayerProvider', 'Queue sync: skipping duplicate change for ${change.episodeTitle ?? change.episodeGuid}');
+              continue;
+          }
+          
+          switch (change.type) {
+              case QueueSyncChangeType.add:
+                  await _applyQueueAdd(change);
+                  break;
+              case QueueSyncChangeType.remove:
+                  final item = queue.where((i) => i.id == change.episodeGuid).firstOrNull;
+                  if (item != null) {
+                      await _audioHandler.removeQueueItem(item);
+                      Log.d('PlayerProvider', 'Queue sync: removed ${change.episodeTitle ?? change.episodeGuid}');
+                  }
+                  break;
+              case QueueSyncChangeType.update:
+                  final idx = queue.indexWhere((i) => i.id == change.episodeGuid);
+                  if (idx >= 0 && change.serverPosition != null) {
+                      final item = queue[idx];
+                      final newExtras = Map<String, dynamic>.from(item.extras ?? {});
+                      newExtras['position_seconds'] = change.serverPosition;
+                      final updated = item.copyWith(extras: newExtras);
+                      final updatedQueue = List<MediaItem>.from(queue);
+                      updatedQueue[idx] = updated;
+                      await _audioHandler.updateQueue(updatedQueue);
+                      Log.d('PlayerProvider', 'Queue sync: updated position for ${change.episodeTitle ?? change.episodeGuid}');
+                  }
+                  break;
+          }
+      }
+  }
+
+  /// Add an episode to the queue from a queue sync change.
+  Future<void> _applyQueueAdd(QueueSyncChange change) async {
+      // Guard: skip if episode is already in the queue
+      if (queue.any((i) => i.id == change.episodeGuid)) {
+          Log.d('PlayerProvider', 'Queue sync: skipping add for ${change.episodeTitle ?? change.episodeGuid} (already in queue)');
+          return;
+      }
+      // Look up the episode in subscriptions to get full metadata
+      if (_podcastProvider == null) return;
+      
+      Podcast? podcast;
+      Episode? episode;
+      
+      try {
+          podcast = _podcastProvider!.subscriptions
+              .where((p) => p.url == change.podcastUrl)
+              .firstOrNull;
+          
+          if (podcast != null) {
+              final episodes = await _podcastProvider!.getEpisodes(podcast.url);
+              episode = episodes.where((e) => e.guid == change.episodeGuid).firstOrNull;
+          }
+      } catch (e) {
+          Log.e('PlayerProvider', 'Error looking up episode for queue add: $e');
+      }
+      
+      if (episode != null && podcast != null && episode.audioUrl != null) {
+          final mediaItem = MediaItemBuilder.fromEpisode(
+              podcast, episode,
+              positionSeconds: change.serverPosition,
+          );
+          await _audioHandler.addQueueItem(mediaItem);
+          Log.d('PlayerProvider', 'Queue sync: added ${episode.title}');
+      } else {
+          Log.w('PlayerProvider', 'Queue sync: could not resolve episode ${change.episodeGuid} for add');
+      }
+  }
+
+  /// Remove duplicate episodes from the queue, keeping the first occurrence.
+  Future<void> _deduplicateQueue() async {
+      final seen = <String>{};
+      final currentQueue = queue;
+      final deduped = <MediaItem>[];
+      for (final item in currentQueue) {
+          if (seen.add(item.id)) {
+              deduped.add(item);
+          }
+      }
+      if (deduped.length < currentQueue.length) {
+          Log.i('PlayerProvider', 'Queue dedup: removed ${currentQueue.length - deduped.length} duplicate(s)');
+          await _audioHandler.updateQueue(deduped);
+      }
   }
 
   Future<void> _enrichQueueFromProvider() async {
        if (queue.isEmpty || _podcastProvider == null) return;
        
+       final currentlyPlayingId = _audioHandler.mediaItem.value?.id;
        bool hasUpdates = false;
        final updatedQueue = queue.map((item) {
+           // Don't overwrite the currently playing episode's position —
+           // the player's live position is authoritative, not the server's.
+           if (item.id == currentlyPlayingId) return item;
            final action = _podcastProvider!.getLatestAction(item.id);
            if (action != null && action.position != null) {
-               final currentPos = item.extras?['position_seconds'] as int? ?? 0;
+               final currentPos = safeInt(item.extras?['position_seconds']);
                if (action.position! > currentPos) {
                    hasUpdates = true;
                    final newExtras = Map<String, dynamic>.from(item.extras ?? {});
@@ -426,7 +808,7 @@ class PlayerProvider with ChangeNotifier {
        
        if (hasUpdates) {
            await _audioHandler.updateQueue(updatedQueue);
-           Log.d('PlayerProvider', 'Queue enriched with new actions form PodcastProvider');
+           Log.d('PlayerProvider', 'Queue enriched with new actions from PodcastProvider');
        }
   }
 
@@ -442,6 +824,12 @@ class PlayerProvider with ChangeNotifier {
 
 
   Future<void> _evaluateFallbackState(PodcastProvider podcastProvider) async {
+      // Wait for AudioHandler._init() to finish (loads queue + last mediaItem
+      // from disk). Without this, mediaItem.value may still be null, causing
+      // step 2 to incorrectly call prepareMediaItem(queue[0]) and override
+      // the restored state.
+      await _audioHandler.ready;
+
       // 1. Current Loaded Item (Playing or Paused)
       if (_audioHandler.mediaItem.value != null) {
           _syncFromMediaItem(_audioHandler.mediaItem.value!, podcastProvider);
@@ -451,7 +839,12 @@ class PlayerProvider with ChangeNotifier {
       // 2. Queue Top (Device Queue)
       if (_audioHandler.queue.value.isNotEmpty) {
           final item = _audioHandler.queue.value.first;
-          await _audioHandler.prepareMediaItem(item);
+          // Only call prepareMediaItem if _loadLastState didn't already load
+          // the same item (avoids a duplicate network request on cold start).
+          final alreadyLoaded = _audioHandler.mediaItem.value;
+          if (alreadyLoaded == null || alreadyLoaded.id != item.id) {
+              await _audioHandler.prepareMediaItem(item);
+          }
           _syncFromMediaItem(item, podcastProvider);
           return;
       }
@@ -465,21 +858,7 @@ class PlayerProvider with ChangeNotifier {
               final episode = top['episode'] as Episode;
               
               if (episode.audioUrl != null) {
-                   final mediaItem = MediaItem(
-                        id: episode.guid,
-                        album: podcast.title,
-                        title: episode.title,
-                        artist: '', 
-                        artUri: (episode.imageUrl != null || podcast.logoUrl != null) 
-                            ? Uri.parse(episode.imageUrl ?? podcast.logoUrl!) 
-                            : null,
-                        duration: episode.duration,
-                        extras: {
-                          'url': episode.audioUrl,
-                          'podcastUrl': podcast.url,
-                          if (episode.chaptersUrl != null) 'chaptersUrl': episode.chaptersUrl,
-                        },
-                   );
+                   final mediaItem = MediaItemBuilder.fromEpisode(podcast, episode);
                    await _audioHandler.prepareMediaItem(mediaItem);
                    _currentPodcast = podcast;
                    _currentEpisode = episode;
@@ -497,12 +876,18 @@ class PlayerProvider with ChangeNotifier {
   }
 
   void _syncFromMediaItem(MediaItem item, PodcastProvider provider) {
+      Podcast? podcast;
+      Episode? episode;
+
       if (item.extras?['podcastUrl'] != null) {
          final pUrl = item.extras!['podcastUrl'] as String;
-         final podcast = provider.subscriptions.where((p) => p.url == pUrl).firstOrNull 
+         podcast = provider.subscriptions.where((p) => p.url == pUrl).firstOrNull 
              ?? Podcast(url: pUrl, title: item.album ?? 'Unknown');
          
-         final episode = Episode(
+         // Try to find full episode from provider's cache (includes description)
+         final cachedEpisode = provider.findEpisodeInCache(pUrl, item.id);
+         
+         episode = cachedEpisode ?? Episode(
              guid: item.id,
              title: item.title,
              description: '',
@@ -510,30 +895,55 @@ class PlayerProvider with ChangeNotifier {
              imageUrl: item.artUri?.toString(),
              duration: item.duration,
              chaptersUrl: item.extras?['chaptersUrl'],
+             transcriptUrl: item.extras?['transcriptUrl'],
+             pubDate: item.extras?['pubDate'] != null 
+                 ? DateTime.tryParse(item.extras!['pubDate']) 
+                 : null,
          );
          
-         _currentPodcast = podcast;
-         _currentEpisode = episode;
-         
-         // Restore chapters from extras if available
-         if (item.extras?['chapters'] != null) {
-             try {
-                 final List<dynamic> chaptersJson = item.extras!['chapters'];
-                 _currentChapters = chaptersJson.map((c) => Chapter.fromJson(c)).toList();
-             } catch (e) {
-                 Log.e('PlayerProvider', 'Error parsing chapters from extras: $e');
-                 _currentChapters = null;
-             }
-         } else {
-             _currentChapters = null;
-             // Trigger fetch if needed
-             if (episode.chaptersUrl != null || episode.audioUrl != null) {
-                 _fetchChaptersForCurrent(episode.chaptersUrl);
-             }
+         // If not cached, warm up the cache for next time
+         if (cachedEpisode == null) {
+             provider.getEpisodes(pUrl).catchError((_) => <Episode>[]);
          }
-         
-         notifyListeners();
+      } else {
+         // No podcastUrl — build a synthetic Episode from the MediaItem
+         // so the mini player still shows the currently playing episode.
+         Log.w('PlayerProvider', '_syncFromMediaItem: no podcastUrl for "${item.title}" — using fallback');
+         podcast = Podcast(url: '', title: item.album ?? 'Unknown');
+         episode = Episode(
+             guid: item.id,
+             title: item.title,
+             description: '',
+             audioUrl: item.extras?['url'],
+             imageUrl: item.artUri?.toString(),
+             duration: item.duration,
+             pubDate: item.extras?['pubDate'] != null 
+                 ? DateTime.tryParse(item.extras!['pubDate']) 
+                 : null,
+         );
       }
+
+      _currentPodcast = podcast;
+      _currentEpisode = episode;
+         
+      // Restore chapters from extras if available
+      if (item.extras?['chapters'] != null) {
+          try {
+              final List<dynamic> chaptersJson = item.extras!['chapters'];
+              _currentChapters = chaptersJson.map((c) => Chapter.fromJson(c)).toList();
+          } catch (e) {
+              Log.e('PlayerProvider', 'Error parsing chapters from extras: $e');
+              _currentChapters = null;
+          }
+      } else {
+          _currentChapters = null;
+          // Trigger fetch if needed
+          if (episode.chaptersUrl != null || episode.audioUrl != null) {
+              _fetchChaptersForCurrent(episode.chaptersUrl);
+          }
+      }
+         
+      notifyListeners();
   }
 
   Future<void> play(Podcast podcast, Episode episode, {DownloadProvider? downloadProvider, int? initialPositionSeconds}) async {
@@ -588,7 +998,7 @@ class PlayerProvider with ChangeNotifier {
       // than server if sync hasn't happened yet.
       final queueItem = _audioHandler.queue.value.where((i) => i.id == episode.guid).firstOrNull;
       if (queueItem != null && queueItem.extras?['position_seconds'] != null) {
-           final localPos = queueItem.extras!['position_seconds'] as int;
+           final localPos = safeInt(queueItem.extras!['position_seconds']);
            // Use local if we don't have server pos OR if local is ahead?
            // Generally local queue state is trustable for "this device".
            if (initialPosition == null || localPos > initialPosition.inSeconds) {
@@ -604,7 +1014,10 @@ class PlayerProvider with ChangeNotifier {
 
       final Map<String, dynamic> playExtras = {
         'url': episode.audioUrl,
+        'podcastUrl': podcast.url,
         if (episode.chaptersUrl != null) 'chaptersUrl': episode.chaptersUrl,
+        if (episode.transcriptUrl != null) 'transcriptUrl': episode.transcriptUrl,
+        if (episode.pubDate != null) 'pubDate': episode.pubDate!.toIso8601String(),
       };
       if (_currentChapters != null && _currentChapters!.isNotEmpty) {
         playExtras['chapters'] = _currentChapters!.map((c) => c.toJson()).toList();
@@ -621,8 +1034,28 @@ class PlayerProvider with ChangeNotifier {
           Log.d('PlayerProvider', 'Playing local file: $localPath');
           await _audioHandler.playEpisode(mediaItem, localPath, initialPosition: initialPosition); 
       } else {
-          Log.d('PlayerProvider', 'Streaming: ${episode.audioUrl}');
-          await _audioHandler.playEpisode(mediaItem, episode.audioUrl!, initialPosition: initialPosition);
+          // Retry loop for streaming: 2 attempts with 1s delay.
+          // Only report error after both retries fail.
+          const maxAttempts = 2;
+          bool success = false;
+          for (var attempt = 0; attempt < maxAttempts; attempt++) {
+              if (attempt > 0) {
+                  Log.i('PlayerProvider', 'play() retry ${attempt + 1}/$maxAttempts after 1s');
+                  await Future.delayed(const Duration(seconds: 1));
+              }
+              try {
+                  Log.d('PlayerProvider', 'Streaming (attempt ${attempt + 1}): ${episode.audioUrl}');
+                  await _audioHandler.playEpisode(mediaItem, episode.audioUrl!, initialPosition: initialPosition);
+                  success = true;
+                  break; // Success
+              } catch (e) {
+                  Log.w('PlayerProvider', 'play() attempt ${attempt + 1} failed: $e');
+                  if (attempt == maxAttempts - 1) {
+                      rethrow; // Let outer catch handle final error
+                  }
+              }
+          }
+          if (!success) return; // Should not reach here, but safety guard
       }
       
       _lastSyncTime = DateTime.now();
@@ -633,6 +1066,7 @@ class PlayerProvider with ChangeNotifier {
       notifyListeners();
     } catch (e) {
       Log.e('PlayerProvider', 'Error playing audio: $e');
+      _audioHandler.reportError("Couldn't play episode — check your connection");
     }
   }
 
@@ -640,8 +1074,14 @@ class PlayerProvider with ChangeNotifier {
     if (_player.playing) {
       _audioHandler.pause();
       _syncProgress(action: 'play');
+    } else if (_audioHandler.hasFailedItem) {
+      // Player has no loaded source after a failed auto-advance/retry.
+      // Calling _player.play() would be a no-op. Route to retry instead.
+      Log.i('PlayerProvider', 'togglePlay: routing to retryPlayback (has failed item)');
+      retryPlayback();
     } else {
       _audioHandler.play();
+      _syncProgress(action: 'play');
     }
     notifyListeners();
   }
@@ -672,35 +1112,11 @@ class PlayerProvider with ChangeNotifier {
            }
        }
        
-       final Map<String, dynamic> extras = {
-           'url': episode.audioUrl,
-           'podcastUrl': podcast.url,
-           if (episode.chaptersUrl != null) 'chaptersUrl': episode.chaptersUrl,
-           if (episode.pubDate != null) 'pubDate': episode.pubDate!.toIso8601String(),
-       };
-       
-       // Include saved position if we found one
-       if (savedPosition != null) {
-           extras['position_seconds'] = savedPosition;
-       }
-       
-       // Include chapters if available
-       if (episode.chapters != null && episode.chapters!.isNotEmpty) {
-           extras['chapters'] = episode.chapters!.map((c) => c.toJson()).toList();
-       }
-       
-       final mediaItem = MediaItem(
-        id: episode.guid,
-        album: podcast.title,
-        title: episode.title,
-        artist: '', 
-        artUri: (episode.imageUrl != null || podcast.logoUrl != null) 
-            ? Uri.parse(episode.imageUrl ?? podcast.logoUrl!) 
-            : null,
-        duration: episode.duration,
-        extras: extras, 
-      );
-      await _audioHandler.addQueueItem(mediaItem);
+       final mediaItem = MediaItemBuilder.fromEpisode(
+         podcast, episode,
+         positionSeconds: savedPosition,
+       );
+       await _audioHandler.addQueueItem(mediaItem);
   }
 
   Future<void> addEpisodesToQueue(List<Map<String, dynamic>> items, {bool playNext = false}) async {
@@ -724,34 +1140,10 @@ class PlayerProvider with ChangeNotifier {
           final episode = item['episode'] as Episode;
           if (episode.audioUrl == null) return null;
           
-          final Map<String, dynamic> extras = {
-              'url': episode.audioUrl,
-              'podcastUrl': podcast.url,
-              if (episode.chaptersUrl != null) 'chaptersUrl': episode.chaptersUrl,
-              if (episode.pubDate != null) 'pubDate': episode.pubDate!.toIso8601String(),
-          };
-          
-          // Include saved position if we found one
           final savedPosition = positionMap[episode.guid];
-          if (savedPosition != null) {
-              extras['position_seconds'] = savedPosition;
-          }
-          
-          // Include chapters if available
-          if (episode.chapters != null && episode.chapters!.isNotEmpty) {
-              extras['chapters'] = episode.chapters!.map((c) => c.toJson()).toList();
-          }
-          
-          return MediaItem(
-            id: episode.guid,
-            album: podcast.title,
-            title: episode.title,
-            artist: '', 
-            artUri: (episode.imageUrl != null || podcast.logoUrl != null) 
-                ? Uri.parse(episode.imageUrl ?? podcast.logoUrl!) 
-                : null,
-            duration: episode.duration,
-            extras: extras,
+          return MediaItemBuilder.fromEpisode(
+            podcast, episode,
+            positionSeconds: savedPosition,
           );
       }).whereType<MediaItem>().toList();
       
@@ -788,35 +1180,11 @@ class PlayerProvider with ChangeNotifier {
            }
        }
        
-       final Map<String, dynamic> extras = {
-           'url': episode.audioUrl,
-           'podcastUrl': podcast.url,
-           if (episode.chaptersUrl != null) 'chaptersUrl': episode.chaptersUrl,
-           if (episode.pubDate != null) 'pubDate': episode.pubDate!.toIso8601String(),
-       };
-       
-       // Include saved position if we found one
-       if (savedPosition != null) {
-           extras['position_seconds'] = savedPosition;
-       }
-       
-       // Include chapters if available
-       if (episode.chapters != null && episode.chapters!.isNotEmpty) {
-           extras['chapters'] = episode.chapters!.map((c) => c.toJson()).toList();
-       }
-       
-       final mediaItem = MediaItem(
-        id: episode.guid,
-        album: podcast.title,
-        title: episode.title,
-        artist: '', 
-        artUri: (episode.imageUrl != null || podcast.logoUrl != null) 
-            ? Uri.parse(episode.imageUrl ?? podcast.logoUrl!) 
-            : null,
-        duration: episode.duration,
-        extras: extras, 
-      );
-      await _audioHandler.playNext(mediaItem);
+       final mediaItem = MediaItemBuilder.fromEpisode(
+         podcast, episode,
+         positionSeconds: savedPosition,
+       );
+       await _audioHandler.playNext(mediaItem);
   }
 
   Future<void> removeFromQueue(MediaItem item) async {
@@ -867,38 +1235,18 @@ class PlayerProvider with ChangeNotifier {
            return;
       }
       
-      // If missing and we have API, try to fetch briefly, but don't block too long
-      if (_api != null) {
-          Log.d('PlayerProvider', 'playMediaItem - position missing, attempting quick fetch...');
-          try {
-              // Reduced timeout to 1 second to avoid "doesn't play" feeling
-              // Usage of future here to allow falling through if it takes too long? 
-              // Actually, simpler to just await with short timeout.
-              final actions = await _api!.getEpisodeActions(_deviceId).timeout(const Duration(milliseconds: 1000));
-              final relatedActions = actions.where((a) => a.episode == item.id).toList();
-              
-              if (relatedActions.isNotEmpty) {
-                  relatedActions.sort((a, b) => b.timestamp.compareTo(a.timestamp));
-                  final latest = relatedActions.first;
-                  if (latest.position != null && latest.position! > 0) {
-                      Log.d('PlayerProvider', 'Found position ${latest.position} seconds for ${item.title}');
-                      // Update the item with the position
-                      final newExtras = Map<String, dynamic>.from(item.extras ?? {});
-                      newExtras['position_seconds'] = latest.position!;
-                      final updatedItem = item.copyWith(extras: newExtras);
-                      
-                      await _audioHandler.playMediaItem(updatedItem);
-                      return;
-                  }
-              }
-          } catch (e) {
-              Log.e('PlayerProvider', 'fetch position timed out or failed, playing from start: $e');
-              // Proceed to play as-is (from start)
-          }
-      }
-      
-      // Fallback: Play as-is (from 0 or whatever defaults)
+      // Position not in extras — start playback immediately from 0,
+      // then fetch position from server in background and seek if found.
+      // This eliminates the "dead time" where the user sees nothing happen.
+      Log.d('PlayerProvider', 'playMediaItem - position missing, playing immediately then fetching position in background');
       await _audioHandler.playMediaItem(item);
+      
+      // Background seek: fetch position from server and seek if found
+      if (_api != null) {
+          _fetchAndSeekPosition(item).catchError((e) {
+              Log.d('PlayerProvider', 'Background position fetch failed (non-fatal): $e');
+          });
+      }
   }
   
   /// Helper to update current episode/podcast from MediaItem for UI display
@@ -910,14 +1258,27 @@ class PlayerProvider with ChangeNotifier {
               .where((p) => p.url == podcastUrl)
               .firstOrNull ?? Podcast(url: podcastUrl, title: item.album ?? 'Unknown');
           
-          final episode = Episode(
+          // Try to find full episode from provider's cache (includes description)
+          final cachedEpisode = _podcastProvider!.findEpisodeInCache(podcastUrl, item.id);
+          
+          final episode = cachedEpisode ?? Episode(
               guid: item.id,
               title: item.title,
               description: '',
               audioUrl: item.extras?['url'],
               imageUrl: item.artUri?.toString(),
               duration: item.duration,
+              chaptersUrl: item.extras?['chaptersUrl'],
+              transcriptUrl: item.extras?['transcriptUrl'],
+              pubDate: item.extras?['pubDate'] != null 
+                  ? DateTime.tryParse(item.extras!['pubDate']) 
+                  : null,
           );
+          
+          // If not cached, warm up the cache for next time
+          if (cachedEpisode == null) {
+              _podcastProvider!.getEpisodes(podcastUrl).catchError((_) => <Episode>[]);
+          }
           
           _currentPodcast = podcast;
           _currentEpisode = episode;
@@ -928,6 +1289,41 @@ class PlayerProvider with ChangeNotifier {
               }
           }
           notifyListeners();
+      }
+  }
+
+  /// Background helper: fetch saved position from server and seek if found.
+  /// Called after playback has already started so the user hears audio immediately.
+  Future<void> _fetchAndSeekPosition(MediaItem item) async {
+      try {
+          final actions = await _api!.getEpisodeActions(_deviceId)
+              .timeout(const Duration(seconds: 2));
+          final relatedActions = actions.where((a) => a.episode == item.id).toList();
+          
+          if (relatedActions.isNotEmpty) {
+              relatedActions.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+              final latest = relatedActions.first;
+              if (latest.position != null && latest.position! > 0) {
+                  // Only seek if we're still playing the same episode
+                  if (_audioHandler.mediaItem.value?.id == item.id) {
+                      Log.i('PlayerProvider', 'Background seek to ${latest.position}s for ${item.title}');
+                      await _audioHandler.seek(Duration(seconds: latest.position!));
+                      
+                      // Update queue item extras for future plays
+                      final currentQueue = _audioHandler.queue.value;
+                      final idx = currentQueue.indexWhere((i) => i.id == item.id);
+                      if (idx >= 0) {
+                          final newExtras = Map<String, dynamic>.from(currentQueue[idx].extras ?? {});
+                          newExtras['position_seconds'] = latest.position!;
+                          final updatedQueue = List<MediaItem>.from(currentQueue);
+                          updatedQueue[idx] = currentQueue[idx].copyWith(extras: newExtras);
+                          await _audioHandler.updateQueue(updatedQueue);
+                      }
+                  }
+              }
+          }
+      } catch (e) {
+          Log.d('PlayerProvider', 'Background position fetch failed: $e');
       }
   }
   
@@ -950,7 +1346,7 @@ class PlayerProvider with ChangeNotifier {
       
       final episodeAction = EpisodeAction(
         podcast: podcastUrl,
-        episode: item.id, 
+        episode: item.extras?['url'] as String? ?? item.id, 
         guid: item.id,
         action: 'play',
         timestamp: now,
@@ -1013,14 +1409,20 @@ class PlayerProvider with ChangeNotifier {
     // Expose API setter or use PodcastProvider
     GPodderApi? get api => _api ?? _podcastProvider?.api;
     
-    Future<void> _syncProgress({required String action}) async {
+    Future<void> _syncProgress({required String action, bool bypassDebounce = false}) async {
         final apiToUse = api;
         if (apiToUse == null || _currentPodcast == null || _currentEpisode == null) {
             return;
         }
 
-        // B5: Debounce non-stop actions to avoid excessive server uploads
-        if (action != 'stop' && DateTime.now().difference(_lastUploadTime).inSeconds < 30) return;
+        // Don't compete for bandwidth during active recovery or error state
+        final processingState = _audioHandler.playbackState.value.processingState;
+        if (processingState == AudioProcessingState.error) return;
+
+        // B5: Debounce non-stop actions to avoid excessive server uploads.
+        // forceSync calls bypass this gate to ensure data reaches the server
+        // before the OS can kill the app.
+        if (!bypassDebounce && action != 'stop' && DateTime.now().difference(_lastUploadTime).inSeconds < 30) return;
 
         final position = _player.position.inSeconds;
         final duration = _player.duration?.inSeconds ?? 0;
@@ -1060,7 +1462,7 @@ class PlayerProvider with ChangeNotifier {
 
     final episodeAction = EpisodeAction(
       podcast: _currentPodcast!.url,
-      episode: episodeId,
+      episode: _currentEpisode!.audioUrl ?? episodeId,
       guid: _currentEpisode!.guid,
       action: action,
       timestamp: now,
@@ -1078,6 +1480,7 @@ class PlayerProvider with ChangeNotifier {
           } else if (apiToUse != null) {
               await apiToUse.uploadEpisodeActions([episodeAction]);
           }
+        
           _lastUploadTime = DateTime.now(); // B5: Update debounce timestamp
           Log.d('PlayerProvider', 'Successfully synced action via PodcastProvider');
     } catch (e) {

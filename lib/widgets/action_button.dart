@@ -48,15 +48,27 @@ class ActionButton extends StatelessWidget {
         return InkWell(
             onTap: onPressed,
             borderRadius: BorderRadius.circular(8),
-            child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                        Icon(icon, color: iconColor, size: 24),
-                        const SizedBox(height: 2),
-                        Text(label, style: TextStyle(color: txtColor.withOpacity(0.6), fontSize: 10)),
-                    ],
+            child: SizedBox(
+                width: 64,
+                child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                    child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                                Icon(icon, color: iconColor, size: 22),
+                                const SizedBox(height: 1),
+                                Text(
+                                  label,
+                                  style: TextStyle(color: txtColor.withOpacity(0.6), fontSize: 10),
+                                  textAlign: TextAlign.center,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                            ],
+                        ),
+                    ),
                 ),
             ),
         );

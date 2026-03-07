@@ -22,7 +22,7 @@ class _TranscriptViewState extends State<TranscriptView> {
   String? _error;
   final ScrollController _scrollController = ScrollController();
   int _currentIndex = -1;
-  bool _autoScroll = true;
+  final bool _autoScroll = true;
   Timer? _syncTimer;
   final TextEditingController _searchController = TextEditingController();
   List<TranscriptItem> _filteredItems = [];
@@ -61,7 +61,7 @@ class _TranscriptViewState extends State<TranscriptView> {
       if (transcript == null) {
         setState(() {
              _isLoading = false;
-             _error = "Unable to load transcript. Please check your connection.";
+             _error = "Unable to load transcript. The server may not support direct access.";
         });
         return;
       }
@@ -77,7 +77,7 @@ class _TranscriptViewState extends State<TranscriptView> {
     } catch (e) {
       setState(() {
         _isLoading = false;
-        _error = 'Failed to load transcript: $e';
+        _error = 'Failed to load transcript: ${e.toString().length > 100 ? e.toString().substring(0, 100) : e}';
       });
     }
   }

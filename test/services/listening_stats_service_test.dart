@@ -1,7 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
-import '../../lib/services/listening_stats_service.dart';
-import '../../lib/api/gpodder_api.dart';
-import '../../lib/models/podcast.dart';
+import 'package:YourPods/services/listening_stats_service.dart';
+import 'package:YourPods/api/gpodder_api.dart';
+import 'package:YourPods/models/podcast.dart';
 
 void main() {
   group('ListeningStatsService', () {

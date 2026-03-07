@@ -24,5 +24,12 @@ struct YourPodsWatch_Watch_AppApp: App {
                 }
             }
         }
+        .backgroundTask(.urlSession(WatchDownloadManager.backgroundSessionId)) {
+            await withCheckedContinuation { continuation in
+                WatchDownloadManager.backgroundSessionCompletionHandler = {
+                    continuation.resume()
+                }
+            }
+        }
     }
 }

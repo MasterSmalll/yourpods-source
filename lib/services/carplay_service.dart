@@ -12,6 +12,7 @@ import '../services/audio_handler.dart';
 import '../providers/settings_provider.dart';
 import '../services/log_service.dart';
 import '../utils/media_item_builder.dart';
+import '../utils/safe_int.dart';
 
 class CarPlayService {
   static final CarPlayService _instance = CarPlayService._internal();
@@ -293,7 +294,7 @@ class CarPlayService {
                 
                  // Calculate progress if possible (for queue items that are partially played)
                 if (item.extras?['position_seconds'] != null && item.duration != null) {
-                    final position = Duration(seconds: item.extras!['position_seconds'] as int);
+                    final position = Duration(seconds: safeInt(item.extras!['position_seconds']));
                     final duration = item.duration!;
                     
                     if (duration.inSeconds > 0) {
@@ -325,7 +326,7 @@ class CarPlayService {
                     
                     int? positionSeconds;
                     if (item.extras?['position_seconds'] != null) {
-                         positionSeconds = item.extras!['position_seconds'] as int;
+                         positionSeconds = safeInt(item.extras!['position_seconds']);
                     }
 
                     try {
@@ -502,7 +503,7 @@ class CarPlayService {
             final queueItem = _audioHandler?.queue.value
                 .cast<MediaItem?>()
                 .firstWhere((i) => i?.id == e.guid, orElse: () => null);
-            final posSeconds = queueItem?.extras?['position_seconds'] as int?;
+            final posSeconds = safeIntOrNull(queueItem?.extras?['position_seconds']);
             final durSeconds = (e.duration?.inSeconds ?? queueItem?.duration?.inSeconds);
             if (posSeconds != null && posSeconds > 0 && durSeconds != null && durSeconds > 0) {
                 final posStr = '${(posSeconds ~/ 60).toString().padLeft(2, '0')}:${(posSeconds % 60).toString().padLeft(2, '0')}';

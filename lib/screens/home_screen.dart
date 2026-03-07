@@ -15,6 +15,8 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  bool _initialized = false;
+
   @override
   void initState() {
     super.initState();
@@ -24,6 +26,9 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _initProviders() {
+    if (_initialized) return;
+    _initialized = true;
+    
     final profileProvider = Provider.of<ProfileProvider>(context, listen: false);
     final profile = profileProvider.currentProfile;
     
@@ -43,11 +48,14 @@ class _HomeScreenState extends State<HomeScreen> {
           }
       }
 
-      final api = GPodderApi(
-        baseUrl: profile.baseUrl,
-        username: profile.username,
-        password: profile.password ?? '',
-      );
+      GPodderApi? api;
+      if (!profile.isLocal) {
+          api = GPodderApi(
+            baseUrl: profile.baseUrl,
+            username: profile.username,
+            password: profile.password ?? '',
+          );
+      }
       
       
       final podcastProvider = Provider.of<PodcastProvider>(context, listen: false);
@@ -57,7 +65,7 @@ class _HomeScreenState extends State<HomeScreen> {
           podcastProvider.setApi(api, profile.id);
           
           final playerProvider = Provider.of<PlayerProvider>(context, listen: false);
-          playerProvider.setApi(api, profile.deviceId);
+          playerProvider.setApi(api, profile.deviceId, profileId: profile.id);
 
           // Refresh subscriptions ONLY if we switched profile
           podcastProvider.refreshSubscriptions(profile.deviceId).catchError((_) {});
@@ -65,6 +73,9 @@ class _HomeScreenState extends State<HomeScreen> {
          // Even if profile ID matches, ensure API client is fresh (e.g. token updates)
          // But passing same ID prevents data clearing.
          podcastProvider.setApi(api, profile.id);
+         
+         final playerProvider = Provider.of<PlayerProvider>(context, listen: false);
+         playerProvider.setApi(api, profile.deviceId, profileId: profile.id);
       }
     }
   }

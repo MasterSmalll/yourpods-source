@@ -450,6 +450,7 @@
 				90AD0D632F3806E5008B3075 /* Embed Foundation Extensions */,
 				3B06AD1E1E4923F5004D2608 /* Thin Binary */,
 				A9D7717793F57D6CE3F0C437 /* [CP] Copy Pods Resources */,
+				7F49C1787DA3605A39F381E5 /* [YourPods] Fix Native Asset Framework Platforms */,
 			);
 			buildRules = (
 			);
@@ -607,6 +608,24 @@
 			shellPath = /bin/sh;
 			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
 			showEnvVarsInLog = 0;
+		};
+		7F49C1787DA3605A39F381E5 /* [YourPods] Fix Native Asset Framework Platforms */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "[YourPods] Fix Native Asset Framework Platforms";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# Only run during Archive builds to avoid slowing debug builds\nif [ \"${ACTION}\" = \"install\" ] || [ \"${CONFIGURATION}\" = \"Release\" ]; then\n  APP_FRAMEWORKS_DIR=\"${TARGET_BUILD_DIR}/${WRAPPER_NAME}/Frameworks\"\n  if [ -d \"$APP_FRAMEWORKS_DIR\" ]; then\n    find \"$APP_FRAMEWORKS_DIR\" -maxdepth 1 -name \"*.framework\" -type d | while read fw; do\n      binary=\"$fw/$(basename \"$fw\" .framework)\"\n      plist=\"$fw/Info.plist\"\n\n      # Fix 1: Info.plist MinimumOSVersion must match deployment target\n      if [ -f \"$plist\" ]; then\n        CURRENT_VER=$(/usr/bin/plutil -extract MinimumOSVersion raw \"$plist\" 2>/dev/null || echo \"\")\n        if [ -n \"$CURRENT_VER\" ] && [ \"$CURRENT_VER\" != \"14.0\" ]; then\n          /usr/bin/plutil -replace MinimumOSVersion -string \"14.0\" \"$plist\"\n          echo \"[YourPods] Fixed $(basename \"$fw\")/Info.plist MinimumOSVersion: $CURRENT_VER → 14.0\"\n        fi\n      fi\n\n      # Fix 2: Binary must not reference IOSSIMULATOR platform\n      if [ -f \"$binary\" ]; then\n        if vtool -show \"$binary\" 2>/dev/null | grep -q \"IOSSIMULATOR\"; then\n          vtool -set-build-version ios 14.0 26.2 -replace -output \"$binary\" \"$binary\"\n          codesign --force --sign - \"$binary\"\n          echo \"[YourPods] Fixed $(basename \"$fw\") platform: IOSSIMULATOR → IOS\"\n        fi\n      fi\n    done\n  fi\nfi\n";
 		};
 		9740EEB61CF901F6004384FC /* Run Script */ = {
 			isa = PBXShellScriptBuildPhase;

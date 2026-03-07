@@ -38,10 +38,13 @@ class TranscriptService {
       }
 
       // 2. Fetch from Network
-      final response = await http.get(Uri.parse(url));
+      final response = await http.get(
+        Uri.parse(url),
+        headers: {'User-Agent': 'YourPods/1.0 PodcastPlayer'},
+      );
 
       if (response.statusCode != 200) {
-        Log.e('TranscriptService','Failed to fetch transcript: ${response.statusCode}');
+        Log.e('TranscriptService','Failed to fetch transcript from $url: ${response.statusCode}');
         return null;
       }
 

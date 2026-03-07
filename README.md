@@ -34,7 +34,7 @@ YourPods is a gPodder-compatible, privacy-first, and self-hosted podcast player.
 
 ## Installation
 
-The current codebase corresponds to the 1.3.0 release in the [Apple App Store](https://apps.apple.com/us/app/yourpods/id6757721236).
+The current codebase corresponds to the 1.3.1 release in the [Apple App Store](https://apps.apple.com/us/app/yourpods/id6757721236).
 
 - **App Store**: Get automatic updates and hassle-free installation. Purchasing the App Store version directly funds YourPods development! 🙏
 - **TestFlight**: Join the [TestFlight Beta](https://testflight.apple.com/join/jF18YknW) to test new features for free.
@@ -46,45 +46,51 @@ For the most up-to-date features, check our [website](https://asecretcompany.com
 
 YourPods seamlessly integrates with gPodder-compatible servers (such as Nextcloud & NextPod) to keep your library in sync without relying on third-party clouds.
 
-## New Features - Version 1.3.0
--   **Unified Search**: Defaults to iTunes for extensive coverage, with optional support for **PodcastIndex** (requires personal API key).
--   **Queue Redesign**:  Distinguished "Now Playing" and "Up Next" sections with visible episode lengths.
--   **Sync Conflict Management**: Smart conflict resolution with options to keep your device's state or overwrite the server.
--   **Audio Engine 2.0**: Rewritten audio handling to resolve Bluetooth dropouts and improve stability.
--   **CarPlay & WatchOS Polish**: Smoother UI updates, reliable progress bars, and performance optimizations.
--   **Modernization**: Updated codebase dependencies and improved build infrastructure.
+## New Features in 1.3.1
 
-### 🍎 Apple Ecosystem Integration
-- **CarPlay**: Full queue management and playback control with native UI.
-- **Apple Watch**: Standalone playback, offline episode transfer, and haptic controls.
-- **Dynamic Island**: Real-time playback status on supported iPhones.
-- **Siri Support**: Voice commands for hands-free playback.
-- **Universal Purchase**: Seamless experience across iPhone, iPad, Mac, Watch, and TV (soon 1.3.x feature, available in TestFlight).
+## 🔐 Account Isolation & Multi-Profile Fixes
+- **Per-account data scoping** — Queue, auto-queue settings, playback position, groups, and sync timestamps are now fully isolated between profiles. Switching accounts no longer leaks data from another profile.
+- **Local-to-Sync conversion** — You can now switch a Local Account to a Sync Account (and vice versa) directly from the account settings toggle without having to delete and recreate.
+- **Settings tab fix** — The "Sync Account" tab in settings is now properly tappable (previously the tap handler was missing).
 
-### 🎧 Player Experience
-- **Live Transcripts**: Interactive, searchable transcripts with auto-scroll.
-- **Smart Chapters**: Embedded chapter support for easy navigation.
-- **Smart Queue**: Manual drag-and-drop reordering with "Move to Top/Bottom" quick actions.
-- **Precision Control**: Granular playback speed slider and custom sleep timers.
-- **Mini Player**: Persistent playback controls across the app.
-- **Metadata Caching**: Configurable cache duration for faster load times.
+---
 
-### ☁️ Sync & Privacy
-- **Self-Hosted**: Full compatibility with Nextcloud/gPodder.
-- **Privacy First**: No tracking, no analytics, no ads.
-- **Multi-Profile**: Switch between different servers or user accounts instantly.
+## 🔑 Password-Protected Feeds
 
-### 🔍 Discovery
-- **Unified Search**: Defaults to iTunes for extensive coverage, with optional support for **PodcastIndex** (requires personal API key).
-- **Add to Server**: Discover new podcasts in-app and instantly sync subscriptions to your self-hosted server.
+- You can now subscribe to RSS feeds that require authentication (e.g. Patreon private feeds, premium podcasts).
+- When adding a podcast, toggle **"Authentication Required"** to enter a username and password.
+- Credentials are stored securely on-device using the platform keychain — they are **never sent** to your gPodder server.
+- Feeds with `user:pass@host` URL-embedded credentials are also supported automatically.
 
-## Technical
+---
 
-- **Sync Backend**: Optimized for the [gpodder-sync](https://apps.nextcloud.com/apps/gpoddersync) Nextcloud app. Standard `gpodder` services may work but are not the primary focus.
-- **Protocol**: Implements the Open Podcast Sync protocol for subscriptions (`SubscriptionDelta`) and actions (`EpisodeAction`).
-- **Architecture**: Built with `provider` for state management and `just_audio` for robust playback.
-- **Platform Integration**: Native integrations for CarPlay (Swift), WatchOS (SwiftUI), tvOS (SwiftUI), and iOS Live Activities.
-- **Storage**: Uses `flutter_secure_storage` for credentials and local database for offline capability.
+## 🎵 Bluetooth & Tesla Metadata (AVRCP)
+
+- **Podcast author now shows on Bluetooth displays** — Previously, the "Artist" line was blank on car dashboards, Bluetooth speakers, and headphones with displays. It now shows the podcast creator name (parsed from `itunes:author` in the RSS feed).
+- This benefits **all Bluetooth devices**, including Tesla, which does not support CarPlay.
+
+### What you'll see on your car/speaker display
+
+| Field | Before | Now |
+|---|---|---|
+| Title | Episode title | Episode title |
+| Artist | *(blank)* | Podcast author ✅ |
+| Album | Podcast name | Podcast name |
+| Artwork | Episode art | Episode art |
+
+---
+
+## 🕐 Last Synced Indicator
+
+- **Settings now shows when your last sync occurred** — A "Last synced: X minutes ago" label appears above the Push/Pull buttons (sync accounts only).
+- This helps you quickly confirm whether your data is up-to-date without digging into logs.
+
+---
+
+## 📋 Known Limitations
+
+- The "Last synced" timestamp is **session-only** — it resets when you restart the app. This is intentional to avoid extra storage writes; it answers "has the app synced since I opened it?"
+- Password-protected feed credentials are stored **locally only** and are not synced to your gPodder server. If you set up the same feed on another device, you'll need to enter credentials again.
 
 ## Experimental: Linux Support
 

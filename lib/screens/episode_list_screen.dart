@@ -163,26 +163,32 @@ class _EpisodeListScreenState extends State<EpisodeListScreen> {
       final provider = Provider.of<PodcastProvider>(context, listen: false);
       final profileProvider = Provider.of<ProfileProvider>(context, listen: false);
       final deviceId = profileProvider.currentProfile?.deviceId ?? 'yourpods-ios';
+
+      // Optimistic UI: update immediately so user sees the change
+      if (mounted) {
+          setState(() {
+              for (var e in _episodes!) {
+                  _episodeStatuses[e.guid] = 'played';
+              }
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Marking all as played...')),
+          );
+      }
       
       final items = _episodes!.map((e) => {
           'podcast': widget.podcast,
           'episode': e,
       }).toList();
 
-      await provider.markEpisodesAsPlayed(items, deviceId);
-      
-      if (mounted) {
-          setState(() {
-              // Update local statuses to 'played'
-              for (var e in _episodes!) {
-                   _episodeStatuses[e.guid] = 'played';
-              }
-          });
-          
-          ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Marked all as played')),
-          );
-      }
+      // Fire-and-forget: sync to server in background
+      provider.markEpisodesAsPlayed(items, deviceId).catchError((e) {
+          if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('Sync failed: $e'), backgroundColor: Colors.redAccent),
+              );
+          }
+      });
   }
 
   void _toggleSelectionMode() {
@@ -376,8 +382,8 @@ class _EpisodeListScreenState extends State<EpisodeListScreen> {
                                                 value: _selectedEpisodeGuids.contains(episode.guid),
                                                 activeColor: Colors.deepPurpleAccent,
                                                 checkColor: Colors.white,
-                                                fillColor: MaterialStateProperty.resolveWith((states) {
-                                                    if (states.contains(MaterialState.selected)) {
+                                                fillColor: WidgetStateProperty.resolveWith((states) {
+                                                    if (states.contains(WidgetState.selected)) {
                                                         return Colors.deepPurpleAccent;
                                                     }
                                                     return Colors.white54;
@@ -469,12 +475,25 @@ class _EpisodeListScreenState extends State<EpisodeListScreen> {
       Widget downloadWidget;
       switch (status) {
           case DownloadState.none:
-          case DownloadState.error:
-              downloadWidget = ActionButton(
-                  icon: Icons.download_for_offline_outlined, 
-                  label: 'Download',
-                  color: Colors.white70,
+              downloadWidget = IconButton(
+                  icon: const Icon(Icons.download_for_offline_outlined, color: Colors.white70),
+                  tooltip: 'Download',
                   onPressed: () => provider.downloadEpisode(url),
+              );
+              break;
+          case DownloadState.error:
+              downloadWidget = IconButton(
+                  icon: const Icon(Icons.error_outline, color: Colors.redAccent),
+                  tooltip: 'Retry download',
+                  onPressed: () {
+                      final error = provider.getError(url);
+                      if (error != null) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('Download failed: $error'), backgroundColor: Colors.redAccent),
+                          );
+                      }
+                      provider.downloadEpisode(url);
+                  },
               );
               break;
           case DownloadState.downloading:
@@ -489,11 +508,17 @@ class _EpisodeListScreenState extends State<EpisodeListScreen> {
                   ),
               );
               break;
+          case DownloadState.pausedCellular:
+              downloadWidget = IconButton(
+                  icon: const Icon(Icons.pause_circle_outline, color: Colors.orangeAccent),
+                  tooltip: 'Paused (cellular) — will resume on WiFi',
+                  onPressed: () => provider.downloadEpisode(url),
+              );
+              break;
           case DownloadState.downloaded:
-              downloadWidget = ActionButton(
-                  icon: Icons.check_circle, 
-                  label: 'Downloaded',
-                  color: Colors.greenAccent,
+              downloadWidget = IconButton(
+                  icon: const Icon(Icons.check_circle, color: Colors.greenAccent),
+                  tooltip: 'Downloaded (tap to delete)',
                   onPressed: () {
                       provider.deletedownload(url);
                   },

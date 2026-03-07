@@ -3,6 +3,7 @@ import 'package:http/http.dart' as http;
 import 'package:id3tag/id3tag.dart' as id3;
 import '../models/podcast.dart';
 import '../services/log_service.dart';
+import '../utils/user_agent.dart';
 
 class ID3ChapterService {
   /// Extracts chapters from an MP3 file URL by streaming the first portion of the file (ID3 tag).
@@ -16,7 +17,7 @@ class ID3ChapterService {
       // ID3v2 tags are at the start of the file.
       final response = await http.get(
         Uri.parse(audioUrl),
-        headers: {'Range': 'bytes=0-262144'}, // 256KB (usually enough for text frames)
+        headers: withUserAgent({'Range': 'bytes=0-262144'}), // 256KB (usually enough for text frames)
       );
 
       if (response.statusCode != 200 && response.statusCode != 206) {
@@ -36,11 +37,6 @@ class ID3ChapterService {
       try {
           final parser = id3.ID3TagReader(tempFile);
           final tag = await parser.readTag();
-
-          if (tag == null) {
-              Log.w('ID3ChapterService', 'No ID3 tag found in header');
-              return [];
-          }
            
           // 3. Extract chapters using id3tag's high-level API
           final id3Chapters = tag.chapters;

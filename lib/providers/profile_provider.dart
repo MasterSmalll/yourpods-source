@@ -28,12 +28,28 @@ class ProfileProvider with ChangeNotifier {
     _loadProfiles();
   }
 
+  /// Max retries for Keychain reads that return null (iOS cold-launch issue).
+  static const int _maxKeychainRetries = 3;
+  static const Duration _keychainRetryDelay = Duration(milliseconds: 300);
+
   Future<void> _loadProfiles() async {
     _isLoading = true;
     notifyListeners();
 
     try {
-      final jsonString = await _storage.read(key: _storageKey);
+      // iOS Keychain can intermittently return null on cold launches before
+      // the Keychain is fully available. Retry with a short delay.
+      String? jsonString;
+      for (int attempt = 0; attempt <= _maxKeychainRetries; attempt++) {
+        jsonString = await _storage.read(key: _storageKey);
+        if (jsonString != null) break;
+        if (attempt < _maxKeychainRetries) {
+          Log.w('ProfileProvider',
+              'Keychain returned null for profiles (attempt ${attempt + 1}), retrying...');
+          await Future.delayed(_keychainRetryDelay);
+        }
+      }
+
       if (jsonString != null) {
         try {
           final List<dynamic> jsonList = json.decode(jsonString);
@@ -49,24 +65,52 @@ class ProfileProvider with ChangeNotifier {
           }
         } catch (e) {
              Log.e('ProfileProvider', 'Error decoding profiles JSON: $e');
-             // If JSON is totally corrupt, we might lose profiles, but prevents crash loops.
-             // Ideally we'd backup or alert, but for now we start fresh? 
-             // Or maybe we just keep empty.
+        }
+      } else {
+        // Keychain exhausted — try SharedPreferences fallback.
+        // SharedPreferences (plist) is always available on cold launch.
+        final prefs = await SharedPreferences.getInstance();
+        final fallback = prefs.getString(_storageKey);
+        if (fallback != null) {
+          Log.w('ProfileProvider',
+              'Using SharedPreferences fallback for profiles (Keychain unavailable)');
+          try {
+            final List<dynamic> jsonList = json.decode(fallback);
+            _profiles = [];
+            for (var item in jsonList) {
+              try {
+                _profiles.add(ServerProfile.fromJson(item));
+              } catch (e) {
+                Log.e('ProfileProvider', 'Error parsing fallback profile: $e');
+              }
+            }
+          } catch (e) {
+            Log.e('ProfileProvider', 'Error decoding fallback profiles JSON: $e');
+          }
         }
       }
 
-      
-      // Default launch screen is "Who is listening" (Profile Selection)
-      // We do NOT auto-select a profile here.
-      
+      // Restore last-selected profile from storage.
+      // Try secure storage first, then fall back to SharedPreferences
+      // (selectProfile() writes to both, but Keychain may be unavailable).
+      String? savedId = await _storage.read(key: _currentProfileKey);
+      if (savedId == null) {
+        final prefs = await SharedPreferences.getInstance();
+        savedId = prefs.getString(_currentProfileKey);
+        if (savedId != null) {
+          Log.i('ProfileProvider',
+              'Restored current profile from SharedPreferences fallback');
+        }
+      }
+
+      if (savedId != null && _profiles.any((p) => p.id == savedId)) {
+          _currentProfile = _profiles.firstWhere((p) => p.id == savedId);
+      }
+
       // EXCEPTION: IF there is only exactly ONE profile, we auto-select it.
       // This allows single-user setups to bypass the selection screen.
-      if (_profiles.length == 1) {
+      if (_profiles.length == 1 && _currentProfile == null) {
           try {
-              // We don't await this if we want it to be "fire and forget" but here we want
-              // to set the state before the UI potentially builds if possible, 
-              // though _loadProfiles is async called from constructor/init.
-              // We'll await it to ensure state consistency before final notifyListeners.
               await selectProfile(_profiles.first.id);
           } catch (e) {
               Log.e('ProfileProvider', 'Error auto-selecting single profile: $e');
@@ -108,26 +152,29 @@ class ProfileProvider with ChangeNotifier {
         try {
             final profile = _profiles.firstWhere((p) => p.id == id);
             
-            // We need the password to authorize the delete
-            // If it's not saved, we can't do server delete easily without prompting.
-            // For now, assume it's saved or fail.
-            if (profile.password == null) {
-                throw Exception('Password is required for server deletion but not saved.');
-            }
+            // Skip server deletion for local accounts
+            if (!profile.isLocal) {
+                // We need the password to authorize the delete
+                // If it's not saved, we can't do server delete easily without prompting.
+                // For now, assume it's saved or fail.
+                if (profile.password == null) {
+                    throw Exception('Password is required for server deletion but not saved.');
+                }
 
-            final api = GPodderApi(
-                baseUrl: profile.baseUrl,
-                username: profile.username,
-                password: profile.password!,
-            );
+                final api = GPodderApi(
+                    baseUrl: profile.baseUrl,
+                    username: profile.username,
+                    password: profile.password!,
+                );
 
-            // Fetch current subs
-            final subs = await api.getSubscriptions(profile.deviceId);
-            final urls = subs.map((s) => s.url).toList();
-            
-            if (urls.isNotEmpty) {
-                // Remove all
-                await api.updateSubscriptions(profile.deviceId, remove: urls);
+                // Fetch current subs
+                final subs = await api.getSubscriptions(profile.deviceId);
+                final urls = subs.map((s) => s.url).toList();
+                
+                if (urls.isNotEmpty) {
+                    // Remove all
+                    await api.updateSubscriptions(profile.deviceId, remove: urls);
+                }
             }
         } catch (e) {
             Log.e('ProfileProvider', 'Server deletion failed: $e');
@@ -189,5 +236,13 @@ class ProfileProvider with ChangeNotifier {
   Future<void> _persistProfiles() async {
     final jsonString = json.encode(_profiles.map((p) => p.toJson()).toList());
     await _storage.write(key: _storageKey, value: jsonString);
+
+    // Also persist a password-stripped copy to SharedPreferences as fallback.
+    // SharedPreferences (plist) is always available on cold launch, unlike Keychain.
+    final sanitized = _profiles
+        .map((p) => p.copyWith(password: null, savePassword: false).toJson())
+        .toList();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_storageKey, json.encode(sanitized));
   }
 }

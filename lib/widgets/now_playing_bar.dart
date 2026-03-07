@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:audio_service/audio_service.dart';
+import 'package:rxdart/rxdart.dart';
 import '../providers/player_provider.dart';
 import '../providers/settings_provider.dart';
 import '../providers/download_provider.dart';
@@ -8,10 +10,60 @@ import '../screens/player_screen.dart';
 import '../screens/playlist_screen.dart';
 import '../features/transcript/transcript_view.dart';
 import '../utils/media_item_builder.dart';
+import 'buffered_play_button.dart';
 
 
-class NowPlayingBar extends StatelessWidget {
+class NowPlayingBar extends StatefulWidget {
   const NowPlayingBar({super.key});
+
+  @override
+  State<NowPlayingBar> createState() => _NowPlayingBarState();
+}
+
+class _NowPlayingBarState extends State<NowPlayingBar> {
+  StreamSubscription<String>? _errorSub;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Subscribe once — cancel and re-subscribe if provider changes.
+    _errorSub?.cancel();
+    final player = Provider.of<PlayerProvider>(context, listen: false);
+    _errorSub = player.playbackErrorStream.listen((message) {
+      if (!mounted) return;
+      if (message.isEmpty) {
+        ScaffoldMessenger.of(context).clearSnackBars();
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              const Icon(Icons.wifi_off, color: Colors.white, size: 20),
+              const SizedBox(width: 8),
+              Expanded(child: Text(message)),
+            ],
+          ),
+          backgroundColor: Colors.redAccent,
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 8),
+          action: SnackBarAction(
+            label: 'Retry',
+            textColor: Colors.white,
+            onPressed: () {
+              player.retryPlayback();
+            },
+          ),
+        ),
+      );
+    });
+  }
+
+  @override
+  void dispose() {
+    _errorSub?.cancel();
+    super.dispose();
+  }
 
   void _showSleepTimerDialog(BuildContext context, PlayerProvider player) {
       showDialog(
@@ -132,7 +184,12 @@ class NowPlayingBar extends StatelessWidget {
                   ),
                   // Progress Line
                   StreamBuilder<Duration>(
-                      stream: playerProvider.player.positionStream,
+                      // Throttle to 1 Hz — the progress text label doesn't
+                      // need sub-second precision and ~5Hz was causing
+                      // constant minor widget rebuilds even when paused.
+                      stream: playerProvider.player.positionStream
+                          .throttleTime(const Duration(seconds: 1),
+                              trailing: true),
                       builder: (context, snapshot) {
                           final position = snapshot.data ?? Duration.zero;
                           final duration = playerProvider.player.duration ?? Duration.zero; 
@@ -202,29 +259,25 @@ class NowPlayingBar extends StatelessWidget {
                           _showSleepTimerDialog(context, playerProvider);
                           break;
                       case 'played':
-                         if (episode != null) {
-                             final item = playerProvider.queue.cast<MediaItem?>().firstWhere(
-                                 (i) => i?.id == episode.guid, 
-                                 orElse: () => null,
-                             ) ?? MediaItemBuilder.fromEpisode(
-                                 playerProvider.currentPodcast, episode,
-                             );
-                             await playerProvider.markAsListened(item);
-                         }
-                          break;
+                           final item = playerProvider.queue.cast<MediaItem?>().firstWhere(
+                               (i) => i?.id == episode.guid, 
+                               orElse: () => null,
+                           ) ?? MediaItemBuilder.fromEpisode(
+                               playerProvider.currentPodcast, episode,
+                           );
+                           await playerProvider.markAsListened(item);
+                                                 break;
                       case 'download':
-                          if (episode.audioUrl != null) downloader.downloadEpisode(episode!.audioUrl!);
+                          if (episode.audioUrl != null) downloader.downloadEpisode(episode.audioUrl!);
                           break;
                       case 'delete_download':
-                          if (episode.audioUrl != null) downloader.deletedownload(episode!.audioUrl!);
+                          if (episode.audioUrl != null) downloader.deletedownload(episode.audioUrl!);
                           break;
                       case 'remove_queue':
                            // Similar logic to 'played', need MediaItem
-                           if (episode != null) {
-                               final item = playerProvider.queue.firstWhere((i) => i.id == episode.guid, orElse: () => MediaItem(id: '', title: ''));
-                               if (item.id.isNotEmpty) await playerProvider.removeFromQueue(item);
-                           }
-                          break;
+                             final item = playerProvider.queue.firstWhere((i) => i.id == episode.guid, orElse: () => MediaItem(id: '', title: ''));
+                             if (item.id.isNotEmpty) await playerProvider.removeFromQueue(item);
+                                                   break;
                       case 'toggle_percent':
                           settings.setShowPercentListened(!settings.showPercentListened);
                           break;
@@ -321,26 +374,30 @@ class NowPlayingBar extends StatelessWidget {
                   onPressed: playerProvider.rewind,
                 ),
                 const Positioned(
-                   top: 14,
-                   child: Text(
-                     "15", 
-                     style: TextStyle(
-                        color: Colors.white, 
-                        fontSize: 10, 
-                        fontWeight: FontWeight.bold
-                     )
+                   top: 18,
+                   left: 0,
+                   right: 0,
+                   child: Center(
+                     child: Text(
+                       "15", 
+                       style: TextStyle(
+                          color: Colors.white, 
+                          fontSize: 8, 
+                          fontWeight: FontWeight.bold,
+                          height: 1,
+                       ),
+                     ),
                    ),
                 ),
               ],
             ),
              // Play/Pause
-            IconButton(
-              icon: Icon(
-                playerProvider.isPlaying ? Icons.pause : Icons.play_arrow,
-                color: Colors.white,
-                size: 32,
-              ),
-              onPressed: playerProvider.togglePlay,
+            BufferedPlayButton(
+              size: 32,
+              showBackground: false,
+              onTap: playerProvider.togglePlay,
+              player: playerProvider.player,
+              isPlaying: playerProvider.isPlaying,
             ),
              // Skip Forward
             IconButton(

@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:YourPods/providers/podcast_provider.dart';
 import 'package:YourPods/api/gpodder_api.dart';
 import 'package:flutter/services.dart';
@@ -25,6 +26,7 @@ class MockGPodderApi extends GPodderApi {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  SharedPreferences.setMockInitialValues({});
 
   setUpAll(() {
     const pathProviderChannel = MethodChannel('plugins.flutter.io/path_provider');

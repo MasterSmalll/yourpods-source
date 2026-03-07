@@ -2,12 +2,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:YourPods/providers/podcast_provider.dart';
 import 'package:YourPods/api/gpodder_api.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:path_provider/path_provider.dart';
-import 'dart:io';
 import 'package:flutter/services.dart';
 
-// Mock GPodderApi
 class MockGPodderApi extends GPodderApi {
   MockGPodderApi() : super(baseUrl: 'https://mock.com', username: 'u', password: 'p');
 
@@ -89,45 +85,6 @@ void main() {
         ),
       ];
       
-      // We expect _fetchFeedsWithCache to be called. 
-      // Since we can't easily mock the internal _rssService without dependency injection refactor,
-      // we might face network calls if we don't mock fetchEpisodes.
-      // However, fetchInProgressEpisodes calls _fetchFeedsWithCache which calls fetchEpisodes.
-      // fetchEpisodes checks cache first. 
-      
-      // Ideally PodcastProvider should allow injecting RssService, but it's hardcoded.
-      // For this test, we might get "Network fetch failed" prints, but the logic 
-      // we are testing is primarily the filtering of the actions list BEFORE/AFTER checking feeds.
-      // Wait, the logic filters "latestActions" then "relevantActions" BEFORE fetching feeds.
-      // The filter logic is:
-      /*
-          for (var action in latestActions.values) {
-              // ... Filtering logic ...
-              if (action.position != null && action.position! > 0 && !isFinished) {
-                   uniquePodcasts.add(action.podcast);
-                   relevantActions.add(action);
-              }
-          }
-           final feedCache = await _fetchFeedsWithCache(uniquePodcasts);
-      */
-      
-      // So if our filtering works, "uniquePodcasts" will only contain p1 and p4.
-      // calls to _fetchFeedsWithCache will happen for p1 and p4.
-      // p2 and p3 should be filtered out.
-      
-      // The method returns a list of maps.
-      // We can inspect the returned list.
-      // Note: without mocking RssService, `_fetchFeedsWithCache` will fail or return empty lists for episodes.
-      // But the filtering logic dictates whether we even try to add them to the result list.
-      // Actually, if `_fetchFeedsWithCache` returns empty, we still construct the result item with a dummy Episode logic?
-      // No:
-      /*
-         final episodes = feedCache[action.podcast] ?? []; // returns empty list
-         final episode = episodes.firstWhere(..., orElse: ...); // creates dummy
-         inProgress.add(...)
-      */
-      // So we will get items even if RSS fails.
-      
       final result = await provider.fetchInProgressEpisodes('device1');
       
       // Extract podcast URLs from result
@@ -137,6 +94,25 @@ void main() {
       expect(podcasts, contains('http://p4.com/feed'));
       expect(podcasts, isNot(contains('http://p2.com/feed')));
       expect(podcasts, isNot(contains('http://p3.com/feed')));
+    });
+  });
+
+  group('findEpisodeInCache', () {
+    late PodcastProvider provider;
+
+    setUp(() {
+      provider = PodcastProvider();
+    });
+
+    test('returns null for uncached podcast URL', () {
+      final result = provider.findEpisodeInCache('https://unknown.com/feed.xml', 'ep1');
+      expect(result, isNull);
+    });
+
+    test('returns null for unknown guid in cached podcast', () {
+      // Even if other URLs are cached, an empty/non-matching lookup returns null
+      final result = provider.findEpisodeInCache('https://example.com/feed.xml', 'nonexistent-guid');
+      expect(result, isNull);
     });
   });
 }

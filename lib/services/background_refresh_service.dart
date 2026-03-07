@@ -1,12 +1,74 @@
 import 'dart:io';
+import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:background_fetch/background_fetch.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../providers/podcast_provider.dart';
 import '../services/log_service.dart';
+import '../models/server_profile.dart';
+import '../api/gpodder_api.dart';
+
+const _storage = FlutterSecureStorage(
+  aOptions: AndroidOptions(
+    encryptedSharedPreferences: true,
+    resetOnError: true,
+  ),
+);
+
+Future<void> _performMultiProfileSync() async {
+  try {
+    final jsonString = await _storage.read(key: 'server_profiles');
+    if (jsonString == null) {
+      Log.d('BackgroundRefresh', 'No profiles found, skipping sync.');
+      return;
+    }
+
+    final List<dynamic> jsonList = json.decode(jsonString);
+    final profiles = <ServerProfile>[];
+    for (var item in jsonList) {
+      try {
+        profiles.add(ServerProfile.fromJson(item));
+      } catch (e) {
+        Log.e('BackgroundRefresh', 'Failed to parse a profile: $e');
+      }
+    }
+
+    for (var profile in profiles) {
+      if (profile.isLocal) {
+        Log.d('BackgroundRefresh', 'Skipping local profile: ${profile.id}');
+        continue;
+      }
+
+      Log.i('BackgroundRefresh', 'Syncing profile: ${profile.id}');
+
+      final api = GPodderApi(
+        baseUrl: profile.baseUrl,
+        username: profile.username,
+        password: profile.password ?? '',
+      );
+
+      final provider = PodcastProvider();
+      provider.setApi(api, profile.id);
+
+      // Wait briefly for the provider to load caches
+      await Future.delayed(const Duration(milliseconds: 500));
+
+      final newEpisodes = await provider.refreshAllFeeds(profile.deviceId);
+      await provider.syncEpisodeActions(profile.deviceId);
+
+      if (newEpisodes.isNotEmpty) {
+        Log.i('BackgroundRefresh', 'Profile ${profile.id}: Found ${newEpisodes.length} new auto-queue episodes');
+      } else {
+        Log.d('BackgroundRefresh', 'Profile ${profile.id}: Feeds refreshed, no new auto-queue episodes');
+      }
+    }
+  } catch (e) {
+    Log.e('BackgroundRefresh', 'Sync error: $e');
+  }
+}
 
 /// Top-level headless callback for background fetch.
-/// Must be a top-level or static function (Flutter requirement).
 @pragma('vm:entry-point')
 void backgroundFetchHeadlessTask(HeadlessTask task) async {
   final taskId = task.taskId;
@@ -20,40 +82,12 @@ void backgroundFetchHeadlessTask(HeadlessTask task) async {
 
   Log.d('BackgroundRefresh', 'Headless task started: $taskId');
 
-  try {
-    // Create a standalone PodcastProvider to refresh feeds
-    final provider = PodcastProvider();
-    
-    // Wait briefly for the provider to initialize from local storage
-    await Future.delayed(const Duration(milliseconds: 500));
-
-    // Load the device ID from SharedPreferences
-    final prefs = await SharedPreferences.getInstance();
-    final deviceId = prefs.getString('last_device_id') ?? 'yourpods-ios';
-
-    // Refresh all feeds (updates RSS cache, detects new auto-queue episodes)
-    final newEpisodes = await provider.refreshAllFeeds(deviceId);
-    
-    // Sync Playback Actions (Background)
-    await provider.syncEpisodeActions(deviceId);
-    
-    if (newEpisodes.isNotEmpty) {
-      Log.i('BackgroundRefresh', 'Found ${newEpisodes.length} new auto-queue episodes');
-    } else {
-      Log.d('BackgroundRefresh', 'Feeds refreshed, no new auto-queue episodes');
-    }
-  } catch (e) {
-    Log.e('BackgroundRefresh', 'Headless task error: $e');
-  }
+  await _performMultiProfileSync();
 
   BackgroundFetch.finish(taskId);
 }
 
 /// Service that manages background feed refresh on iOS.
-/// 
-/// Uses the `background_fetch` package to periodically wake the app
-/// and refresh podcast RSS feeds, keeping the cache fresh and detecting
-/// new episodes for auto-queue.
 class BackgroundRefreshService {
   static final BackgroundRefreshService _instance = BackgroundRefreshService._internal();
   factory BackgroundRefreshService() => _instance;
@@ -61,7 +95,6 @@ class BackgroundRefreshService {
 
   bool _configured = false;
 
-  /// Initialize background fetch. Call from main() after WidgetsFlutterBinding.
   Future<void> init() async {
     if (!_shouldRun()) return;
 
@@ -77,7 +110,6 @@ class BackgroundRefreshService {
     await _configure(intervalMinutes);
   }
 
-  /// Configure and start background fetch with the given interval.
   Future<void> _configure(int intervalMinutes) async {
     if (_configured) return;
 
@@ -105,35 +137,14 @@ class BackgroundRefreshService {
     }
   }
 
-  /// Foreground fetch callback.
   static void _onBackgroundFetch(String taskId) async {
     Log.d('BackgroundRefresh', 'Event received: $taskId');
 
-    try {
-      final provider = PodcastProvider();
-      await Future.delayed(const Duration(milliseconds: 500));
-
-      final prefs = await SharedPreferences.getInstance();
-      final deviceId = prefs.getString('last_device_id') ?? 'yourpods-ios';
-
-      final newEpisodes = await provider.refreshAllFeeds(deviceId);
-
-      // Sync Playback Actions (Foreground/Background)
-      await provider.syncEpisodeActions(deviceId);
-
-      if (newEpisodes.isNotEmpty) {
-        Log.i('BackgroundRefresh', 'Found ${newEpisodes.length} new auto-queue episodes');
-      } else {
-        Log.d('BackgroundRefresh', 'Feeds refreshed successfully');
-      }
-    } catch (e) {
-      Log.e('BackgroundRefresh', 'Error during fetch: $e');
-    }
+    await _performMultiProfileSync();
 
     BackgroundFetch.finish(taskId);
   }
 
-  /// Timeout callback — iOS gave us too long; finish immediately.
   static void _onBackgroundFetchTimeout(String taskId) {
     Log.w('BackgroundRefresh', 'Task timed out: $taskId');
     BackgroundFetch.finish(taskId);

@@ -97,23 +97,41 @@ class ProfileSelectionScreen extends StatelessWidget {
                                       const SizedBox(width: 16),
                                       CircleAvatar(
                                         backgroundColor: Colors.deepPurple,
-                                        child: Text(profile.name[0].toUpperCase(), style: const TextStyle(color: Colors.white)),
+                                        child: Text(profile.name.isNotEmpty ? profile.name[0].toUpperCase() : '?', style: const TextStyle(color: Colors.white)),
                                       ),
                                       const SizedBox(width: 16),
                                       Expanded(
                                         child: Column(
                                           crossAxisAlignment: CrossAxisAlignment.start,
                                           children: [
-                                            Text(
-                                              profile.name,
-                                              style: const TextStyle(
-                                                fontSize: 18,
-                                                fontWeight: FontWeight.bold,
-                                                color: Colors.white,
-                                              ),
+                                            Row(
+                                                children: [
+                                                    Flexible(
+                                                      child: Text(
+                                                        profile.name,
+                                                        style: const TextStyle(
+                                                          fontSize: 18,
+                                                          fontWeight: FontWeight.bold,
+                                                          color: Colors.white,
+                                                        ),
+                                                        overflow: TextOverflow.ellipsis,
+                                                      ),
+                                                    ),
+                                                    if (profile.isLocal) ...[
+                                                        const SizedBox(width: 8),
+                                                        Container(
+                                                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                                            decoration: BoxDecoration(
+                                                                color: Colors.teal,
+                                                                borderRadius: BorderRadius.circular(8),
+                                                            ),
+                                                            child: const Text('LOCAL', style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)),
+                                                        )
+                                                    ]
+                                                ],
                                             ),
                                             Text(
-                                              profile.baseUrl,
+                                              profile.isLocal ? 'On this device only' : profile.baseUrl,
                                               style: const TextStyle(color: Colors.white54, fontSize: 12),
                                               maxLines: 1,
                                               overflow: TextOverflow.ellipsis,
@@ -178,6 +196,7 @@ class ProfileSelectionScreen extends StatelessWidget {
 
 
   void _confirmDelete(BuildContext context, dynamic profile) {
+      final isLocal = profile.isLocal == true;
       showDialog(
           context: context,
           builder: (ctx) => AlertDialog(
@@ -192,20 +211,30 @@ class ProfileSelectionScreen extends StatelessWidget {
                       child: const Text('Cancel'),
                       onPressed: () => Navigator.pop(ctx),
                   ),
-                  TextButton(
-                      child: const Text('App Only', style: TextStyle(color: Colors.orangeAccent)),
-                      onPressed: () async {
-                          Navigator.pop(ctx);
-                          await _deleteAccount(context, profile.id, false);
-                      },
-                  ),
-                  TextButton(
-                      child: const Text('App & Server', style: TextStyle(color: Colors.redAccent)),
-                      onPressed: () async {
-                          Navigator.pop(ctx);
-                          await _deleteAccount(context, profile.id, true);
-                      },
-                  ),
+                  if (isLocal)
+                      TextButton(
+                          child: const Text('Delete', style: TextStyle(color: Colors.redAccent)),
+                          onPressed: () async {
+                              Navigator.pop(ctx);
+                              await _deleteAccount(context, profile.id, false);
+                          },
+                      )
+                  else ...[
+                      TextButton(
+                          child: const Text('App Only', style: TextStyle(color: Colors.orangeAccent)),
+                          onPressed: () async {
+                              Navigator.pop(ctx);
+                              await _deleteAccount(context, profile.id, false);
+                          },
+                      ),
+                      TextButton(
+                          child: const Text('App & Server', style: TextStyle(color: Colors.redAccent)),
+                          onPressed: () async {
+                              Navigator.pop(ctx);
+                              await _deleteAccount(context, profile.id, true);
+                          },
+                      ),
+                  ]
               ],
           ),
       );

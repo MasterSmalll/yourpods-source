@@ -89,13 +89,13 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "A Secret Company, LLC" "\0"
-            VALUE "FileDescription", "YourPods" "\0"
+            VALUE "CompanyName", "com.example" "\0"
+            VALUE "FileDescription", "podcast_player" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "yourpods" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 A Secret Company, LLC. All rights reserved." "\0"
-            VALUE "OriginalFilename", "yourpods.exe" "\0"
-            VALUE "ProductName", "YourPods" "\0"
+            VALUE "InternalName", "podcast_player" "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 com.example. All rights reserved." "\0"
+            VALUE "OriginalFilename", "podcast_player.exe" "\0"
+            VALUE "ProductName", "podcast_player" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

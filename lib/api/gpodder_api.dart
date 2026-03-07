@@ -2,6 +2,7 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 import '../models/podcast.dart';
 import '../services/log_service.dart';
+import '../utils/user_agent.dart';
 
 class GPodderApi {
   final String baseUrl;
@@ -17,7 +18,7 @@ class GPodderApi {
     http.Client? client,
   }) : client = client ?? http.Client();
 
-  String get _authHeader => 'Basic ' + base64Encode(utf8.encode('$username:$password'));
+  String get _authHeader => 'Basic ${base64Encode(utf8.encode('$username:$password'))}';
 
   Future<SubscriptionDelta> getSubscriptionChanges(String deviceId, int since) async {
     var sanitizedBaseUrl = baseUrl.endsWith('/')
@@ -34,9 +35,9 @@ class GPodderApi {
 
     final response = await client.get(
       Uri.parse(url),
-      headers: {
+      headers: withUserAgent({
         'Authorization': _authHeader,
-      },
+      }),
     );
 
     if (response.statusCode == 200) {
@@ -93,10 +94,10 @@ class GPodderApi {
 
     final response = await client.post(
       Uri.parse(url),
-      headers: {
+      headers: withUserAgent({
         'Authorization': _authHeader,
         'Content-Type': 'application/json',
-      },
+      }),
       body: json.encode({
         'add': add,
         'remove': remove,
@@ -129,10 +130,10 @@ class GPodderApi {
 
     final response = await client.post(
       Uri.parse(url),
-      headers: {
+      headers: withUserAgent({
         'Authorization': _authHeader,
         'Content-Type': 'application/json',
-      },
+      }),
       body: json.encode(actions.map((a) => a.toJson()).toList()),
     );
 
@@ -163,9 +164,9 @@ class GPodderApi {
 
     final response = await client.get(
       Uri.parse(url),
-      headers: {
+      headers: withUserAgent({
         'Authorization': _authHeader,
-      },
+      }),
     );
 
     if (response.statusCode == 200) {
@@ -279,9 +280,9 @@ class GPodderException implements Exception {
 }
 
 class GPodderAuthException extends GPodderException {
-  GPodderAuthException(String message, {int? statusCode}) : super(message, statusCode: statusCode);
+  GPodderAuthException(super.message, {super.statusCode});
 }
 
 class GPodderServerException extends GPodderException {
-  GPodderServerException(String message, {int? statusCode}) : super(message, statusCode: statusCode);
+  GPodderServerException(super.message, {super.statusCode});
 }

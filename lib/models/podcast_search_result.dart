@@ -5,6 +5,8 @@ class PodcastSearchResult {
   final String? artworkUrl;
   final String? author;
   final String? description;
+  final String? websiteUrl;
+  final String? genre;
 
   PodcastSearchResult({
     required this.title,
@@ -12,5 +14,7 @@ class PodcastSearchResult {
     this.artworkUrl,
     this.author,
     this.description,
+    this.websiteUrl,
+    this.genre,
   });
 }

@@ -10,7 +10,7 @@ import '../providers/download_provider.dart';
 import '../providers/profile_provider.dart';
 import 'podcast_search_delegate.dart';
 import '../widgets/conflict_resolution_dialog.dart';
-import '../models/sync_conflict.dart';
+import '../widgets/queue_sync_dialog.dart';
 
 class LibraryScreen extends StatefulWidget {
   const LibraryScreen({super.key});
@@ -22,6 +22,8 @@ class LibraryScreen extends StatefulWidget {
 class _LibraryScreenState extends State<LibraryScreen> {
   String _selectedFilter = 'All'; // All, Downloaded, Unplayed, In Progress
 
+  int _lastSubscriptionCount = -1;
+
   @override
   void initState() {
       super.initState();
@@ -29,6 +31,17 @@ class _LibraryScreenState extends State<LibraryScreen> {
       WidgetsBinding.instance.addPostFrameCallback((_) {
           _updateFilters(context);
       });
+  }
+
+  @override
+  void didChangeDependencies() {
+      super.didChangeDependencies();
+      // Re-run filters if subscription count changed (new sync/subscribe)
+      final provider = Provider.of<PodcastProvider>(context);
+      if (_lastSubscriptionCount != -1 && provider.subscriptions.length != _lastSubscriptionCount) {
+          _updateFilters(context);
+      }
+      _lastSubscriptionCount = provider.subscriptions.length;
   }
 
   Future<void> _updateFilters(BuildContext context) async {
@@ -96,11 +109,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
                 child: Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
+                  mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     ActionButton(
                       icon: Icons.playlist_add,
-                      label: 'Queue New',
+                      label: 'Auto\nQueueing',
                       onPressed: () async {
                           final scaffold = ScaffoldMessenger.of(context);
                           final podcastProvider = Provider.of<PodcastProvider>(context, listen: false);
@@ -108,53 +121,20 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
                           if (!context.mounted) return;
 
-                          // 1. Show Option Dialog
-                          final choice = await showDialog<String>(
-                              context: context,
-                              builder: (ctx) => SimpleDialog(
-                                  backgroundColor: const Color(0xFF1F1E27),
-                                  title: const Text('Queue New Episodes', style: TextStyle(color: Colors.white)),
-                                  children: [
-                                      SimpleDialogOption(
-                                          onPressed: () => Navigator.pop(ctx, 'all'),
-                                          child: const Padding(
-                                              padding: EdgeInsets.symmetric(vertical: 8.0),
-                                              child: Text('Add All New Episodes', style: TextStyle(color: Colors.white)),
-                                          ),
-                                      ),
-                                      SimpleDialogOption(
-                                          onPressed: () => Navigator.pop(ctx, 'choose'),
-                                          child: const Padding(
-                                              padding: EdgeInsets.symmetric(vertical: 8.0),
-                                              child: Text('Choose Podcasts...', style: TextStyle(color: Colors.white)),
-                                          ),
-                                      ),
-                                  ],
-                              ),
-                          );
-
-                          if (choice == null) return;
-
                           try {
+                              // Show podcast selection dialog directly
+                              final selectedUrls = await showDialog<Set<String>>(
+                                  context: context,
+                                  builder: (ctx) => _PodcastSelectionDialog(subscriptions: podcastProvider.subscriptions),
+                              );
+
+                              if (selectedUrls == null || selectedUrls.isEmpty) return;
+
+                              // Fetch new episodes from selected podcasts
                               List<Map<String, dynamic>> episodesToAdd = [];
-
-                              if (choice == 'all') {
-                                  episodesToAdd = await podcastProvider.getAllNewEpisodes();
-                              } else if (choice == 'choose') {
-                                  // Show multi-select dialog
-                                  if (!context.mounted) return;
-                                  final selectedUrls = await showDialog<Set<String>>(
-                                      context: context,
-                                      builder: (ctx) => _PodcastSelectionDialog(subscriptions: podcastProvider.subscriptions),
-                                  );
-
-                                  if (selectedUrls == null || selectedUrls.isEmpty) return;
-                                  
-                                  // Fetch new from selected
-                                  for (var url in selectedUrls) {
-                                      final eps = await podcastProvider.getNewEpisodesForPodcast(url);
-                                      episodesToAdd.addAll(eps);
-                                  }
+                              for (var url in selectedUrls) {
+                                  final eps = await podcastProvider.getNewEpisodesForPodcast(url);
+                                  episodesToAdd.addAll(eps);
                               }
 
                               if (episodesToAdd.isEmpty) {
@@ -162,7 +142,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                                   return;
                               }
                               
-                              // Show Episode Selection Dialog instead of simple Confirm
+                              // Show Episode Selection Dialog
                               if (!context.mounted) return;
                               final selectedEpisodes = await showDialog<List<Map<String, dynamic>>>(
                                   context: context,
@@ -185,14 +165,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
                                       }
                                   }
 
-                                  // Add Priority First (Play Next) - Reversed order if Play Next inserts at top? 
-                                  // insertAfterCurrent maintains order of list passed to it.
-                                  // but if we call it multiple times... just one call per batch.
                                   if (priorityEpisodes.isNotEmpty) {
                                       await playerProvider.addEpisodesToQueue(priorityEpisodes, playNext: true);
                                   }
                                   
-                                  // Add Standard (Bottom)
                                   if (standardEpisodes.isNotEmpty) {
                                       await playerProvider.addEpisodesToQueue(standardEpisodes, playNext: false);
                                   }
@@ -210,19 +186,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     const SizedBox(width: 8),
                     ActionButton(
                       icon: Icons.search,
-                      label: 'Search',
+                      label: 'Add New\nPodcast',
                       onPressed: () {
                         showSearch(
                           context: context,
                           delegate: PodcastSearchDelegate(hintText: 'Search podcasts...'),
                         );
                       },
-                    ),
-                    const SizedBox(width: 8),
-                    ActionButton(
-                      icon: Icons.add,
-                      label: 'Add Link',
-                      onPressed: () => _showAddPodcastDialog(context),
                     ),
                     const SizedBox(width: 8),
                     ActionButton(
@@ -233,7 +203,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     const SizedBox(width: 8),
                     ActionButton(
                       icon: Icons.history,
-                      label: 'History',
+                      label: 'In Progress',
                       onPressed: () => Navigator.pushNamed(context, '/inprogress'),
                     ),
                   ],
@@ -246,7 +216,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       return const Center(child: CircularProgressIndicator(color: Colors.deepPurple));
                     }
 
-                    if (provider.error != null && provider.subscriptions.isEmpty) {
+                    final isLocal = Provider.of<ProfileProvider>(context).currentProfile?.isLocal ?? false;
+
+                    if (!isLocal && provider.error != null && provider.subscriptions.isEmpty) {
                       return Center(
                         child: Column(
                           mainAxisAlignment: MainAxisAlignment.center,
@@ -297,69 +269,55 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     return RefreshIndicator(
                       onRefresh: () async {
                           final profileProvider = Provider.of<ProfileProvider>(context, listen: false);
+                          final isLocal = profileProvider.currentProfile?.isLocal ?? false;
                           final deviceId = profileProvider.currentProfile?.deviceId ?? 'flutter-client';
   
                           // 1. Refresh Subscriptions (GPodder)
                           await provider.refreshSubscriptions(deviceId);
                           
                           // 1b. Sync Playback State (Conflicts, etc)
-                          if (context.mounted) {
-                              final conflicts = await Provider.of<PlayerProvider>(context, listen: false).syncPlaybackState(force: true);
-                              if (context.mounted && conflicts.isNotEmpty) {
-                                  await ConflictResolutionDialog.show(context, conflicts);
+                          if (context.mounted && !isLocal) {
+                              final result = await Provider.of<PlayerProvider>(context, listen: false).syncPlaybackState(force: true);
+                              if (context.mounted && result.hasConflicts) {
+                                  await ConflictResolutionDialog.show(context, result.conflicts);
+                              }
+                              if (context.mounted && result.hasQueueChanges) {
+                                  final accepted = await QueueSyncDialog.show(context, result.queueChanges);
+                                  if (accepted != null && context.mounted) {
+                                      await Provider.of<PlayerProvider>(context, listen: false).applyQueueSyncChanges(accepted.where((c) => c.accepted).toList());
+                                  }
                               }
                           }
                           
-                          // 2. Refresh All Feeds & Check auto-queue (Consolidated)
+                          // 2. Refresh All Feeds & persist new auto-queue episodes
                           if (!context.mounted) return;
-                          final newEpisodes = await provider.refreshAllFeeds(deviceId);
+                          await provider.refreshAllFeeds(deviceId);
                           
-                          // 3. Update Filters to reflect new content
+                          // 3. Drain pending auto-queue buffer (episodes found by refresh)
+                          if (!context.mounted) return;
+                          final playerProvider = Provider.of<PlayerProvider>(context, listen: false);
+                          final autoQueued = await playerProvider.drainPendingAutoQueue();
+                          
+                          // 4. Update Filters to reflect new content
                           if (context.mounted) {
                               await _updateFilters(context);
                           }
                           
-                          // 4. Queue if found
-                          
-                          // 4. Queue if found
-                          if (newEpisodes.isNotEmpty && context.mounted) {
-                              final playerProvider = Provider.of<PlayerProvider>(context, listen: false);
-                              // Split into Priority vs Standard
-                              final priorityEpisodes = <Map<String, dynamic>>[];
-                              final standardEpisodes = <Map<String, dynamic>>[];
-                              
-                              for (var item in newEpisodes) {
-                                  final podcast = item['podcast'] as Podcast;
-                                  if (provider.isAutoQueuePriorityEnabled(podcast.url)) {
-                                      priorityEpisodes.add(item);
-                                  } else {
-                                      standardEpisodes.add(item);
-                                  }
-                              }
-
-                              if (priorityEpisodes.isNotEmpty) {
-                                  await playerProvider.addEpisodesToQueue(priorityEpisodes, playNext: true);
-                              }
-                              
-                              if (standardEpisodes.isNotEmpty) {
-                                  await playerProvider.addEpisodesToQueue(standardEpisodes, playNext: false);
-                              }
-                              
-                              if (context.mounted) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                      SnackBar(
-                                          content: Text('Auto-queued ${newEpisodes.length} new episodes'),
-                                          behavior: SnackBarBehavior.floating,
-                                      )
-                                  );
-                              }
+                          // 5. Notify user
+                          if (autoQueued > 0 && context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                      content: Text('Auto-queued $autoQueued new episodes'),
+                                      behavior: SnackBarBehavior.floating,
+                                  )
+                              );
                           }
                       },
                       child: CustomScrollView(
                         physics: const AlwaysScrollableScrollPhysics(),
                         slivers: [
                           // Offline/sync-failed banner
-                          if (provider.error != null)
+                          if (!isLocal && provider.error != null)
                             SliverToBoxAdapter(
                               child: Container(
                                 margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -716,49 +674,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   void _showAddPodcastDialog(BuildContext context) {
-    final controller = TextEditingController();
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF1F1E27),
-        title: const Text('Add Podcast', style: TextStyle(color: Colors.white)),
-        content: TextField(
-          controller: controller,
-          style: const TextStyle(color: Colors.white),
-          decoration: const InputDecoration(
-            hintText: 'Enter RSS Feed URL',
-            hintStyle: TextStyle(color: Colors.white54),
-            enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.deepPurple)),
-            focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.deepPurpleAccent)),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel', style: TextStyle(color: Colors.white60)),
-          ),
-          TextButton(
-            onPressed: () async {
-              final url = controller.text.trim();
-              if (url.isNotEmpty) {
-                Navigator.pop(context);
-                try {
-                  await Provider.of<PodcastProvider>(context, listen: false)
-                      .subscribe(url, 'flutter-client'); // In real app, get deviceId from storage/provider
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Podcast added successfully')),
-                  );
-                } catch (e) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Failed to add podcast: $e')),
-                  );
-                }
-              }
-            },
-            child: const Text('Add', style: TextStyle(color: Colors.deepPurpleAccent)),
-          ),
-        ],
-      ),
+      builder: (context) => const _AddPodcastDialog(),
     );
   }
   void _confirmRemove(BuildContext context, Podcast podcast) {
@@ -787,6 +705,163 @@ class _LibraryScreenState extends State<LibraryScreen> {
         ],
       ),
     );
+  }
+}
+
+class _AddPodcastDialog extends StatefulWidget {
+  const _AddPodcastDialog();
+
+  @override
+  State<_AddPodcastDialog> createState() => _AddPodcastDialogState();
+}
+
+class _AddPodcastDialogState extends State<_AddPodcastDialog> {
+  final _urlController = TextEditingController();
+  final _usernameController = TextEditingController();
+  final _passwordController = TextEditingController();
+  bool _requiresAuth = false;
+  bool _isLoading = false;
+
+  @override
+  void dispose() {
+    _urlController.dispose();
+    _usernameController.dispose();
+    _passwordController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: const Color(0xFF1F1E27),
+      title: const Text('Add Podcast', style: TextStyle(color: Colors.white)),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              controller: _urlController,
+              style: const TextStyle(color: Colors.white),
+              decoration: const InputDecoration(
+                hintText: 'Enter RSS Feed URL',
+                hintStyle: TextStyle(color: Colors.white54),
+                enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.deepPurple)),
+                focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.deepPurpleAccent)),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                const Icon(Icons.lock_outline, color: Colors.white54, size: 18),
+                const SizedBox(width: 8),
+                const Text('Authentication Required', style: TextStyle(color: Colors.white70, fontSize: 14)),
+                const Spacer(),
+                Switch(
+                  value: _requiresAuth,
+                  onChanged: (val) => setState(() => _requiresAuth = val),
+                  activeThumbColor: Colors.deepPurpleAccent,
+                ),
+              ],
+            ),
+            if (_requiresAuth) ...[
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.orangeAccent.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.orangeAccent.withOpacity(0.3)),
+                ),
+                child: const Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(Icons.info_outline, color: Colors.orangeAccent, size: 16),
+                    SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Feed credentials are stored locally and won\'t sync to other devices via gPodder. For cross-device sync, embed credentials in the URL instead:\nhttps://user:pass@host/feed.xml',
+                        style: TextStyle(color: Colors.orangeAccent, fontSize: 11, height: 1.4),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _usernameController,
+                style: const TextStyle(color: Colors.white),
+                decoration: const InputDecoration(
+                  hintText: 'Username',
+                  hintStyle: TextStyle(color: Colors.white54),
+                  prefixIcon: Icon(Icons.person_outline, color: Colors.white38, size: 20),
+                  enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.deepPurple)),
+                  focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.deepPurpleAccent)),
+                ),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: _passwordController,
+                obscureText: true,
+                style: const TextStyle(color: Colors.white),
+                decoration: const InputDecoration(
+                  hintText: 'Password',
+                  hintStyle: TextStyle(color: Colors.white54),
+                  prefixIcon: Icon(Icons.lock_outline, color: Colors.white38, size: 20),
+                  enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.deepPurple)),
+                  focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.deepPurpleAccent)),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _isLoading ? null : () => Navigator.pop(context),
+          child: const Text('Cancel', style: TextStyle(color: Colors.white60)),
+        ),
+        TextButton(
+          onPressed: _isLoading ? null : _onAdd,
+          child: _isLoading
+              ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.deepPurpleAccent))
+              : const Text('Add', style: TextStyle(color: Colors.deepPurpleAccent)),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _onAdd() async {
+    final url = _urlController.text.trim();
+    if (url.isEmpty) return;
+
+    setState(() => _isLoading = true);
+
+    try {
+      final feedUsername = _requiresAuth ? _usernameController.text.trim() : null;
+      final feedPassword = _requiresAuth ? _passwordController.text : null;
+
+      await Provider.of<PodcastProvider>(context, listen: false).subscribe(
+        url,
+        'flutter-client',
+        feedUsername: feedUsername,
+        feedPassword: feedPassword,
+      );
+
+      if (mounted) {
+        Navigator.pop(context);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Podcast added successfully')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isLoading = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to add podcast: $e'), backgroundColor: Colors.redAccent),
+        );
+      }
+    }
   }
 }
 

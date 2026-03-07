@@ -8,6 +8,7 @@ import '../widgets/action_button.dart';
 import '../models/podcast.dart';
 import '../features/transcript/transcript_view.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../widgets/buffered_play_button.dart';
 
 class PlayerScreen extends StatefulWidget {
   const PlayerScreen({super.key});
@@ -274,21 +275,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
                     ),
                     onPressed: playerProvider.rewind,
                   ),
-                   GestureDetector(
+                   BufferedPlayButton(
+                    size: 64,
+                    showBackground: true,
                     onTap: playerProvider.togglePlay,
-                    child: Container(
-                      height: 64, // Slightly smaller controls
-                      width: 64,
-                      decoration: const BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: Colors.deepPurpleAccent,
-                      ),
-                      child: Icon(
-                        playerProvider.isPlaying ? Icons.pause : Icons.play_arrow,
-                        size: 36,
-                        color: Colors.white,
-                      ),
-                    ),
+                    player: playerProvider.player,
+                    isPlaying: playerProvider.isPlaying,
                   ),
                   IconButton(
                     icon: const Icon(Icons.forward_30, size: 36, color: Colors.white),
@@ -318,7 +310,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
               // Compact Action Row
               Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                   children: [
                       // Download
                       ActionButton(
@@ -334,7 +326,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
                               }
                           },
                       ),
-                      const SizedBox(width: 24),
 
                       // Mark Played
                       ActionButton(
@@ -361,7 +352,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
                               }
                           },
                       ),
-                      const SizedBox(width: 24),
                       
                       // Mark New
                       ActionButton(
@@ -379,7 +369,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
                               }
                           },
                       ),
-                      const SizedBox(width: 24),
                       
                       // Add to Queue
                       ActionButton(
@@ -393,7 +382,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
                               }
                           },
                       ),
-                      const SizedBox(width: 24),
                       
                       // Transcript Button
                       ActionButton(
@@ -516,7 +504,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                               builder: (context, p, _) {
                                   return SwitchListTile(
                                       title: const Text('Skip Silence', style: TextStyle(color: Colors.white)),
-                                      activeColor: Colors.deepPurpleAccent,
+                                      activeThumbColor: Colors.deepPurpleAccent,
                                       value: p.skipSilenceEnabled,
                                       onChanged: (val) => p.toggleSkipSilence(),
                                   );

@@ -1,6 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:YourPods/providers/podcast_provider.dart';
-import 'dart:io';
 import 'package:flutter/services.dart';
 
 // Mock RssService would be ideal but it's hardcoded in the provider.
@@ -36,7 +35,7 @@ void main() {
       await provider.fetchEpisodes('http://example.com/rss', forceRefresh: true);
     } catch (e) {
       // Expected network error
-      expect(e.toString(), contains('Network fetch failed'));
+      expect(e.toString(), contains('Failed to fetch RSS feed'));
     }
   });
 }

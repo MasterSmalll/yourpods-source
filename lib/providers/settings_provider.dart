@@ -3,6 +3,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../services/log_service.dart';
 import '../models/sync_conflict.dart';
+import '../models/queue_sync_change.dart';
 
 enum ActionButtonStyle {
   textAndIcon,
@@ -27,15 +28,20 @@ class SettingsProvider with ChangeNotifier {
 
   bool _autoSyncToWatch = false;
   int _watchSyncCount = 3;
+  bool _watchDownloadWiFiOnly = true;
 
   bool _backgroundRefreshEnabled = true;
   int _backgroundRefreshInterval = 15; // minutes
 
   bool get autoSyncToWatch => _autoSyncToWatch;
   int get watchSyncCount => _watchSyncCount;
+  bool get watchDownloadWiFiOnly => _watchDownloadWiFiOnly;
 
   bool get backgroundRefreshEnabled => _backgroundRefreshEnabled;
   int get backgroundRefreshInterval => _backgroundRefreshInterval;
+
+  bool _downloadOnCellular = false;
+  bool get downloadOnCellular => _downloadOnCellular;
 
   // Search Provider Settings
   String _searchProviderId = 'itunes'; // default
@@ -48,6 +54,9 @@ class SettingsProvider with ChangeNotifier {
 
   SyncStrategy _syncConflictStrategy = SyncStrategy.ask;
   SyncStrategy get syncConflictStrategy => _syncConflictStrategy;
+
+  QueueSyncStrategy _queueSyncStrategy = QueueSyncStrategy.ask;
+  QueueSyncStrategy get queueSyncStrategy => _queueSyncStrategy;
 
 
   final _secureStorage = const FlutterSecureStorage(
@@ -88,6 +97,7 @@ class SettingsProvider with ChangeNotifier {
     // Load Watch Settings
     _autoSyncToWatch = prefs.getBool('auto_sync_to_watch') ?? false;
     _watchSyncCount = prefs.getInt('watch_sync_count') ?? 3;
+    _watchDownloadWiFiOnly = prefs.getBool('watch_download_wifi_only') ?? true;
 
     // Load Background Refresh Settings
     _backgroundRefreshEnabled = prefs.getBool('background_refresh_enabled') ?? true;
@@ -98,12 +108,19 @@ class SettingsProvider with ChangeNotifier {
     _podcastIndexApiKey = await _secureStorage.read(key: 'podcastindex_api_key') ?? '';
     _podcastIndexApiSecret = await _secureStorage.read(key: 'podcastindex_api_secret') ?? '';
 
-    _podcastIndexApiSecret = await _secureStorage.read(key: 'podcastindex_api_secret') ?? '';
+    // Load Download on Cellular
+    _downloadOnCellular = prefs.getBool('download_on_cellular') ?? false;
 
     // Load Sync Conflict Strategy
     final syncStratIndex = prefs.getInt('sync_conflict_strategy') ?? SyncStrategy.ask.index;
     if (syncStratIndex >= 0 && syncStratIndex < SyncStrategy.values.length) {
         _syncConflictStrategy = SyncStrategy.values[syncStratIndex];
+    }
+
+    // Load Queue Sync Strategy
+    final queueStratIndex = prefs.getInt('queue_sync_strategy') ?? QueueSyncStrategy.ask.index;
+    if (queueStratIndex >= 0 && queueStratIndex < QueueSyncStrategy.values.length) {
+        _queueSyncStrategy = QueueSyncStrategy.values[queueStratIndex];
     }
 
     notifyListeners();
@@ -161,6 +178,13 @@ class SettingsProvider with ChangeNotifier {
     await prefs.setInt('watch_sync_count', count);
   }
 
+  Future<void> setWatchDownloadWiFiOnly(bool wifiOnly) async {
+    _watchDownloadWiFiOnly = wifiOnly;
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('watch_download_wifi_only', wifiOnly);
+  }
+
   Future<void> setBackgroundRefreshEnabled(bool enabled) async {
     _backgroundRefreshEnabled = enabled;
     notifyListeners();
@@ -215,5 +239,19 @@ class SettingsProvider with ChangeNotifier {
       notifyListeners();
       final prefs = await SharedPreferences.getInstance();
       await prefs.setInt('sync_conflict_strategy', strategy.index);
+  }
+
+  Future<void> setQueueSyncStrategy(QueueSyncStrategy strategy) async {
+      _queueSyncStrategy = strategy;
+      notifyListeners();
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt('queue_sync_strategy', strategy.index);
+  }
+
+  Future<void> setDownloadOnCellular(bool allowed) async {
+      _downloadOnCellular = allowed;
+      notifyListeners();
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('download_on_cellular', allowed);
   }
 }
