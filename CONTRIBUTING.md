@@ -4,26 +4,30 @@ Thank you for your interest in contributing to YourPods! We welcome contribution
 
 ## Getting Started
 
-1.  **Fork the repository** on GitHub.
-2.  **Clone your fork** locally:
+1.  **Prerequisites**: Xcode 16+ and [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`).
+2.  **Fork the repository** on GitHub.
+3.  **Clone your fork** locally:
     ```bash
-    git clone https://github.com/asecretcompany/yourpods-source.git
+    git clone https://github.com/YOUR-USERNAME/yourpods-source.git
     cd yourpods-source
     ```
-3.  **Install dependencies**:
+4.  **Generate the Xcode project**:
     ```bash
-    flutter pub get
+    xcodegen generate
     ```
-4.  **Run the app**:
+5.  **Open the project**:
     ```bash
-    flutter run
+    open YourPods.xcodeproj
     ```
+6.  **Run**: Select the `YourPods` scheme and build for an iOS Simulator or device.
+
+> **Note**: The project uses `project.yml` (XcodeGen) to generate the Xcode project. Do not edit `YourPods.xcodeproj` directly — make changes in `project.yml` and re-run `xcodegen generate`.
 
 ## Code Style
 
-We follow the standard [Dart Style Guide](https://dart.dev/guides/language/effective-dart/style).
-*   Run `flutter analyze` to check for lints and errors.
-*   Run `dart format .` to format your code before committing.
+We follow the standard [Swift API Design Guidelines](https://www.swift.org/documentation/api-design-guidelines/).
+*   Use `swift-format` or Xcode's built-in formatting to keep code consistent.
+*   Prefer SwiftUI and SwiftData patterns used throughout the codebase.
 
 ## Submitting a Pull Request
 

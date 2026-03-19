@@ -10,8 +10,38 @@
 .svn/
 migrate_working_dir/
 
+# Xcode
+*.xcodeproj/
+!*.xcodeproj/project.pbxproj
+*.xcworkspace/
+build/
+DerivedData/
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+xcuserdata/
+*.xccheckout
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
 
-# IntelliJ / IDE
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+Packages/
+
+# CocoaPods (if used)
+Pods/
+
+# IDE
 *.iml
 .idea/
 modules.xml
@@ -74,6 +104,14 @@ linux/flutter/ephemeral/
 secrets.json
 antigravity/
 ROADMAP.md
+
+# IPA / Archive artifacts
 Payload/
 SwiftSupport/
 Symbols/
+
+# XcodeGen output (regenerated from project.yml)
+YourPods.xcodeproj/
+
+# Test artifacts
+mcp_test/

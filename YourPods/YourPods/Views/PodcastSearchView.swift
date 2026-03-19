@@ -1,0 +1,622 @@
+import SwiftUI
+
+/// Add Podcasts screen with search, add-by-link, protected feed support, and stream previews.
+struct PodcastSearchView: View {
+    @Environment(PodcastManager.self) private var podcastManager
+    @Environment(PlayerManager.self) private var playerManager
+    @Environment(SettingsManager.self) private var settings
+    
+    @State private var searchText = ""
+    @State private var results: [PodcastSearchResult] = []
+    @State private var isSearching = false
+    @State private var errorMessage: String?
+    @State private var searchTask: Task<Void, Never>?
+    @State private var selectedResult: PodcastSearchResult?
+    
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 20) {
+                    // Prominent Search Box
+                    SearchBar(text: $searchText, isSearching: $isSearching)
+                        .onChange(of: searchText) { _, newValue in
+                            debounceSearch(newValue)
+                        }
+                    
+                    // Search Results
+                    if isSearching {
+                        HStack {
+                            Spacer()
+                            ProgressView("Searching...")
+                            Spacer()
+                        }
+                        .padding(.top, 30)
+                    } else if let error = errorMessage {
+                        Label(error, systemImage: "exclamationmark.triangle")
+                            .foregroundStyle(.red)
+                            .padding()
+                    } else if !results.isEmpty {
+                        VStack(spacing: 0) {
+                            ForEach(results) { result in
+                                SearchResultRow(result: result) {
+                                    selectedResult = result
+                                }
+                                Divider()
+                                    .padding(.leading, 76)
+                            }
+                        }
+                        .background(.ultraThinMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .padding(.horizontal)
+                    } else if searchText.count >= 2 {
+                        ContentUnavailableView("No Results", systemImage: "magnifyingglass",
+                                               description: Text("Try a different search term."))
+                        .padding(.top, 30)
+                    }
+                    
+                    // Add by Link
+                    AddByLinkCard()
+                    
+                    // Protected Feed
+                    ProtectedFeedCard()
+                }
+                .padding(.vertical)
+            }
+            .navigationTitle("Add Podcasts")
+            .sheet(item: $selectedResult) { result in
+                PodcastPreviewSheet(result: result)
+            }
+        }
+    }
+    
+    private func debounceSearch(_ query: String) {
+        searchTask?.cancel()
+        guard query.count >= 2 else { results = []; return }
+        
+        searchTask = Task {
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            await performSearch(query)
+        }
+    }
+    
+    @MainActor
+    private func performSearch(_ query: String) async {
+        isSearching = true
+        errorMessage = nil
+        
+        let provider: PodcastSearchProvider
+        if settings.searchProvider == .podcastIndex,
+           let key = settings.podcastIndexApiKey, !key.isEmpty,
+           let secret = settings.podcastIndexApiSecret, !secret.isEmpty {
+            provider = PodcastIndexSearchProvider(apiKey: key, apiSecret: secret)
+        } else {
+            provider = ITunesSearchProvider()
+        }
+        
+        do {
+            results = try await provider.search(query)
+        } catch {
+            errorMessage = error.localizedDescription
+            results = []
+        }
+        isSearching = false
+    }
+}
+
+// MARK: - Prominent Search Bar
+
+private struct SearchBar: View {
+    @Binding var text: String
+    @Binding var isSearching: Bool
+    
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "magnifyingglass")
+                .foregroundColor(.secondary)
+                .font(.title3)
+            
+            TextField("Search podcasts...", text: $text)
+                .font(.body)
+                #if os(iOS)
+                .textInputAutocapitalization(.never)
+                #endif
+                .autocorrectionDisabled()
+            
+            if !text.isEmpty {
+                Button { text = "" } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .padding(.horizontal)
+    }
+}
+
+// MARK: - Search Result Row
+
+private struct SearchResultRow: View {
+    let result: PodcastSearchResult
+    let onTap: () -> Void
+    
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: 12) {
+                AsyncImage(url: URL(string: result.artworkUrl ?? "")) { image in
+                    image.resizable().aspectRatio(contentMode: .fill)
+                } placeholder: {
+                    RoundedRectangle(cornerRadius: 8).fill(.quaternary)
+                        .overlay { Image(systemName: "waveform").foregroundStyle(.secondary) }
+                }
+                .frame(width: 56, height: 56)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(result.title)
+                        .font(.subheadline.bold())
+                        .foregroundColor(.primary)
+                        .lineLimit(2)
+                    if let author = result.author {
+                        Text(author)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    if let genre = result.genre {
+                        Text(genre)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
+                }
+                
+                Spacer()
+                
+                Image(systemName: "chevron.right")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Add by Link Card
+
+private struct AddByLinkCard: View {
+    @Environment(PodcastManager.self) private var podcastManager
+    @State private var feedUrl = ""
+    @State private var isAdding = false
+    @State private var error: String?
+    @State private var success = false
+    
+    private var isInsecure: Bool {
+        URLSanitizer.isInsecure(feedUrl)
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Add by Link", systemImage: "link")
+                .font(.headline)
+            
+            HStack {
+                TextField("RSS feed URL", text: $feedUrl)
+                    #if os(iOS)
+                    .keyboardType(.URL)
+                    .textInputAutocapitalization(.never)
+                    #endif
+                    .autocorrectionDisabled()
+                
+                Button {
+                    addByLink()
+                } label: {
+                    if isAdding {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.title3)
+                    }
+                }
+                .disabled(feedUrl.isEmpty || isAdding)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(.ultraThinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            
+            if isInsecure {
+                Label {
+                    Text("This feed uses HTTP. Data will be sent unencrypted. Use HTTPS if available.")
+                        .font(.caption)
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                }
+            }
+            
+            if let error {
+                Text(error).foregroundStyle(.red).font(.caption)
+            }
+            if success {
+                Label("Podcast added!", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green).font(.caption)
+            }
+        }
+        .padding(.horizontal)
+    }
+    
+    private func addByLink() {
+        isAdding = true
+        error = nil
+        success = false
+        Task {
+            do {
+                try await podcastManager.addSubscription(url: feedUrl)
+                feedUrl = ""
+                success = true
+                Task {
+                    try? await Task.sleep(for: .seconds(3))
+                    success = false
+                }
+            } catch {
+                self.error = error.localizedDescription
+            }
+            isAdding = false
+        }
+    }
+}
+
+// MARK: - Protected Feed Card
+
+private struct ProtectedFeedCard: View {
+    @Environment(PodcastManager.self) private var podcastManager
+    @State private var feedUrl = ""
+    @State private var username = ""
+    @State private var password = ""
+    @State private var requiresAuth = true
+    @State private var isAdding = false
+    @State private var error: String?
+    @State private var success = false
+    
+    private var isInsecure: Bool {
+        URLSanitizer.isInsecure(feedUrl)
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Protected Feed", systemImage: "lock.shield")
+                .font(.headline)
+            
+            TextField("Protected feed URL", text: $feedUrl)
+                #if os(iOS)
+                .keyboardType(.URL)
+                .textInputAutocapitalization(.never)
+                #endif
+                .autocorrectionDisabled()
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(.ultraThinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+            
+            if isInsecure {
+                Label {
+                    Text("Credentials will be sent unencrypted over HTTP. Use HTTPS for security.")
+                        .font(.caption)
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                }
+            }
+            
+            Toggle("Authentication Required", isOn: $requiresAuth)
+                .font(.subheadline)
+            
+            if requiresAuth {
+                TextField("Username", text: $username)
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    #endif
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(.ultraThinMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                
+                SecureField("Password", text: $password)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(.ultraThinMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+            }
+            
+            Button {
+                addProtectedFeed()
+            } label: {
+                if isAdding {
+                    ProgressView().frame(maxWidth: .infinity)
+                } else {
+                    Text("Add Protected Feed")
+                        .frame(maxWidth: .infinity)
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(feedUrl.isEmpty || (requiresAuth && (username.isEmpty || password.isEmpty)) || isAdding)
+            
+            if let error {
+                Text(error).foregroundStyle(.red).font(.caption)
+            }
+            if success {
+                Label("Podcast added!", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green).font(.caption)
+            }
+        }
+        .padding(.horizontal)
+    }
+    
+    private func addProtectedFeed() {
+        isAdding = true
+        error = nil
+        success = false
+        Task {
+            do {
+                // TODO: Pass auth credentials to the subscription method
+                try await podcastManager.addSubscription(url: feedUrl)
+                feedUrl = ""
+                username = ""
+                password = ""
+                success = true
+                Task {
+                    try? await Task.sleep(for: .seconds(3))
+                    success = false
+                }
+            } catch {
+                self.error = error.localizedDescription
+            }
+            isAdding = false
+        }
+    }
+}
+
+// MARK: - Podcast Preview Sheet
+
+private struct PodcastPreviewSheet: View {
+    @Environment(PodcastManager.self) private var podcastManager
+    @Environment(PlayerManager.self) private var playerManager
+    @Environment(\.dismiss) private var dismiss
+    let result: PodcastSearchResult
+    
+    @State private var previewEpisodes: [PreviewEpisode] = []
+    @State private var isLoadingEpisodes = true
+    @State private var isSubscribing = false
+    @State private var subscribeError: String?
+    @State private var subscribed = false
+    
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    // Podcast Header
+                    HStack(spacing: 16) {
+                        AsyncImage(url: URL(string: result.artworkUrl ?? "")) { image in
+                            image.resizable().aspectRatio(contentMode: .fill)
+                        } placeholder: {
+                            RoundedRectangle(cornerRadius: 12).fill(.quaternary)
+                                .overlay {
+                                    Image(systemName: "waveform")
+                                        .font(.title)
+                                        .foregroundStyle(.secondary)
+                                }
+                        }
+                        .frame(width: 120, height: 120)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(result.title)
+                                .font(.title3.bold())
+                                .lineLimit(3)
+                            if let author = result.author {
+                                Text(author)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+                            if let genre = result.genre {
+                                Text(genre)
+                                    .font(.caption)
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
+                    }
+                    .padding(.horizontal)
+                    
+                    // Action Buttons
+                    HStack(spacing: 12) {
+                        Button {
+                            subscribe()
+                        } label: {
+                            HStack {
+                                if isSubscribing {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                        .tint(.white)
+                                }
+                                Text(subscribed ? "Subscribed ✓" : "Subscribe")
+                                    .fontWeight(.semibold)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                            .background(subscribed ? .green : .accentColor)
+                            .foregroundColor(.white)
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                        }
+                        .disabled(isSubscribing || subscribed)
+                    }
+                    .padding(.horizontal)
+                    
+                    if let error = subscribeError {
+                        Text(error)
+                            .foregroundStyle(.red)
+                            .font(.caption)
+                            .padding(.horizontal)
+                    }
+                    
+                    // Description
+                    if let description = result.description, !description.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("About")
+                                .font(.headline)
+                            Text(description.strippingHTML())
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(6)
+                        }
+                        .padding(.horizontal)
+                    }
+                    
+                    // Latest Episodes with Stream Button
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Latest Episodes")
+                            .font(.headline)
+                            .padding(.horizontal)
+                        
+                        if isLoadingEpisodes {
+                            HStack {
+                                Spacer()
+                                ProgressView("Loading episodes...")
+                                Spacer()
+                            }
+                            .padding()
+                        } else if previewEpisodes.isEmpty {
+                            Text("No episodes available")
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal)
+                        } else {
+                            ForEach(previewEpisodes) { episode in
+                                VStack(alignment: .leading, spacing: 4) {
+                                    HStack(alignment: .top) {
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text(episode.title)
+                                                .font(.subheadline.bold())
+                                                .lineLimit(2)
+                                            if let pubDate = episode.pubDate {
+                                                Text(pubDate, style: .date)
+                                                    .font(.caption2)
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                        }
+                                        
+                                        Spacer()
+                                        
+                                        // Stream button (play without subscribing)
+                                        if let audioUrl = episode.audioUrl {
+                                            Button {
+                                                streamEpisode(episode, audioUrl: audioUrl)
+                                            } label: {
+                                                Image(systemName: "play.circle.fill")
+                                                    .font(.title2)
+                                                    .foregroundColor(.accentColor)
+                                            }
+                                        }
+                                    }
+                                    
+                                    if let description = episode.description {
+                                        Text(description.strippingHTML())
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(3)
+                                    }
+                                }
+                                .padding(.horizontal)
+                                .padding(.vertical, 4)
+                                
+                                if episode.id != previewEpisodes.last?.id {
+                                    Divider()
+                                        .padding(.horizontal)
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding(.vertical)
+            }
+            .navigationTitle("Preview")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .task {
+                await loadPreviewEpisodes()
+            }
+        }
+    }
+    
+    private func subscribe() {
+        isSubscribing = true
+        subscribeError = nil
+        Task {
+            do {
+                try await podcastManager.addSubscription(url: result.feedUrl)
+                subscribed = true
+            } catch {
+                subscribeError = "Failed to subscribe: \(error.localizedDescription)"
+            }
+            isSubscribing = false
+        }
+    }
+    
+    private func streamEpisode(_ episode: PreviewEpisode, audioUrl: String) {
+        let tempItem = QueueItem(
+            id: UUID().uuidString,
+            title: episode.title,
+            podcastTitle: result.title,
+            audioUrl: audioUrl,
+            artworkUrl: result.artworkUrl,
+            durationSeconds: nil,
+            positionSeconds: 0,
+            podcastUrl: result.feedUrl,
+            pubDate: episode.pubDate
+        )
+        Task {
+            await playerManager.audioManager.playEpisode(tempItem, preserveCurrent: true)
+        }
+    }
+    
+    @MainActor
+    private func loadPreviewEpisodes() async {
+        isLoadingEpisodes = true
+        do {
+            let rssService = RSSService()
+            let (_, episodes) = try await rssService.fetchFeed(url: result.feedUrl)
+            let sorted = episodes.sorted { ($0.pubDate ?? .distantPast) > ($1.pubDate ?? .distantPast) }
+            previewEpisodes = sorted.prefix(5).map { ep in
+                PreviewEpisode(
+                    title: ep.title,
+                    pubDate: ep.pubDate,
+                    description: ep.description,
+                    audioUrl: ep.audioUrl
+                )
+            }
+        } catch {
+            // Silently fail — just show empty episodes
+        }
+        isLoadingEpisodes = false
+    }
+}
+
+/// Lightweight model for preview episodes (not persisted).
+private struct PreviewEpisode: Identifiable {
+    let id = UUID()
+    let title: String
+    let pubDate: Date?
+    let description: String?
+    let audioUrl: String?
+}

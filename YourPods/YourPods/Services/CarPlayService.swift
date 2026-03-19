@@ -1,0 +1,609 @@
+import Foundation
+#if canImport(CarPlay)
+import CarPlay
+#endif
+import os
+import Combine
+
+/// Native CarPlay integration for YourPods.
+/// Port of carplay_service.dart — uses CPTemplateApplicationSceneDelegate pattern.
+///
+/// The flutter version relies on `flutter_carplay` plugin. This native version
+/// talks directly to the CarPlay framework and the AudioManager.
+
+#if canImport(CarPlay)
+@available(iOS 14.0, *)
+@MainActor
+final class CarPlayService: NSObject {
+    static let shared = CarPlayService()
+    
+    private let logger = Logger(subsystem: "com.yourpods", category: "CarPlay")
+    
+    // Dependencies
+    weak var podcastManager: PodcastManager?
+    weak var playerManager: PlayerManager?
+    weak var audioManager: AudioManager?
+    
+    // CarPlay state
+    private var interfaceController: CPInterfaceController?
+    private var tabBarTemplate: CPTabBarTemplate?
+    
+    // Chapter state for the current episode
+    private var currentChapters: [Chapter]?
+    
+    // Image cache for artwork
+    private var imageCache: [String: UIImage] = [:]
+    
+    // Debouncing
+    private var debounceTimer: Timer?
+    private var lastPodcastCount: Int = -1
+    private var lastQueueCount: Int = -1
+    private var lastRecentCount: Int = -1
+    private var lastMediaItemId: String?
+    private var suppressUpdates = false
+    
+    // Cancellables
+    private var cancellables = Set<AnyCancellable>()
+    
+    private override init() { super.init() }
+    
+    // MARK: - Connection Lifecycle
+    
+    func didConnect(interfaceController: CPInterfaceController) {
+        logger.info("CarPlay connected")
+        self.interfaceController = interfaceController
+        interfaceController.delegate = self
+        
+        // Configure Now Playing template with 5 custom buttons
+        updateCarPlayButtons()
+        
+        // Reset caches to force full refresh
+        lastPodcastCount = -1
+        lastQueueCount = -1
+        lastRecentCount = -1
+        lastMediaItemId = nil
+        imageCache.removeAll()
+        
+        // Refresh when queue changes (reorder, add, remove)
+        // Wrap existing handler (set by YourPodsApp for watch sync) instead of replacing
+        let existingHandler = audioManager?.onQueueChanged
+        audioManager?.onQueueChanged = { [weak self] in
+            existingHandler?()
+            self?.scheduleUpdate()
+        }
+        
+        // Refresh buttons when rate or silence changes from phone side
+        audioManager?.onPlaybackRateChanged = { [weak self] _ in
+            self?.updateCarPlayButtons()
+        }
+        audioManager?.onSkipSilenceChanged = { [weak self] _ in
+            self?.updateCarPlayButtons()
+        }
+        
+        // Load chapters when episode changes
+        let existingItemHandler = audioManager?.onItemChanged
+        audioManager?.onItemChanged = { [weak self] item in
+            existingItemHandler?(item)
+            self?.loadChaptersForCurrentEpisode(item)
+        }
+        
+        // Load chapters for already-playing episode
+        loadChaptersForCurrentEpisode(audioManager?.currentItem)
+        
+        updateContent()
+    }
+    
+    func didDisconnect() {
+        logger.info("CarPlay disconnected")
+        interfaceController = nil
+        debounceTimer?.invalidate()
+        cancellables.removeAll()
+    }
+    
+    // MARK: - Content Updates
+    
+    func scheduleUpdate() {
+        guard !suppressUpdates else {
+            logger.debug("Update suppressed during episode launch")
+            return
+        }
+        debounceTimer?.invalidate()
+        debounceTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                self?.updateContent()
+            }
+        }
+    }
+    
+    private func updateContent() {
+        guard let interfaceController,
+              let podcastManager,
+              let playerManager else { return }
+        
+        let subscriptions = podcastManager.subscriptions
+        let queueCount = playerManager.audioManager.queue.count
+        let currentId = playerManager.currentEpisodeGuid
+        let recentEps = recentEpisodes(from: subscriptions)
+        
+        // Skip if no structural changes
+        if subscriptions.count == lastPodcastCount &&
+           queueCount == lastQueueCount &&
+           currentId == lastMediaItemId &&
+           recentEps.count == lastRecentCount {
+            logger.debug("Skipping update — no structural changes")
+            return
+        }
+        
+        lastPodcastCount = subscriptions.count
+        lastQueueCount = queueCount
+        lastMediaItemId = currentId
+        lastRecentCount = recentEps.count
+        
+        // Build tabs
+        let nowPlayingTab = buildNowPlayingTab()
+        let recentTab = buildRecentlyUpdatedTab(episodes: recentEps)
+        let podcastsTab = buildPodcastsTab(subscriptions: subscriptions)
+        
+        let tabBar = CPTabBarTemplate(templates: [nowPlayingTab, recentTab, podcastsTab])
+        self.tabBarTemplate = tabBar
+        interfaceController.setRootTemplate(tabBar, animated: true, completion: nil)
+    }
+    
+    // MARK: - Recently Updated Episodes (shared logic)
+    
+    /// Filters and sorts episodes the same way as HomeView.recentEpisodes.
+    /// Returns unplayed, non-interacted episodes sorted by pubDate descending, capped at 20.
+    private func recentEpisodes(from subscriptions: [Podcast]) -> [Episode] {
+        subscriptions
+            .flatMap { $0.episodes }
+            .filter { !$0.isPlayed && !$0.isInteracted }
+            .sorted { ($0.pubDate ?? .distantPast) > ($1.pubDate ?? .distantPast) }
+            .prefix(20)
+            .map { $0 }
+    }
+    
+    // MARK: - Now Playing Tab
+    
+    private func buildNowPlayingTab() -> CPListTemplate {
+        var sections: [CPListSection] = []
+        
+        // Current item
+        if let current = audioManager?.currentItem {
+            let item = CPListItem(text: current.title, detailText: current.podcastTitle)
+            item.isPlaying = audioManager?.isPlaying ?? false
+            item.handler = { [weak self] _, completion in
+                guard let self else { completion(); return }
+                
+                // If the episode was restored from persistence but not loaded
+                // into AVPlayer, start playback before pushing Now Playing.
+                if !(self.audioManager?.isPlaying ?? false), let current = self.audioManager?.currentItem {
+                    let position = TimeInterval(current.positionSeconds)
+                    Task {
+                        await self.audioManager?.playEpisode(current, initialPosition: position > 0 ? position : nil)
+                    }
+                }
+                
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    let nowPlaying = CPNowPlayingTemplate.shared
+                    self.interfaceController?.pushTemplate(nowPlaying, animated: true, completion: nil)
+                }
+                completion()
+            }
+            loadArtwork(url: current.artworkUrl, into: item)
+            sections.append(CPListSection(items: [item], header: "Now Playing", sectionIndexTitle: nil))
+        }
+        
+        // Up Next queue — already upcoming-only, no filter needed
+        let upNext = audioManager?.queue ?? []
+        
+        if !upNext.isEmpty {
+            let items = upNext.prefix(20).map { queueItem -> CPListItem in
+                var detail = queueItem.podcastTitle
+                if queueItem.positionSeconds > 0, let dur = queueItem.durationSeconds, dur > 0 {
+                    let remaining = max(0, dur - queueItem.positionSeconds)
+                    detail += " • \(PlayerManager.formatDuration(TimeInterval(remaining))) left"
+                }
+                
+                let item = CPListItem(text: queueItem.title, detailText: detail)
+                item.handler = { [weak self] _, completion in
+                    self?.playQueueItem(queueItem)
+                    completion()
+                }
+                loadArtwork(url: queueItem.artworkUrl, into: item)
+                return item
+            }
+            sections.append(CPListSection(items: items, header: "Up Next", sectionIndexTitle: nil))
+        }
+        
+        let template = CPListTemplate(title: "Now Playing", sections: sections)
+        template.tabSystemItem = .mostRecent
+        template.emptyViewTitleVariants = ["Nothing Playing"]
+        template.emptyViewSubtitleVariants = ["Select a podcast to start listening."]
+        return template
+    }
+    
+    // MARK: - Recently Updated Tab
+    
+    private func buildRecentlyUpdatedTab(episodes: [Episode]) -> CPListTemplate {
+        let items = episodes.map { episode -> CPListItem in
+            var detail = episode.podcastTitle ?? ""
+            if let date = episode.pubDate {
+                let df = DateFormatter()
+                df.dateStyle = .short
+                detail += " • " + df.string(from: date)
+            }
+            
+            let isPlaying = episode.guid == audioManager?.currentItem?.id && (audioManager?.isPlaying ?? false)
+            let item = CPListItem(text: episode.title, detailText: detail)
+            item.isPlaying = isPlaying
+            item.handler = { [weak self] _, completion in
+                guard let self, let podcast = episode.podcast else { completion(); return }
+                self.playEpisode(episode, from: podcast)
+                completion()
+            }
+            loadArtwork(url: episode.imageUrl ?? episode.podcast?.logoUrl, into: item)
+            return item
+        }
+        
+        let template = CPListTemplate(
+            title: "Recent",
+            sections: [CPListSection(items: items, header: "Recently Updated", sectionIndexTitle: nil)]
+        )
+        template.tabSystemItem = .recents
+        template.emptyViewTitleVariants = ["All Caught Up!"]
+        template.emptyViewSubtitleVariants = ["No new episodes to play."]
+        return template
+    }
+    
+    // MARK: - Podcasts Tab
+    
+    private func buildPodcastsTab(subscriptions: [Podcast]) -> CPListTemplate {
+        let items = subscriptions.map { podcast -> CPListItem in
+            let item = CPListItem(
+                text: podcast.title,
+                detailText: "\(podcast.episodes.count) episodes"
+            )
+            item.handler = { [weak self] _, completion in
+                self?.showEpisodes(for: podcast)
+                completion()
+            }
+            loadArtwork(url: podcast.logoUrl, into: item)
+            return item
+        }
+        
+        let template = CPListTemplate(
+            title: "Podcasts",
+            sections: [CPListSection(items: items, header: "Library (\(items.count))", sectionIndexTitle: nil)]
+        )
+        template.tabSystemItem = .featured
+        template.emptyViewTitleVariants = ["No Subscriptions"]
+        template.emptyViewSubtitleVariants = ["Add podcasts on your phone"]
+        return template
+    }
+    
+    // MARK: - Episode List (pushed)
+    
+    private func showEpisodes(for podcast: Podcast) {
+        let sorted = podcast.episodes.sorted { ($0.pubDate ?? .distantPast) > ($1.pubDate ?? .distantPast) }
+        
+        let items = sorted.prefix(50).map { episode -> CPListItem in
+            var detail = ""
+            if let date = episode.pubDate {
+                let df = DateFormatter()
+                df.dateStyle = .short
+                detail = df.string(from: date)
+            }
+            
+            let isPlaying = episode.guid == audioManager?.currentItem?.id && (audioManager?.isPlaying ?? false)
+            let item = CPListItem(text: episode.title, detailText: detail)
+            item.isPlaying = isPlaying
+            item.handler = { [weak self] _, completion in
+                self?.playEpisode(episode, from: podcast)
+                completion()
+            }
+            loadArtwork(url: episode.imageUrl ?? podcast.logoUrl, into: item)
+            return item
+        }
+        
+        let template = CPListTemplate(
+            title: podcast.title,
+            sections: [CPListSection(items: items)]
+        )
+        
+        interfaceController?.pushTemplate(template, animated: true, completion: nil)
+    }
+    
+    // MARK: - Playback Actions
+    
+    private func playEpisode(_ episode: Episode, from podcast: Podcast) {
+        suppressUpdates = true
+        debounceTimer?.invalidate()
+        
+        // Resume from where the user left off
+        let position: TimeInterval? = episode.listenedSeconds > 0 ? TimeInterval(episode.listenedSeconds) : nil
+        playerManager?.playEpisode(episode, position: position)
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            let nowPlaying = CPNowPlayingTemplate.shared
+            self?.interfaceController?.pushTemplate(nowPlaying, animated: true, completion: nil)
+        }
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            self?.suppressUpdates = false
+            self?.lastMediaItemId = self?.playerManager?.currentEpisodeGuid
+            self?.lastQueueCount = self?.audioManager?.queue.count ?? 0
+            self?.lastPodcastCount = self?.podcastManager?.subscriptions.count ?? 0
+            self?.lastRecentCount = -1  // Force recent tab refresh after playing an episode
+        }
+    }
+    
+    private func playQueueItem(_ queueItem: QueueItem) {
+        suppressUpdates = true
+        debounceTimer?.invalidate()
+        
+        Task {
+            await audioManager?.playEpisode(queueItem, initialPosition: TimeInterval(queueItem.positionSeconds), preserveCurrent: true)
+        }
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            let nowPlaying = CPNowPlayingTemplate.shared
+            self?.interfaceController?.pushTemplate(nowPlaying, animated: true, completion: nil)
+        }
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            self?.suppressUpdates = false
+            self?.lastMediaItemId = self?.audioManager?.currentItem?.id
+            self?.lastQueueCount = self?.audioManager?.queue.count ?? 0
+        }
+    }
+    
+    // MARK: - Now Playing Buttons
+    
+    /// Builds and sets the 5-button array on the Now Playing template.
+    /// Called on connect and whenever rate, silence, or chapter state changes.
+    private func updateCarPlayButtons() {
+        let currentRate = audioManager?.playbackRate ?? 1.0
+        let rateLabel = currentRate.truncatingRemainder(dividingBy: 1) == 0
+            ? String(format: "%.0f×", currentRate)
+            : String(format: "%.2g×", currentRate)
+        
+        // 1. Trim Silence toggle
+        let silenceOn = audioManager?.skipSilenceEnabled ?? false
+        let silenceIcon = silenceOn ? "waveform.path.badge.minus" : "waveform.path"
+        let silenceButton = CPNowPlayingImageButton(image: labeledImage(systemName: silenceIcon, label: silenceOn ? "Silence On" : "Silence")) { [weak self] _ in
+            self?.toggleTrimSilence()
+        }
+        
+        // 2. Speed Down
+        let speedDownButton = CPNowPlayingImageButton(image: labeledImage(systemName: "minus", label: "Slower")) { [weak self] _ in
+            self?.decreasePlaybackRate()
+        }
+        
+        // 3. Speed Up
+        let speedUpButton = CPNowPlayingImageButton(image: labeledImage(systemName: "plus", label: "Faster")) { [weak self] _ in
+            self?.increasePlaybackRate()
+        }
+        
+        // 4. Previous Chapter
+        let prevChapterButton = CPNowPlayingImageButton(image: labeledImage(systemName: "backward.end.fill", label: "Prev Ch")) { [weak self] _ in
+            self?.seekToPreviousChapter()
+        }
+        
+        // 5. Next Chapter
+        let nextChapterButton = CPNowPlayingImageButton(image: labeledImage(systemName: "forward.end.fill", label: "Next Ch")) { [weak self] _ in
+            self?.seekToNextChapter()
+        }
+        
+        CPNowPlayingTemplate.shared.updateNowPlayingButtons([
+            silenceButton, speedDownButton, speedUpButton, prevChapterButton, nextChapterButton
+        ])
+    }
+    
+    // MARK: - Playback Rate
+    
+    /// Find the nearest rate index for the current rate (handles non-standard rates)
+    private func nearestRateIndex(for rate: Float) -> Int {
+        let rates = AudioManager.availableRates
+        return rates.enumerated().min(by: { abs($0.element - rate) < abs($1.element - rate) })?.offset ?? 2
+    }
+    
+    private func decreasePlaybackRate() {
+        guard let audio = audioManager else { return }
+        let rates = AudioManager.availableRates
+        let idx = nearestRateIndex(for: audio.playbackRate)
+        guard idx > 0 else {
+            logger.debug("Already at minimum rate")
+            return
+        }
+        let newRate = rates[idx - 1]
+        audio.setPlaybackRate(newRate)
+        logger.info("CarPlay rate decreased to \(newRate)×")
+    }
+    
+    private func increasePlaybackRate() {
+        guard let audio = audioManager else { return }
+        let rates = AudioManager.availableRates
+        let idx = nearestRateIndex(for: audio.playbackRate)
+        guard idx < rates.count - 1 else {
+            logger.debug("Already at maximum rate")
+            return
+        }
+        let newRate = rates[idx + 1]
+        audio.setPlaybackRate(newRate)
+        logger.info("CarPlay rate increased to \(newRate)×")
+    }
+    
+    // MARK: - Trim Silence
+    
+    private func toggleTrimSilence() {
+        guard let audio = audioManager else { return }
+        audio.skipSilenceEnabled.toggle()
+        logger.info("CarPlay trim silence: \(audio.skipSilenceEnabled ? "ON" : "OFF")")
+        updateCarPlayButtons()
+    }
+    
+    // MARK: - Chapter Navigation
+    
+    private func loadChaptersForCurrentEpisode(_ item: QueueItem?) {
+        currentChapters = nil
+        guard let item else { return }
+        
+        Task {
+            var chapters: [Chapter] = []
+            
+            // Try Podcasting 2.0 chapters URL first
+            if let chaptersUrl = item.chaptersUrl, !chaptersUrl.isEmpty {
+                chapters = await ChapterService.shared.fetchChapters(url: chaptersUrl)
+            }
+            
+            // Fall back to description-parsed chapters
+            if chapters.isEmpty, let description = item.episodeDescription {
+                chapters = ChapterService.parseChaptersFromDescription(description)
+            }
+            
+            self.currentChapters = chapters
+            if !chapters.isEmpty {
+                self.logger.info("Loaded \(chapters.count) chapters for CarPlay")
+            }
+        }
+    }
+    
+    private func seekToPreviousChapter() {
+        guard let chapters = currentChapters, !chapters.isEmpty,
+              let audio = audioManager else { return }
+        let pos = audio.currentPosition
+        let currentIdx = chapters.lastIndex(where: { $0.startTime <= pos }) ?? 0
+        // If within first 3s of current chapter, go to previous; otherwise restart current
+        let targetIdx = (pos - chapters[currentIdx].startTime) < 3 ? max(0, currentIdx - 1) : currentIdx
+        audio.seek(to: chapters[targetIdx].startTime)
+        logger.info("CarPlay seek to chapter: \(chapters[targetIdx].title)")
+    }
+    
+    private func seekToNextChapter() {
+        guard let chapters = currentChapters, !chapters.isEmpty,
+              let audio = audioManager else { return }
+        let pos = audio.currentPosition
+        let currentIdx = chapters.lastIndex(where: { $0.startTime <= pos }) ?? 0
+        guard currentIdx + 1 < chapters.count else {
+            logger.debug("Already at last chapter")
+            return
+        }
+        audio.seek(to: chapters[currentIdx + 1].startTime)
+        logger.info("CarPlay seek to chapter: \(chapters[currentIdx + 1].title)")
+    }
+    
+    // MARK: - Labeled Button Image
+    
+    /// Renders an SF Symbol with a text label below it into a single UIImage.
+    /// `CPNowPlayingImageButton` doesn't support text labels, so we bake them into the image.
+    private func labeledImage(systemName: String, label: String) -> UIImage {
+        let size = CGSize(width: 54, height: 54)
+        let renderer = UIGraphicsImageRenderer(size: size)
+        return renderer.image { context in
+            let iconConfig = UIImage.SymbolConfiguration(pointSize: 20, weight: .medium)
+            if let icon = UIImage(systemName: systemName, withConfiguration: iconConfig) {
+                let iconSize = icon.size
+                let iconOrigin = CGPoint(x: (size.width - iconSize.width) / 2, y: 2)
+                icon.draw(at: iconOrigin)
+            }
+            
+            let paragraphStyle = NSMutableParagraphStyle()
+            paragraphStyle.alignment = .center
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 11, weight: .semibold),
+                .foregroundColor: UIColor.white,
+                .paragraphStyle: paragraphStyle
+            ]
+            let textRect = CGRect(x: 0, y: 36, width: size.width, height: 18)
+            (label as NSString).draw(in: textRect, withAttributes: attrs)
+        }
+    }
+    
+    // MARK: - Artwork Loading
+    
+    /// Generates a placeholder artwork image (podcast icon on a tinted background).
+    private static let placeholderImage: UIImage = {
+        let size = CGSize(width: 44, height: 44)
+        let renderer = UIGraphicsImageRenderer(size: size)
+        return renderer.image { ctx in
+            UIColor.secondarySystemBackground.setFill()
+            ctx.fill(CGRect(origin: .zero, size: size))
+            let iconConfig = UIImage.SymbolConfiguration(pointSize: 18, weight: .medium)
+            if let icon = UIImage(systemName: "mic.fill", withConfiguration: iconConfig) {
+                let iconSize = icon.size
+                let origin = CGPoint(x: (size.width - iconSize.width) / 2,
+                                     y: (size.height - iconSize.height) / 2)
+                icon.withTintColor(.tertiaryLabel, renderingMode: .alwaysOriginal)
+                    .draw(at: origin)
+            }
+        }
+    }()
+    
+    /// Load artwork asynchronously and set it on a CPListItem.
+    /// Sets a placeholder immediately so artwork always appears on CarPlay,
+    /// even when the async download is slow or items have already scrolled.
+    private func loadArtwork(url: String?, into item: CPListItem) {
+        // Always set a placeholder first — ensures artwork is never blank
+        item.setImage(Self.placeholderImage)
+        
+        guard let urlString = url, let imageUrl = URL(string: urlString) else { return }
+        
+        // Use cached image if available (replaces placeholder instantly)
+        if let cached = imageCache[urlString] {
+            let size = CGSize(width: 44, height: 44)
+            let renderer = UIGraphicsImageRenderer(size: size)
+            let resized = renderer.image { _ in cached.draw(in: CGRect(origin: .zero, size: size)) }
+            item.setImage(resized)
+            return
+        }
+        
+        // Load asynchronously — placeholder stays visible until this completes
+        Task {
+            do {
+                let (data, _) = try await URLSession.shared.data(from: imageUrl)
+                guard let image = UIImage(data: data) else { return }
+                self.imageCache[urlString] = image
+                let size = CGSize(width: 44, height: 44)
+                let renderer = UIGraphicsImageRenderer(size: size)
+                let resized = renderer.image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
+                item.setImage(resized)
+            } catch {
+                logger.debug("Failed to load artwork: \(error.localizedDescription)")
+                // Placeholder remains visible — user sees mic icon instead of blank
+            }
+        }
+    }
+}
+
+// MARK: - CPInterfaceControllerDelegate
+
+@available(iOS 14.0, *)
+extension CarPlayService: CPInterfaceControllerDelegate {
+    func templateWillAppear(_ aTemplate: CPTemplate, animated: Bool) {
+        logger.debug("Template appearing: \(type(of: aTemplate))")
+    }
+    
+    func templateDidAppear(_ aTemplate: CPTemplate, animated: Bool) {}
+    func templateWillDisappear(_ aTemplate: CPTemplate, animated: Bool) {}
+    func templateDidDisappear(_ aTemplate: CPTemplate, animated: Bool) {}
+}
+
+// MARK: - CPTemplateApplicationSceneDelegate (Scene-based CarPlay)
+
+@available(iOS 14.0, *)
+class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
+    func templateApplicationScene(
+        _ templateApplicationScene: CPTemplateApplicationScene,
+        didConnect interfaceController: CPInterfaceController
+    ) {
+        CarPlayService.shared.didConnect(interfaceController: interfaceController)
+    }
+    
+    func templateApplicationScene(
+        _ templateApplicationScene: CPTemplateApplicationScene,
+        didDisconnectInterfaceController interfaceController: CPInterfaceController
+    ) {
+        CarPlayService.shared.didDisconnect()
+    }
+}
+#endif // canImport(CarPlay)

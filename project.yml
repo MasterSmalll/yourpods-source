@@ -1,0 +1,264 @@
+name: YourPods
+options:
+  bundleIdPrefix: com.asecretcompany
+  deploymentTarget:
+    iOS: "17.0"
+  xcodeVersion: "15.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: false
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    DEVELOPMENT_TEAM: FAKE_TEAM_ID
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "2.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_USER_SCRIPT_SANDBOXING: false
+
+targets:
+  YourPods:
+    type: application
+    platform: iOS
+    sources:
+      - path: YourPods/YourPods
+        type: group
+    preBuildScripts:
+      - name: "Sync Version to Info.plist"
+        basedOnDependencyAnalysis: false
+        script: |
+          VERSION=$(awk '/^ *CURRENT_PROJECT_VERSION:/ {print $2; exit}' "${SRCROOT}/project.yml" | tr -d '"')
+          MARKETING=$(awk '/^ *MARKETING_VERSION:/ {print $2; exit}' "${SRCROOT}/project.yml" | tr -d '"')
+          
+          for plist in "YourPods/Info.plist" "YourPodsWidgets/Info.plist" "YourPodsWatch/Info.plist" "YourPodsComplication/Info.plist"; do
+            if [ -f "${SRCROOT}/$plist" ]; then
+              if [ ! -z "$VERSION" ]; then
+                /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "${SRCROOT}/$plist"
+              fi
+              if [ ! -z "$MARKETING" ]; then
+                /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $MARKETING" "${SRCROOT}/$plist"
+              fi
+            fi
+          done
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.asecretcompany.yourpods
+        INFOPLIST_FILE: YourPods/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: false
+        ENABLE_PREVIEWS: true
+        SKIP_INSTALL: false
+        INSTALL_PATH: "$(LOCAL_APPS_DIR)"
+    entitlements:
+      path: YourPods/YourPods.entitlements
+      properties:
+        com.apple.developer.carplay-audio: true
+        com.apple.developer.siri: true
+        com.apple.security.application-groups:
+          - group.com.asecretcompany.yourpods
+    info:
+      path: YourPods/Info.plist
+      properties:
+        CFBundleDisplayName: YourPods
+        CFBundleName: YourPods
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UIBackgroundModes:
+          - audio
+          - fetch
+          - processing
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.asecretcompany.yourpods.refresh
+        NSAppTransportSecurity:
+          # Required: user-entered podcast feed URLs and self-hosted gPodder
+          # servers may use HTTP. The app defaults to HTTPS and warns users
+          # about HTTP but does not block it. Exception domains are not
+          # feasible since the domains are user-defined.
+          NSAllowsArbitraryLoads: true
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+          UISceneConfigurations:
+            CPTemplateApplicationSceneSessionRoleApplication:
+              - UISceneConfigurationName: CarPlay
+                UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).CarPlaySceneDelegate
+        NSSupportsLiveActivities: true
+        NSSiriUsageDescription: "Play podcasts using Siri."
+        IntentsSupported:
+          - INPlayMediaIntent
+        CFBundleURLTypes:
+          - CFBundleURLSchemes:
+              - yourpods
+        ITSAppUsesNonExemptEncryption: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    dependencies:
+      - target: YourPodsWidgets
+        embed: true
+        codeSign: true
+        copy:
+          destination: plugins
+      - target: YourPodsWatch
+        embed: true
+        codeSign: true
+    scheme:
+      gatherCoverageData: true
+      testTargets:
+        - YourPodsTests
+
+  YourPodsTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: YourPodsTests
+        type: group
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.asecretcompany.yourpods.tests
+        GENERATE_INFOPLIST_FILE: true
+        TARGETED_DEVICE_FAMILY: "1,2"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/YourPods.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/YourPods"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+    dependencies:
+      - target: YourPods
+
+  YourPodsWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: YourPodsWidgets
+        type: group
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.asecretcompany.yourpods.YourPodsLiveActivity
+        INFOPLIST_FILE: YourPodsWidgets/Info.plist
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: WIDGET_EXTENSION
+        SKIP_INSTALL: true
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../../Frameworks"
+    info:
+      path: YourPodsWidgets/Info.plist
+      properties:
+        CFBundleDisplayName: YourPods Live Activity
+        CFBundleName: YourPodsWidgets
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    entitlements:
+      path: YourPodsWidgets/YourPodsWidgets.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.asecretcompany.yourpods
+
+
+  YourPodsWatch:
+    type: application
+    platform: watchOS
+    deploymentTarget: "10.0"
+    sources:
+      - path: YourPodsWatch
+        type: group
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.asecretcompany.yourpods.watchkitapp
+        INFOPLIST_FILE: YourPodsWatch/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SWIFT_VERSION: "5.9"
+        SKIP_INSTALL: true
+        WATCHOS_DEPLOYMENT_TARGET: "10.0"
+        TARGETED_DEVICE_FAMILY: 4
+    entitlements:
+      path: YourPodsWatch/YourPodsWatch.entitlements
+    info:
+      path: YourPodsWatch/Info.plist
+      properties:
+        CFBundleDisplayName: YourPods
+        CFBundleName: YourPodsWatch
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UIBackgroundModes:
+          - audio
+        WKCompanionAppBundleIdentifier: com.asecretcompany.yourpods
+        WKApplication: true
+    dependencies:
+      - target: YourPodsComplication
+        embed: true
+        codeSign: true
+        copy:
+          destination: plugins
+
+  YourPodsComplication:
+    type: app-extension
+    platform: watchOS
+    deploymentTarget: "10.0"
+    sources:
+      - path: YourPodsComplication
+        type: group
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.asecretcompany.yourpods.watchkitapp.widgets
+        INFOPLIST_FILE: YourPodsComplication/Info.plist
+        SWIFT_VERSION: "5.9"
+        SKIP_INSTALL: true
+        WATCHOS_DEPLOYMENT_TARGET: "10.0"
+        TARGETED_DEVICE_FAMILY: 4
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../../Frameworks"
+    entitlements:
+      path: YourPodsComplication/YourPodsComplication.entitlements
+    info:
+      path: YourPodsComplication/Info.plist
+      properties:
+        CFBundleDisplayName: YourPods Complication
+        CFBundleName: YourPodsComplication
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+
+schemes:
+  YourPods:
+    build:
+      targets:
+        YourPods: all
+        YourPodsTests: [test]
+        YourPodsWidgets: all
+        YourPodsWatch: all
+        YourPodsComplication: all
+    run:
+      config: Debug
+      executable: YourPods
+    test:
+      config: Debug
+      gatherCoverageData: true
+      targets:
+        - name: YourPodsTests
+          parallelizable: true
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+  YourPodsWidgets:
+    build:
+      targets:
+        YourPodsWidgets: all
+    run:
+      config: Debug
+      askForAppToLaunch: true
+
+  YourPodsWatch:
+    build:
+      targets:
+        YourPodsWatch: all
+        YourPodsComplication: all
+    run:
+      config: Debug
+      executable: YourPodsWatch

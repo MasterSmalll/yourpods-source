@@ -1,6 +1,6 @@
 # YourPods
 
-> YourPods is a gPodder-compatible, privacy-first, self-hosted podcast player for iOS, macOS, watchOS, tvOS, and Apple Watch. Sync your subscriptions and listening progress across all your devices using your own Nextcloud server. Version 1.3.1.
+> YourPods is a gPodder-compatible, privacy-first, self-hosted podcast player for iOS, macOS, watchOS, and Apple Watch — built natively in Swift and SwiftUI. Sync your subscriptions and listening progress across all your devices using your own Nextcloud server. Version 2.0.
 
 ## Project Info
 
@@ -10,7 +10,7 @@
 
 ## Core Features
 
-- **Apple Ecosystem**: Optimized for iOS, macOS, watchOS, tvOS, and CarPlay with native integrations.
+- **Native Apple App**: Built in Swift 5.9 and SwiftUI, targeting iOS 17+, macOS 14+, watchOS 10+, and with native CarPlay integrations.
 - **Privacy**: No tracking, analytics, or ads. Fully self-hosted sync via Nextcloud/gPodder.
 - **Multi-Profile**: Switch between different servers or user accounts instantly. Local-only accounts supported.
 - **Sync Conflict Management**: Smart conflict resolution with options to keep local state or overwrite from server.
@@ -19,50 +19,62 @@
 - **OPML Import & Export**: Migrate subscriptions to or from other apps, or back up your library.
 - **Password-Protected Feeds**: Subscribe to private RSS feeds (Patreon, premium podcasts). Credentials stored securely on-device.
 - **Local Accounts**: Use YourPods without a sync server for fully offline, on-device podcast management.
+- **Flutter Migration**: Automatic one-shot migration of subscriptions, queue, profiles, settings, and playback positions from the Flutter-based v1.x.
 
 ## Player & Audio
 
-- **Audio Engine 2.0**: Rewritten audio handling resolving Bluetooth dropouts and improving stability.
+- **Native AVFoundation Audio Engine**: Built on AVAudioEngine for low-latency, reliable playback with Bluetooth, CarPlay, and Siri interruption recovery.
 - **Live Transcripts**: Interactive, searchable transcripts with auto-scroll.
-- **Smart Chapters**: Embedded chapter support (RSS and ID3 tag-based) for easy navigation.
-- **Smart Queue**: Drag-and-drop reordering with "Now Playing" and "Up Next" sections, visible episode lengths, "Move to Top/Bottom" quick actions.
-- **Precision Control**: Granular playback speed slider and custom sleep timers.
-- **Mini Player**: Persistent playback controls across the app.
+- **Smart Chapters**: Embedded chapter support (RSS Podcasting 2.0 and description-parsed) for easy navigation.
+- **Smart Queue**: Drag-and-drop reordering with "Now Playing" and "Up Next" sections, visible episode lengths.
+- **Precision Control**: Granular playback speed (0.5×–3×) and custom sleep timers.
+- **Skip Intro/Outro**: Configurable per-second precision (0–120s).
+- **Mini Player**: Persistent playback controls across the app (NowPlayingBar).
 - **Listening Stats**: Local listening history tracking.
+- **Trim Silence**: Skip silent passages during playback.
 
 ## Discovery
 
-- **Unified Search**: Defaults to iTunes for extensive coverage, with optional PodcastIndex support (requires personal API key).
+- **Unified Search**: Defaults to Apple Podcasts (iTunes) for extensive coverage, with optional PodcastIndex support (requires personal API key).
 - **Add to Server**: Discover new podcasts in-app and instantly sync subscriptions to your self-hosted server.
-- **Metadata Caching**: Configurable cache duration for faster load times.
-- **Background Refresh**: Automatic episode fetching in the background.
+- **Feed Cache**: Configurable cache duration (1–48 hours) for faster load times; pull-to-refresh bypasses cache.
+- **Background Refresh**: Automatic episode fetching in the background with configurable intervals (15 min – 4 hours).
 
 ## Platform Integrations
 
-- **CarPlay**: Full queue management and playback control with native UI, optimized template updates.
-- **Apple Watch**: Standalone playback, offline episode transfer, and haptic controls.
-- **Apple TV (tvOS)**: Universal purchase support across iPhone, iPad, Mac, Watch, and TV.
+- **CarPlay**: Full queue management, Recently Updated episodes tab, Now Playing with chapter navigation, playback speed and trim-silence controls. Artwork with placeholder loading.
+- **Apple Watch**: Standalone playback, offline episode transfer, configurable podcast sync limit, and complications showing playback status.
 - **Dynamic Island**: Real-time playback status via Live Activities on supported iPhones.
-- **Siri Support**: Voice commands for hands-free playback.
+- **Siri & App Intents**: 10 native voice commands — play, pause, stop, resume, skip forward/backward, next episode, play latest, play specific podcast, set playback speed. All available as Shortcuts.
+- **Widgets & Complications**: Lock screen and watch face widgets showing current playback.
 
 ## Technical
 
-- **Tech Stack**: Flutter 3.10+, Provider for state management, Just Audio + Audio Service for playback.
-- **Sync Backend**: Optimized for the gpodder-sync Nextcloud app. Standard gPodder services may work but are not the primary focus.
-- **Protocol**: Implements the Open Podcast Sync protocol for subscriptions (SubscriptionDelta) and actions (EpisodeAction).
-- **Storage**: flutter_secure_storage for credentials, Hive/SQLite for local database and offline capability.
-- **Native Code**: CarPlay (Swift), watchOS (SwiftUI), tvOS (SwiftUI), iOS Live Activities.
-- **Key Dependencies**: just_audio, audio_service, flutter_carplay, dio, live_activities, watch_connectivity, background_fetch, dart_rss.
+- **Language**: Swift 5.9
+- **UI Framework**: SwiftUI
+- **Storage**: SwiftData (iOS 17+)
+- **Audio**: AVFoundation / AVAudioEngine
+- **Sync**: gPodder-compatible (Nextcloud gpodder-sync). Implements Open Podcast Sync protocol for subscriptions (SubscriptionDelta) and actions (EpisodeAction).
+- **Build System**: XcodeGen (`project.yml`) + Swift Package Manager (`Package.swift`)
+- **Minimum Targets**: iOS 17.0, watchOS 10.0
+- **Targets**: YourPods (iOS app), YourPodsWatch (watchOS app), YourPodsWidgets (Live Activities), YourPodsComplication (watch complications), YourPodsTests (unit tests)
 
 ## Architecture
 
-- `lib/api/` - Nextcloud/gPodder API integration
-- `lib/models/` - Data models (Podcast, Episode, etc.)
-- `lib/providers/` - State management (Provider pattern)
-- `lib/screens/` - UI screens (Player, Library, Settings, Search, History, Queue, Playlists, Profile Selection)
-- `lib/services/` - Core services (Audio, CarPlay, Chapters, Live Activities, Siri, Transcripts, Watch, Background Refresh, Listening Stats)
-- `lib/widgets/` - Reusable UI components
-- `lib/utils/` - Utility functions
+- `YourPods/YourPods/Audio/` — Audio playback engine (AudioManager: AVAudioEngine-based)
+- `YourPods/YourPods/Models/` — SwiftData models (Podcast, Episode, ServerProfile, Chapter, EpisodeAction, PodcastSettings)
+- `YourPods/YourPods/Networking/` — gPodder API client (GPodderClient), RSS feed parser (RSSService), URL resolver
+- `YourPods/YourPods/Services/` — CarPlay, Siri (AppIntents), Live Activities, Chapters, Transcripts, Watch connectivity, Downloads, Background Refresh, Listening Stats, OPML import/export, Flutter data migration
+- `YourPods/YourPods/State/` — Observable state managers: PlayerManager, PodcastManager, SettingsManager, NavigationState, SleepTimerManager
+- `YourPods/YourPods/Views/` — SwiftUI views: Home, Library, Player, Queue, Settings, Search, History, Profile Selection, Downloads, Import, Episode Detail, Podcast Detail, and reusable Components (NowPlayingBar, ChapterListSheet, TranscriptListSheet, SleepTimerSheet, PodcastSettingsSheet)
+- `YourPods/YourPods/Utils/` — Utility extensions (String+HTML)
+- `YourPodsWatch/` — watchOS app (standalone playback, library sync, remote player, episode browsing)
+- `YourPodsWidgets/` — Live Activities and widget extension
+- `YourPodsComplication/` — watchOS complication widget
+
+## Per-Podcast Settings
+
+Each podcast can have individual settings (auto-queue mode, auto-download, remove after play, archive on complete) that override the global defaults.
 
 ## External Links
 

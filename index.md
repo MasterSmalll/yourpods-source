@@ -29,18 +29,20 @@ YourPods is a clean, simple, and refreshing podcast experience. No app ads. Ever
 
 ## 🍎 Apple Ecosystem Integration
 
-- **CarPlay** — Full queue management and playback control with native UI
-- **Apple Watch** — Standalone playback, offline episode transfer, and haptic controls
+- **CarPlay** — Full queue management, Recently Updated tab, chapter navigation, speed & silence controls
+- **Apple Watch** — Standalone playback, offline episode transfer, complications, and configurable sync
 - **Dynamic Island** — Real-time playback status on supported iPhones
-- **Siri** — Voice commands for hands-free playback
-- **Universal Purchase** — Seamless experience across iPhone, iPad, Mac, Watch, and Apple TV
+- **Siri** — 10 native voice commands for hands-free playback
+- **Shortcuts** — All Siri intents available as Shortcuts for automations
+- **Universal Purchase** — Seamless experience across iPhone, iPad, Mac, and Watch
 
 ## 🎧 Player Experience
 
 - **Live Transcripts** — Interactive, searchable transcripts with auto-scroll
-- **Smart Chapters** — Embedded chapter support for easy navigation
+- **Smart Chapters** — RSS and description-parsed chapter support for easy navigation
 - **Smart Queue** — Manual drag-and-drop reordering with quick actions
-- **Precision Control** — Granular playback speed slider and custom sleep timers
+- **Precision Control** — Granular playback speed (0.5×–3×), skip intro/outro, and sleep timers
+- **Per-Podcast Settings** — Auto-queue, auto-download, remove after play, and archive per podcast
 - **Mini Player** — Persistent playback controls across the app
 
 ## ☁️ Sync & Privacy
@@ -51,19 +53,22 @@ YourPods is a clean, simple, and refreshing podcast experience. No app ads. Ever
 
 ## 🔍 Discovery
 
-- **Unified Search** — Defaults to iTunes for extensive coverage, with optional **PodcastIndex** support
+- **Unified Search** — Defaults to Apple Podcasts for extensive coverage, with optional **PodcastIndex** support
 - **Add to Server** — Discover new podcasts in-app and instantly sync subscriptions
+- **Background Refresh** — Automatic episode fetching with configurable intervals
 
 ---
 
-## What's New in 1.3.1
+## What's New in 2.0
 
-- **Cross-Device Queue Sync** — Your queue now syncs across devices via your gPodder server
-- **OPML Import & Export** — Easily migrate subscriptions to or from other apps, or back up your library
-- **Password-Protected Feeds** — Subscribe to private RSS feeds (Patreon, premium podcasts)
-- **Local Accounts** — Use YourPods without a sync server for fully offline podcast management
-- **Bluetooth & Car Display Metadata** — Podcast author name now appears on car dashboards and speakers
-- **Streaming Resilience** — Playback recovers gracefully from network drops
+- **Complete Swift Rewrite** — 100% native Swift and SwiftUI, replacing the Flutter-based v1.x
+- **CarPlay Recently Updated** — Browse new episodes directly from CarPlay
+- **CarPlay Chapter Navigation** — Skip between chapters from the Now Playing screen
+- **10 Siri Commands** — Play, pause, skip, set speed, and more — all hands-free
+- **Per-Podcast Settings** — Auto-queue, auto-download, and more per podcast
+- **Automatic Flutter Migration** — Existing users seamlessly migrate all data on first launch
+- **Profile Deletion** — Fully delete profiles and associated data
+- **Sleep Timer** — Configurable duration with automatic pause
 
 ---
 
@@ -81,11 +86,13 @@ YourPods is a clean, simple, and refreshing podcast experience. No app ads. Ever
 
 | | |
 |---|---|
+| **Language** | Swift 5.9 |
+| **UI Framework** | SwiftUI |
+| **Storage** | SwiftData (iOS 17+) |
+| **Audio** | AVFoundation / AVAudioEngine |
 | **Sync Backend** | Optimized for [gpodder-sync](https://apps.nextcloud.com/apps/gpoddersync) on Nextcloud |
-| **Protocol** | Open Podcast Sync (subscriptions + episode actions) |
-| **Architecture** | Flutter with `provider` state management and `just_audio` playback |
-| **Native Integrations** | CarPlay (Swift), WatchOS (SwiftUI), tvOS (SwiftUI), iOS Live Activities |
-| **Security** | `flutter_secure_storage` for credentials, local DB for offline capability |
+| **Build System** | XcodeGen + Swift Package Manager |
+| **Targets** | iOS 17.0, watchOS 10.0 |
 
 ---
 

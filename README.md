@@ -19,10 +19,8 @@
 
 > [!IMPORTANT]
 > **YourPods 2.0 — Complete Swift Rewrite**
-> 
+>
 > YourPods has been completely rewritten in native **Swift and SwiftUI** for version 2.0. The original Flutter/Dart codebase (v1.3.1 and earlier) has been archived on the [`flutter-v1`](https://github.com/asecretcompany/yourpods-source/tree/flutter-v1) branch and is no longer maintained.
-> 
-> This `main` branch now contains the **Swift-native** codebase.
 
 YourPods is a gPodder-compatible, privacy-first, and self-hosted podcast player. Sync your subscriptions and listening progress across all your devices using your own Nextcloud server, manage multiple profiles, and keep your data 100% yours.
 
@@ -37,7 +35,7 @@ YourPods is a gPodder-compatible, privacy-first, and self-hosted podcast player.
 
 ## Installation
 
-The current codebase corresponds to the 1.3.1 release in the [Apple App Store](https://apps.apple.com/us/app/yourpods/id6757721236).
+The current codebase corresponds to the 2.0 release in the [Apple App Store](https://apps.apple.com/us/app/yourpods/id6757721236).
 
 - **App Store**: Get automatic updates and hassle-free installation. Purchasing the App Store version directly funds YourPods development! 🙏
 - **TestFlight**: Join the [TestFlight Beta](https://testflight.apple.com/join/jF18YknW) to test new features for free.
@@ -49,72 +47,107 @@ For the most up-to-date features, check our [website](https://asecretcompany.com
 
 YourPods seamlessly integrates with gPodder-compatible servers (such as Nextcloud & NextPod) to keep your library in sync without relying on third-party clouds.
 
-## New Features in 1.3.1
+### What's New in 2.0
 
-## 🔐 Account Isolation & Multi-Profile Fixes
-- **Per-account data scoping** — Queue, auto-queue settings, playback position, groups, and sync timestamps are now fully isolated between profiles. Switching accounts no longer leaks data from another profile.
-- **Local-to-Sync conversion** — You can now switch a Local Account to a Sync Account (and vice versa) directly from the account settings toggle without having to delete and recreate.
-- **Settings tab fix** — The "Sync Account" tab in settings is now properly tappable (previously the tap handler was missing).
-
----
-
-## 🔑 Password-Protected Feeds
-
-- You can now subscribe to RSS feeds that require authentication (e.g. Patreon private feeds, premium podcasts).
-- When adding a podcast, toggle **"Authentication Required"** to enter a username and password.
-- Credentials are stored securely on-device using the platform keychain — they are **never sent** to your gPodder server.
-- Feeds with `user:pass@host` URL-embedded credentials are also supported automatically.
+#### 🚀 Complete Native Rewrite
+- **100% Swift and SwiftUI** — fully native app replacing the Flutter-based v1.x. Faster launch times, smoother animations, and reduced memory usage.
+- **SwiftData** for local storage — replacing Hive/SQLite for a modern, Apple-native persistence layer.
+- **Automatic Flutter migration** — existing users seamlessly migrate their subscriptions, queue, playback positions, profiles, and settings on first launch. No data loss.
 
 ---
 
-## 🎵 Bluetooth & Tesla Metadata (AVRCP)
-
-- **Podcast author now shows on Bluetooth displays** — Previously, the "Artist" line was blank on car dashboards, Bluetooth speakers, and headphones with displays. It now shows the podcast creator name (parsed from `itunes:author` in the RSS feed).
-- This benefits **all Bluetooth devices**, including Tesla, which does not support CarPlay.
-
-### What you'll see on your car/speaker display
-
-| Field | Before | Now |
-|---|---|---|
-| Title | Episode title | Episode title |
-| Artist | *(blank)* | Podcast author ✅ |
-| Album | Podcast name | Podcast name |
-| Artwork | Episode art | Episode art |
+#### 🚗 CarPlay Enhancements
+- **Recently Updated tab** — browse new, unplayed episodes directly from CarPlay without reaching for your phone.
+- **Chapter navigation** — skip between chapters using dedicated Prev/Next Chapter buttons on the Now Playing screen.
+- **Speed & silence controls** — adjust playback speed and toggle trim-silence directly from CarPlay.
+- **Artwork placeholders** — podcast and episode artwork always displays immediately with a placeholder while full artwork loads.
 
 ---
 
-## 🕐 Last Synced Indicator
-
-- **Settings now shows when your last sync occurred** — A "Last synced: X minutes ago" label appears above the Push/Pull buttons (sync accounts only).
-- This helps you quickly confirm whether your data is up-to-date without digging into logs.
+#### 🗣️ Siri & App Intents
+- **10 native Siri commands** — play, pause, stop, resume, skip forward/backward, next episode, play latest, play a specific podcast, and set playback speed — all hands-free.
+- **Shortcuts integration** — all intents work as Shortcuts and can be added to automations.
 
 ---
 
-## 📋 Known Limitations
+#### ⏱️ Per-Podcast Settings
+- **Auto-queue mode** (off / normal / priority), **auto-download**, **remove after playing**, and **archive on complete** — configurable per podcast and as global defaults for new subscriptions.
 
-- The "Last synced" timestamp is **session-only** — it resets when you restart the app. This is intentional to avoid extra storage writes; it answers "has the app synced since I opened it?"
-- Password-protected feed credentials are stored **locally only** and are not synced to your gPodder server. If you set up the same feed on another device, you'll need to enter credentials again.
+---
 
-## Experimental: Linux Support
+#### 🔐 Account & Sync
+- **Profile deletion** — fully delete profiles and all associated data.
+- **Per-profile sync timestamps** — switching profiles no longer causes stale syncs.
+- **Episode Activity view** — inspect recent sync actions in Settings.
 
-### Dependencies
-To build and run on Linux, you need the following dependencies:
-```bash
-sudo apt-get install libsecret-1-dev libjsoncpp-dev
-```
+---
 
-### Snap Package
-To build the Snap package:
-```bash
-snapcraft
-```
+#### ⌚ Apple Watch
+- **Standalone playback** with offline episode transfer.
+- **Watch complications** showing playback status.
+- **Configurable sync** — choose how many podcasts sync to the watch.
+
+---
+
+#### 🎵 Playback
+- **Native AVAudioEngine** — rebuilt audio pipeline for Bluetooth reliability, Siri interruption recovery, and background auto-advance.
+- **Sleep timer** with configurable durations.
+- **Skip intro/outro** with per-second precision (0–120s).
+
+---
+
+### Carried Forward from 1.x
+
+- **Cross-Device Queue Sync** via gPodder server
+- **OPML Import & Export** for subscription migration
+- **Password-Protected Feeds** (Patreon, premium feeds) — credentials stored securely on-device
+- **Local Accounts** — no server required
+- **Live Transcripts** — interactive, searchable, auto-scrolling
+- **Smart Chapters** — RSS and ID3 tag support
+- **Dynamic Island & Live Activities** on supported iPhones
+- **Listening Stats** dashboard
+- **Background Refresh** with configurable intervals
+- **Unified Search** — iTunes or PodcastIndex
+- **Appearance** — system, light, or dark theme; configurable tab bar style and start page
 
 ## Getting Started for Developers
 
-1.  **Prerequisites**: Ensure you have Flutter installed (`flutter doctor`).
+1.  **Prerequisites**: Xcode 16+ and [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`).
 2.  **Clone**: `git clone https://github.com/asecretcompany/yourpods-source.git`
-3.  **Install**: `flutter pub get`
-4.  **Run**: `flutter run`
+3.  **Generate project**: `xcodegen generate`
+4.  **Open**: `open YourPods.xcodeproj`
+5.  **Run**: Select the `YourPods` scheme and build for an iOS Simulator or device.
+
+> [!NOTE]
+> The project uses `project.yml` (XcodeGen) to generate the Xcode project. Do not edit `YourPods.xcodeproj` directly — make changes in `project.yml` and re-run `xcodegen generate`.
+
+## Technical
+
+| | |
+|---|---|
+| **Language** | Swift 5.9 |
+| **UI** | SwiftUI |
+| **Storage** | SwiftData (iOS 17+) |
+| **Audio** | AVFoundation / AVAudioEngine |
+| **Sync** | gPodder-compatible (Nextcloud gpodder-sync) |
+| **Minimum Targets** | iOS 17.0, watchOS 10.0 |
+| **Build System** | XcodeGen (`project.yml`) + Swift Package Manager |
+
+### Architecture
+
+- `YourPods/YourPods/Audio/` — Audio playback engine (AVAudioEngine-based)
+- `YourPods/YourPods/Models/` — SwiftData models (Podcast, Episode, ServerProfile, etc.)
+- `YourPods/YourPods/Networking/` — gPodder API client, RSS parser, URL resolver
+- `YourPods/YourPods/Services/` — CarPlay, Siri, Live Activities, Chapters, Transcripts, Watch, Downloads, Background Refresh, Listening Stats, OPML, Flutter migration
+- `YourPods/YourPods/State/` — State managers (Player, Podcast, Settings, Navigation, Sleep Timer)
+- `YourPods/YourPods/Views/` — SwiftUI views and reusable components
+- `YourPodsWatch/` — watchOS app with standalone playback
+- `YourPodsWidgets/` — Live Activities and widget extensions
+- `YourPodsComplication/` — watchOS complications
+
+## Legacy Flutter Codebase
+
+The original Flutter/Dart codebase (v1.0–v1.3.1) is preserved on the [`flutter-v1`](https://github.com/asecretcompany/yourpods-source/tree/flutter-v1) branch for reference. It is no longer maintained.
 
 ## License
 

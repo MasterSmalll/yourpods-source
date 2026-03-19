@@ -1,3 +1,61 @@
+# What's New in Version 2.0
+
+YourPods 2.0 is a **complete rewrite** in native Swift and SwiftUI — replacing the Flutter-based v1.x entirely.
+
+### 🚀 Complete Native Rewrite
+*   **100% Swift and SwiftUI** — Fully native app with faster launch times, smoother animations, and reduced memory usage.
+*   **SwiftData** for local storage — Modern, Apple-native persistence layer replacing Hive/SQLite.
+*   **Automatic Flutter migration** — Existing users seamlessly migrate subscriptions, queue, playback positions, profiles, and settings on first launch.
+
+### 🚗 CarPlay Enhancements
+*   **Recently Updated tab** — Browse new, unplayed episodes directly from CarPlay.
+*   **Chapter navigation** — Prev/Next Chapter buttons on the Now Playing screen.
+*   **Speed & silence controls** — Adjust playback speed and toggle trim-silence from CarPlay.
+*   **Artwork placeholders** — Artwork always displays immediately with a placeholder while full images load.
+
+### 🗣️ Siri & App Intents
+*   **10 native Siri commands** — Play, pause, stop, resume, skip forward/backward, next episode, play latest, play specific podcast, set playback speed.
+*   **Shortcuts integration** — All intents work as Shortcuts and can be added to automations.
+
+### ⏱️ Per-Podcast Settings
+*   **Auto-queue mode** (off / normal / priority), **auto-download**, **remove after playing**, and **archive on complete** — configurable per podcast and as global defaults.
+
+### 🔐 Account & Sync
+*   **Profile deletion** — Fully delete profiles and all associated data.
+*   **Per-profile sync timestamps** — Switching profiles no longer causes stale syncs.
+*   **Episode Activity view** — Inspect recent sync actions in Settings.
+
+### ⌚ Apple Watch
+*   **Standalone playback** with offline episode transfer.
+*   **Watch complications** showing playback status.
+*   **Configurable sync** — Choose how many podcasts sync to the watch.
+
+### 🎵 Playback
+*   **Native AVFoundation audio engine** — Rebuilt for Bluetooth reliability, Siri interruption recovery, and background auto-advance.
+*   **Sleep timer** with configurable durations.
+*   **Skip intro/outro** with per-second precision (0–120s).
+*   **Trim silence** toggle.
+
+### 🎨 Appearance
+*   **Theme support** — System, light, or dark mode.
+*   **Tab bar customization** — Text only, icon only, or both.
+*   **Configurable start page** — Choose Home, Library, or Up Next as your default tab.
+
+### Core Carried Forward from 1.x.x
+*   Cross-Device Queue Sync via gPodder server
+*   OPML Import & Export
+*   Password-Protected Feeds (Patreon, premium)
+*   Local Accounts (no server required)
+*   Live Transcripts
+*   Smart Chapters (RSS + ID3)
+*   Dynamic Island & Live Activities
+*   Listening Stats dashboard
+*   Background Refresh
+*   Unified Search (iTunes / PodcastIndex)
+*   Bluetooth & Car Display Metadata
+
+---
+
 # What's New in Version 1.3.1
 
 This update brings major new features, sync improvements, and playback reliability fixes.
