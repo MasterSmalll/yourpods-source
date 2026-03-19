@@ -17,11 +17,14 @@
 
 ---
 
-YourPods is a gPodder-compatible, privacy-first, and self-hosted podcast player. Sync your subscriptions and listening progress across all your devices using your own Nextcloud server, manage multiple profiles, and keep your data 100% yours.
+> [!IMPORTANT]
+> **YourPods 2.0 — Complete Swift Rewrite**
+> 
+> YourPods has been completely rewritten in native **Swift and SwiftUI** for version 2.0. The original Flutter/Dart codebase (v1.3.1 and earlier) has been archived on the [`flutter-v1`](https://github.com/asecretcompany/yourpods-source/tree/flutter-v1) branch and is no longer maintained.
+> 
+> This `main` branch now contains the **Swift-native** codebase.
 
-> [!NOTE]
-> **Platform Support**: While built with Flutter, this project is heavily optimized for the **Apple Ecosystem** (iOS, macOS, watchOS, CarPlay). 
-> Android, Linux, Windows, and Web builds are available in the codebase but are currently **lightly tested and may be unsupported**.
+YourPods is a gPodder-compatible, privacy-first, and self-hosted podcast player. Sync your subscriptions and listening progress across all your devices using your own Nextcloud server, manage multiple profiles, and keep your data 100% yours.
 
 <div align="center">
   <br/>
