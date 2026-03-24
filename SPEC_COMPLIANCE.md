@@ -93,7 +93,7 @@
 
 ## gPodder Sync API v2
 
-### P0 — Nextcloud gPodder Sync
+### P0 — [Nextcloud gPodder Sync](https://github.com/thrillfall/nextcloud-gpodder)
 
 | Endpoint | Status | Impl File(s) |
 |----------|--------|-------------|
@@ -110,18 +110,18 @@
 
 **P0 Score: 10/10** ✅
 
-### P1 — Repod (GPodderSync-compatible)
+### P1 — [RePod](https://git.crystalyx.net/Xefir/repod) (GPodderSync-compatible)
 
-Same API surface as P0. Repod uses identical Nextcloud GPodderSync endpoints.
+Same API surface as P0. RePod uses identical Nextcloud GPodderSync endpoints.
 
 | Feature | Status |
 |---------|--------|
 | All P0 endpoints | ✅ |
-| Repod-specific extensions | N/A (none currently) |
+| RePod-specific extensions | N/A (none currently) |
 
 **P1 Score: 10/10** ✅
 
-### P2 — gpodder.net Full API
+### P2 — [gpodder.net](https://github.com/gpodder/mygpo) Full API
 
 | API Group | Endpoint | Status | Impl File(s) |
 |-----------|----------|--------|-------------|
@@ -156,7 +156,7 @@ Same API surface as P0. Repod uses identical Nextcloud GPodderSync endpoints.
 | Apple itunes: 1.x | 11 | 15 | 73% |
 | Podcasting 2.0 | 10 | 27 | 37% |
 | gPodder P0 (NC) | 10 | 10 | **100%** ✅ |
-| gPodder P1 (Repod) | 10 | 10 | **100%** ✅ |
+| gPodder P1 (RePod) | 10 | 10 | **100%** ✅ |
 | gPodder P2 (full) | 5 | ~18 | ~28% |
 
 ---
