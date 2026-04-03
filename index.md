@@ -3,13 +3,13 @@ layout: default
 ---
 
 <p align="center">
-  <a href="https://yourpods.app">
+  <a href="https://apps.apple.com/us/app/yourpods/id6757721236">
     <img src="https://img.shields.io/badge/Platform-iOS-000000.svg?style=flat&logo=apple" alt="iOS">
   </a>
-  <a href="https://yourpods.app">
+  <a href="https://apps.apple.com/us/app/yourpods/id6757721236">
     <img src="https://img.shields.io/badge/Platform-macOS-000000.svg?style=flat&logo=apple" alt="macOS">
   </a>
-  <a href="https://yourpods.app">
+  <a href="https://apps.apple.com/us/app/yourpods/id6757721236">
     <img src="https://img.shields.io/badge/Platform-watchOS-000000.svg?style=flat&logo=apple" alt="watchOS">
   </a>
   <a href="LICENSE">
@@ -25,7 +25,7 @@ Pair it with **Nextcloud** and the [gPodder Sync](https://apps.nextcloud.com/app
 
 <p align="center">
   <br/>
-  <a href="https://yourpods.app">
+  <a href="https://apps.apple.com/us/app/yourpods/id6757721236">
     <img src="https://tools.applemediaservices.com/api/badges/download-on-the-app-store/black/en-us?size=250x83&releaseDate=1708473600" alt="Download on the App Store" height="60">
   </a>
   <br/>
