@@ -32,7 +32,7 @@ final class CarPlayService: NSObject {
     private var currentChapters: [Chapter]?
     
     // Image cache for artwork
-    private var imageCache: [String: UIImage] = [:]
+    private var imageCache = NSCache<NSString, UIImage>()
     
     // Debouncing
     private var debounceTimer: Timer?
@@ -62,7 +62,7 @@ final class CarPlayService: NSObject {
         lastQueueCount = -1
         lastRecentCount = -1
         lastMediaItemId = nil
-        imageCache.removeAll()
+        imageCache.removeAllObjects()
         
         // Refresh when queue changes (reorder, add, remove)
         // Wrap existing handler (set by YourPodsApp for watch sync) instead of replacing
@@ -107,8 +107,9 @@ final class CarPlayService: NSObject {
             logger.debug("Update suppressed during episode launch")
             return
         }
+        // Use a longer debounce for queue reorders/updates to prevent UI jitter
         debounceTimer?.invalidate()
-        debounceTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self] _ in
+        debounceTimer = Timer.scheduledTimer(withTimeInterval: 0.8, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 self?.updateContent()
             }
@@ -549,7 +550,7 @@ final class CarPlayService: NSObject {
         guard let urlString = url, let imageUrl = URL(string: urlString) else { return }
         
         // Use cached image if available (replaces placeholder instantly)
-        if let cached = imageCache[urlString] {
+        if let cached = imageCache.object(forKey: urlString as NSString) {
             let size = CGSize(width: 44, height: 44)
             let renderer = UIGraphicsImageRenderer(size: size)
             let resized = renderer.image { _ in cached.draw(in: CGRect(origin: .zero, size: size)) }
@@ -562,7 +563,7 @@ final class CarPlayService: NSObject {
             do {
                 let (data, _) = try await URLSession.shared.data(from: imageUrl)
                 guard let image = UIImage(data: data) else { return }
-                self.imageCache[urlString] = image
+                self.imageCache.setObject(image, forKey: urlString as NSString)
                 let size = CGSize(width: 44, height: 44)
                 let renderer = UIGraphicsImageRenderer(size: size)
                 let resized = renderer.image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }

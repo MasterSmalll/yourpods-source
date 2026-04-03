@@ -18,10 +18,16 @@ struct PodcastSearchView: View {
             ScrollView {
                 VStack(spacing: 20) {
                     // Prominent Search Box
-                    SearchBar(text: $searchText, isSearching: $isSearching)
-                        .onChange(of: searchText) { _, newValue in
-                            debounceSearch(newValue)
-                        }
+                    VStack(alignment: .leading, spacing: 12) {
+                        Label("Search", systemImage: "magnifyingglass")
+                            .font(.headline)
+                            .padding(.horizontal)
+                        
+                        SearchBar(text: $searchText, isSearching: $isSearching)
+                            .onChange(of: searchText) { _, newValue in
+                                debounceSearch(newValue)
+                            }
+                    }
                     
                     // Search Results
                     if isSearching {
@@ -85,13 +91,20 @@ struct PodcastSearchView: View {
         isSearching = true
         errorMessage = nil
         
+        let result = SearchProviderResolver.resolve(
+            provider: settings.searchProvider,
+            apiKey: settings.podcastIndexApiKey,
+            apiSecret: settings.podcastIndexApiSecret
+        )
+        
         let provider: PodcastSearchProvider
-        if settings.searchProvider == .podcastIndex,
-           let key = settings.podcastIndexApiKey, !key.isEmpty,
-           let secret = settings.podcastIndexApiSecret, !secret.isEmpty {
-            provider = PodcastIndexSearchProvider(apiKey: key, apiSecret: secret)
-        } else {
-            provider = ITunesSearchProvider()
+        switch result {
+        case .provider(let p):
+            provider = p
+        case .missingCredentials(let message):
+            errorMessage = message
+            isSearching = false
+            return
         }
         
         do {
@@ -113,10 +126,10 @@ private struct SearchBar: View {
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: "magnifyingglass")
-                .foregroundColor(.secondary)
+                .foregroundColor(.blue)
                 .font(.title3)
             
-            TextField("Search podcasts...", text: $text)
+            TextField("Enter a podcast name", text: $text)
                 .font(.body)
                 #if os(iOS)
                 .textInputAutocapitalization(.never)
@@ -134,6 +147,10 @@ private struct SearchBar: View {
         .padding(.vertical, 14)
         .background(.ultraThinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 14))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(Color.blue.opacity(0.3), lineWidth: 1.5)
+        )
         .padding(.horizontal)
     }
 }
@@ -171,6 +188,18 @@ private struct SearchResultRow: View {
                         Text(genre)
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
+                    if let description = result.description, !description.isEmpty {
+                        Text(description.strippingHTML())
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                    if let website = result.websiteUrl, let url = URL(string: website), let host = url.host() {
+                        Label(host, systemImage: "globe")
+                            .font(.caption2)
+                            .foregroundStyle(.blue)
                             .lineLimit(1)
                     }
                 }
@@ -321,6 +350,7 @@ private struct ProtectedFeedCard: View {
             if requiresAuth {
                 TextField("Username", text: $username)
                     #if os(iOS)
+                    .textContentType(.username)
                     .textInputAutocapitalization(.never)
                     #endif
                     .padding(.horizontal, 14)
@@ -329,6 +359,7 @@ private struct ProtectedFeedCard: View {
                     .clipShape(RoundedRectangle(cornerRadius: 10))
                 
                 SecureField("Password", text: $password)
+                    .textContentType(.password)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
                     .background(.ultraThinMaterial)
@@ -352,8 +383,14 @@ private struct ProtectedFeedCard: View {
                 Text(error).foregroundStyle(.red).font(.caption)
             }
             if success {
-                Label("Podcast added!", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green).font(.caption)
+                VStack(spacing: 4) {
+                    Label("Podcast added!", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green).font(.caption)
+                    if requiresAuth {
+                        Label("Credentials stored securely on this device only — not synced to any server.", systemImage: "lock.shield.fill")
+                            .foregroundStyle(.secondary).font(.caption2)
+                    }
+                }
             }
         }
         .padding(.horizontal)
@@ -365,8 +402,12 @@ private struct ProtectedFeedCard: View {
         success = false
         Task {
             do {
-                // TODO: Pass auth credentials to the subscription method
-                try await podcastManager.addSubscription(url: feedUrl)
+                // Pass auth credentials to the subscription method
+                try await podcastManager.addSubscription(
+                    url: feedUrl,
+                    username: requiresAuth ? username : nil,
+                    password: requiresAuth ? password : nil
+                )
                 feedUrl = ""
                 username = ""
                 password = ""
@@ -396,6 +437,8 @@ private struct PodcastPreviewSheet: View {
     @State private var isSubscribing = false
     @State private var subscribeError: String?
     @State private var subscribed = false
+    @State private var feedDescription: String?
+    @State private var feedWebsite: String?
     
     var body: some View {
         NavigationStack {
@@ -465,15 +508,25 @@ private struct PodcastPreviewSheet: View {
                             .padding(.horizontal)
                     }
                     
-                    // Description
-                    if let description = result.description, !description.isEmpty {
+                    // Description (prefer search result, fall back to feed)
+                    let descriptionText = (result.description?.isEmpty == false ? result.description : nil) ?? feedDescription
+                    if let description = descriptionText, !description.isEmpty {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("About")
                                 .font(.headline)
                             Text(description.strippingHTML())
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
-                                .lineLimit(6)
+                        }
+                        .padding(.horizontal)
+                    }
+                    
+                    // Website (prefer search result, fall back to feed)
+                    let websiteText = result.websiteUrl ?? feedWebsite
+                    if let website = websiteText, let url = URL(string: website), let host = url.host() {
+                        Link(destination: url) {
+                            Label(host, systemImage: "globe")
+                                .font(.subheadline)
                         }
                         .padding(.horizontal)
                     }
@@ -595,7 +648,9 @@ private struct PodcastPreviewSheet: View {
         isLoadingEpisodes = true
         do {
             let rssService = RSSService()
-            let (_, episodes) = try await rssService.fetchFeed(url: result.feedUrl)
+            let (podcast, episodes) = try await rssService.fetchFeed(url: result.feedUrl)
+            feedDescription = podcast.description
+            feedWebsite = podcast.website
             let sorted = episodes.sorted { ($0.pubDate ?? .distantPast) > ($1.pubDate ?? .distantPast) }
             previewEpisodes = sorted.prefix(5).map { ep in
                 PreviewEpisode(

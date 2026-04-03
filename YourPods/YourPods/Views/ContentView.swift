@@ -60,6 +60,9 @@ struct ContentView: View {
                     }
                     .tag(4)
             }
+            .id(settingsManager.tabBarDisplayMode)
+            .onAppear { applyTabBarTitlePosition() }
+            .onChange(of: settingsManager.tabBarDisplayMode) { applyTabBarTitlePosition() }
             .padding(.bottom, playerManager.currentEpisodeGuid != nil ? 90 : 0)
             
             // Persistent mini-player
@@ -129,8 +132,8 @@ struct ContentView: View {
         }
         // ── Sync conflict resolution (shown when strategy = .ask) ──
         .sheet(isPresented: Binding(
-            get: { !playerManager.pendingConflicts.isEmpty },
-            set: { if !$0 { playerManager.pendingConflicts.removeAll() } }
+            get: { !playerManager.pendingConflicts.isEmpty || !playerManager.pendingUrlRewrites.isEmpty },
+            set: { if !$0 { playerManager.pendingConflicts.removeAll(); playerManager.pendingUrlRewrites.removeAll() } }
         )) {
             SyncConflictSheet()
         }
@@ -147,6 +150,16 @@ struct ContentView: View {
             Image(systemName: systemImage)
         case .textAndIcon:
             Label(title, systemImage: systemImage)
+        }
+    }
+    
+    /// Adjust tab bar title position — center text vertically when in text-only mode.
+    private func applyTabBarTitlePosition() {
+        let appearance = UITabBarItem.appearance()
+        if settingsManager.tabBarDisplayMode == .textOnly {
+            appearance.titlePositionAdjustment = UIOffset(horizontal: 0, vertical: -8)
+        } else {
+            appearance.titlePositionAdjustment = .zero
         }
     }
 }

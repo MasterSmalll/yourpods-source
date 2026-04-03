@@ -23,7 +23,7 @@ enum URLSanitizer {
         }
         
         if isInsecure(result) {
-            logger.warning("Insecure HTTP URL detected: \(result, privacy: .public). Credentials and data will be sent unencrypted.")
+            logger.warning("Insecure HTTP URL detected: \(result, privacy: .private). Credentials and data will be sent unencrypted.")
         }
         
         return result
@@ -33,4 +33,10 @@ enum URLSanitizer {
     static func isInsecure(_ url: String) -> Bool {
         url.lowercased().hasPrefix("http://")
     }
+    
+    // DESIGN DECISION: HTTP is intentionally allowed for gPodder and podcast servers.
+    // Many users self-host on local networks (e.g., http://192.168.1.50/nextcloud)
+    // without TLS. We default bare URLs to HTTPS via sanitize(), and the UI shows a
+    // warning when HTTP is used, but we do NOT reject HTTP connections.
+    // Do NOT add HTTPS enforcement or make GPodderClient.init throwing for this reason.
 }

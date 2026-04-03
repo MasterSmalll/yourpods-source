@@ -14,6 +14,23 @@ final class Episode {
     var link: String?
     var chaptersUrl: String?
     var transcriptUrl: String?
+    /// Inline Podlove Simple Chapters, serialized as JSON for persistence
+    var chaptersJSON: String?
+    
+    // MARK: - Apple itunes: 1.x / Podcasting 2.0 metadata
+    
+    /// Season number from <itunes:season> or <podcast:season>
+    var seasonNumber: Int?
+    /// Season name from <podcast:season name="...">
+    var seasonName: String?
+    /// Episode number from <itunes:episode> or <podcast:episode>
+    var episodeNumber: Double?
+    /// Episode display string from <podcast:episode display="...">
+    var episodeDisplay: String?
+    /// Episode type: "full", "trailer", or "bonus" (itunes:episodeType)
+    var episodeType: String?
+    /// Whether the episode contains explicit content (itunes:explicit)
+    var explicit: Bool?
     
     /// Playback position in seconds (synced from server or local playback)
     var listenedSeconds: Int = 0

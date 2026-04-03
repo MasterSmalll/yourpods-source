@@ -16,6 +16,7 @@ final class BackgroundRefreshService {
     
     var podcastManager: PodcastManager?
     var audioManager: AudioManager?
+    var settingsManager: SettingsManager?
     
     func registerTasks() {
         #if os(iOS)
@@ -59,16 +60,43 @@ final class BackgroundRefreshService {
                 // Auto-queue new episodes directly into the active AVQueuePlayer
                 // This is the KEY advantage over Flutter: same memory space!
                 if let audioManager, !newEpisodes.isEmpty {
+                    let globalDefault = self.settingsManager?.defaultAutoQueueMode ?? .off
                     let autoQueueItems = newEpisodes.compactMap { episode -> QueueItem? in
-                        guard let podcast = episode.podcast,
-                              podcast.effectiveSettings.autoQueueMode != .off && podcast.effectiveSettings.autoQueueMode != nil
-                        else { return nil }
+                        guard let podcast = episode.podcast else { return nil }
+                        // Skip already-played or interacted episodes
+                        guard !episode.isPlayed, !episode.isInteracted else { return nil }
+                        // Must have audio
+                        guard episode.audioUrl != nil else { return nil }
+                        let effectiveMode = podcast.effectiveSettings.autoQueueMode ?? globalDefault
+                        guard effectiveMode != .off else { return nil }
                         return QueueItem.from(episode: episode)
                     }
                     
                     if !autoQueueItems.isEmpty {
                         logger.info("Background: auto-queueing \(autoQueueItems.count) new episodes")
                         audioManager.appendToQueue(autoQueueItems)
+                    }
+                }
+                
+                // Also auto-queue the most recent unplayed episode for each subscription.
+                // Only the latest episode — future new episodes come via refreshAllFeeds().
+                if let audioManager {
+                    let globalDefault = self.settingsManager?.defaultAutoQueueMode ?? .off
+                    let existingItems: [QueueItem] = await MainActor.run {
+                        var items: [QueueItem] = []
+                        for podcast in podcastManager.subscriptions {
+                            let candidates = podcastManager.getAutoQueueCandidates(for: podcast, globalDefault: globalDefault)
+                            // Only take the most recent (candidates are sorted newest-first)
+                            if let mostRecent = candidates.first,
+                               let item = QueueItem.from(episode: mostRecent) {
+                                items.append(item)
+                            }
+                        }
+                        return items
+                    }
+                    if !existingItems.isEmpty {
+                        logger.info("Background: auto-queueing \(existingItems.count) latest episodes")
+                        audioManager.appendToQueue(existingItems)
                     }
                 }
                 

@@ -102,6 +102,9 @@ struct LibraryView: View {
                 }
                 .listStyle(.plain)
                 .environment(\.editMode, .constant(isEditing ? .active : .inactive))
+                .refreshable {
+                    _ = await podcastManager.refreshAllFeeds()
+                }
             }
             .navigationTitle("Library")
             .searchable(text: $searchText, prompt: "Search podcasts")
@@ -157,23 +160,50 @@ private struct PodcastRow: View {
     
     var body: some View {
         HStack(spacing: 12) {
-            AsyncImage(url: URL(string: podcast.logoUrl ?? "")) { image in
-                image.resizable().aspectRatio(contentMode: .fill)
-            } placeholder: {
-                RoundedRectangle(cornerRadius: 8).fill(.quaternary)
-                    .overlay {
-                        Image(systemName: "waveform")
-                            .foregroundStyle(.secondary)
-                    }
+            ZStack(alignment: .bottomTrailing) {
+                AsyncImage(url: URL(string: podcast.logoUrl ?? "")) { image in
+                    image.resizable().aspectRatio(contentMode: .fill)
+                } placeholder: {
+                    RoundedRectangle(cornerRadius: 8).fill(.quaternary)
+                        .overlay {
+                            Image(systemName: "waveform")
+                                .foregroundStyle(.secondary)
+                        }
+                }
+                .frame(width: 56, height: 56)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                
+                if podcast.requiresAuth {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(3)
+                        .background(Color.orange, in: Circle())
+                        .offset(x: 4, y: 4)
+                }
             }
-            .frame(width: 56, height: 56)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
             
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
                     Text(podcast.title)
                         .font(.body.bold())
                         .lineLimit(1)
+                    
+                    if podcast.explicit == true {
+                        Text("E")
+                            .font(.system(size: 8, weight: .black))
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Color.red.opacity(0.12))
+                            .foregroundStyle(.red)
+                            .clipShape(RoundedRectangle(cornerRadius: 2))
+                    }
+                    
+                    if podcast.isComplete {
+                        Image(systemName: "checkmark.seal.fill")
+                            .font(.caption2)
+                            .foregroundStyle(.green)
+                    }
                     
                     if unplayedCount > 0 {
                         Circle()

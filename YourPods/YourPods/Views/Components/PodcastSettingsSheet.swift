@@ -6,17 +6,30 @@ struct PodcastSettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     
+    @State private var feedUsername = ""
+    @State private var feedPassword = ""
+    @State private var credentialsSaved = false
+    
     var body: some View {
         NavigationStack {
             Form {
-                Section("Auto-Queue") {
-                    Picker("Mode", selection: Binding(
-                        get: { podcast.effectiveSettings.autoQueueMode ?? .off },
+                Section {
+                    Picker("Mode", selection: Binding<AutoQueueMode?>(
+                        get: { podcast.effectiveSettings.autoQueueMode },
                         set: { podcast.effectiveSettings.autoQueueMode = $0 }
                     )) {
-                        Text("Off").tag(AutoQueueMode.off)
-                        Text("Normal").tag(AutoQueueMode.normal)
-                        Text("Priority").tag(AutoQueueMode.priority)
+                        Text("Global Setting").tag(AutoQueueMode?.none)
+                        ForEach(AutoQueueMode.allCases, id: \.self) { mode in
+                            Text(mode.displayName).tag(AutoQueueMode?.some(mode))
+                        }
+                    }
+                } header: {
+                    Text("Auto-Queue")
+                } footer: {
+                    if let mode = podcast.effectiveSettings.autoQueueMode {
+                        Text(mode.subtitle)
+                    } else {
+                        Text("Uses your global auto-queue setting from Settings.")
                     }
                 }
                 
@@ -57,10 +70,22 @@ struct PodcastSettingsSheet: View {
                         set: { podcast.effectiveSettings.autoDownloadNewEpisodes = $0 }
                     ))
                     
-                    Toggle("Remove After Play", isOn: Binding(
-                        get: { podcast.effectiveSettings.removeDownloadAfterPlay ?? false },
-                        set: { podcast.effectiveSettings.removeDownloadAfterPlay = $0 }
-                    ))
+                    Picker("Download Cleanup", selection: Binding<DownloadCleanupPolicy?>(
+                        get: { podcast.effectiveSettings.downloadCleanupPolicy },
+                        set: { podcast.effectiveSettings.downloadCleanupPolicy = $0 }
+                    )) {
+                        Text("Default").tag(DownloadCleanupPolicy?.none)
+                        ForEach(DownloadCleanupPolicy.allCases, id: \.self) { policy in
+                            Text(policy.displayName).tag(DownloadCleanupPolicy?.some(policy))
+                        }
+                    }
+                    
+                    if podcast.effectiveSettings.downloadCleanupPolicy != nil {
+                        Button("Reset to Default", role: .destructive) {
+                            podcast.effectiveSettings.downloadCleanupPolicy = nil
+                        }
+                        .font(.caption)
+                    }
                 }
                 
                 Section("Completion") {
@@ -68,6 +93,38 @@ struct PodcastSettingsSheet: View {
                         get: { podcast.effectiveSettings.archiveOnComplete ?? false },
                         set: { podcast.effectiveSettings.archiveOnComplete = $0 }
                     ))
+                }
+                
+                // Feed Credentials (only for protected feeds)
+                if podcast.requiresAuth {
+                    Section {
+                        TextField("Username", text: $feedUsername)
+                            #if os(iOS)
+                            .textContentType(.username)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            #endif
+                        
+                        SecureField("Password", text: $feedPassword)
+                            .textContentType(.password)
+                        
+                        Button {
+                            saveCredentials()
+                        } label: {
+                            Label("Save Credentials", systemImage: "key.fill")
+                        }
+                        .disabled(feedUsername.isEmpty || feedPassword.isEmpty)
+                        
+                        if credentialsSaved {
+                            Label("Credentials updated", systemImage: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                                .font(.caption)
+                        }
+                    } header: {
+                        Label("Feed Credentials", systemImage: "lock.fill")
+                    } footer: {
+                        Text("Credentials are stored securely in your device's Keychain and are never synced to any server.")
+                    }
                 }
                 
                 Section {
@@ -88,6 +145,24 @@ struct PodcastSettingsSheet: View {
                     }
                 }
             }
+            .onAppear {
+                // Pre-populate username from model (password stays blank for security)
+                feedUsername = podcast.feedUsername ?? ""
+            }
+        }
+    }
+    
+    private func saveCredentials() {
+        KeychainHelper.shared.saveFeedCredentials(
+            username: feedUsername,
+            password: feedPassword,
+            forPodcastUrl: podcast.url
+        )
+        podcast.feedUsername = feedUsername
+        credentialsSaved = true
+        Task {
+            try? await Task.sleep(for: .seconds(3))
+            credentialsSaved = false
         }
     }
 }

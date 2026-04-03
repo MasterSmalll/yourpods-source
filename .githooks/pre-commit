@@ -1,0 +1,23 @@
+#!/bin/sh
+#
+# Pre-commit hook: runs flutter analyze and tests before allowing a commit.
+# Install: run scripts/setup-hooks.sh (or: git config core.hooksPath .githooks)
+#
+
+set -e
+
+echo "🔍 Running flutter analyze..."
+flutter analyze --no-fatal-infos
+if [ $? -ne 0 ]; then
+    echo "❌ flutter analyze failed. Fix issues before committing."
+    exit 1
+fi
+
+echo "🧪 Running flutter test..."
+flutter test
+if [ $? -ne 0 ]; then
+    echo "❌ Tests failed. Fix failing tests before committing."
+    exit 1
+fi
+
+echo "✅ Pre-commit checks passed."

@@ -13,6 +13,7 @@ struct NowPlayingBar: View {
     @State private var showSpeedPicker = false
     @State private var showSleepTimer = false
     @State private var showChapters = false
+
     @State private var isDraggingSeekBar = false
     @State private var dragProgress: Double = 0
     @State private var chapters: [Chapter] = []
@@ -126,15 +127,17 @@ struct NowPlayingBar: View {
                             .lineLimit(1)
                         // Chapter indicator
                         if let chapter = currentChapter {
-                            Text(chapter.title)
-                                .font(.system(size: 9))
-                                .foregroundStyle(Color.accentColor)
-                                .lineLimit(1)
-                                .onTapGesture {
-                                    if !chapters.isEmpty {
-                                        showChapters = true
-                                    }
+                            Button {
+                                if !chapters.isEmpty {
+                                    showChapters = true
                                 }
+                            } label: {
+                                Text(chapter.title)
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(Color.accentColor)
+                                    .lineLimit(1)
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
                     .onTapGesture {
@@ -214,6 +217,7 @@ struct NowPlayingBar: View {
                 }
                 .presentationDetents([.medium, .large])
             }
+
             .task(id: playerManager.currentEpisodeGuid) {
                 await loadChapters()
             }
@@ -246,7 +250,9 @@ struct NowPlayingBar: View {
             Button {
                 showSleepTimer = true
             } label: {
-                if sleepTimer.isActive {
+                if sleepTimer.stopAfterCurrentEpisode {
+                    Label("Sleep: End of Episode", systemImage: "moon.zzz.fill")
+                } else if sleepTimer.isActive {
                     Label("Sleep: \(sleepTimer.formattedRemaining)", systemImage: "moon.zzz.fill")
                 } else {
                     Label("Sleep Timer", systemImage: "moon.zzz")
@@ -272,6 +278,55 @@ struct NowPlayingBar: View {
                     Label("Episode Details", systemImage: "info.circle")
                 }
             }
+            
+            // Mark as Played
+            Button(role: .destructive) {
+                playerManager.markCurrentEpisodeAsPlayed()
+            } label: {
+                Label("Mark as Played", systemImage: "checkmark.circle")
+            }
+            
+            Divider()
+            
+            // Share sub-menu
+            if let item = playerManager.audioManager.currentItem {
+                Menu {
+                    Button {
+                        SharePresenter.present(items: ShareService.shareEpisode(
+                            title: item.title,
+                            podcastTitle: item.podcastTitle,
+                            link: currentEpisode?.link,
+                            audioUrl: item.audioUrl
+                        ))
+                    } label: {
+                        Label("Share Episode", systemImage: "waveform")
+                    }
+                    
+                    Button {
+                        SharePresenter.present(items: ShareService.sharePodcast(
+                            title: item.podcastTitle,
+                            website: currentEpisode?.podcast?.website,
+                            feedUrl: item.podcastUrl
+                        ))
+                    } label: {
+                        Label("Share Podcast", systemImage: "antenna.radiowaves.left.and.right")
+                    }
+                    
+                    Button {
+                        SharePresenter.present(items: ShareService.sharePosition(
+                            episodeTitle: item.title,
+                            podcastTitle: item.podcastTitle,
+                            position: playerManager.currentPosition,
+                            link: currentEpisode?.link,
+                            audioUrl: item.audioUrl
+                        ))
+                    } label: {
+                        Label("Share Position", systemImage: "clock")
+                    }
+                } label: {
+                    Label("Share…", systemImage: "square.and.arrow.up")
+                }
+            }
         } label: {
             Image(systemName: "ellipsis")
                 .font(.body.bold())
@@ -285,9 +340,12 @@ struct NowPlayingBar: View {
     
     private func loadChapters() async {
         chapters = []
-        guard let episode = currentEpisode,
-              let chaptersUrl = episode.chaptersUrl else { return }
-        chapters = await ChapterService.shared.fetchChapters(url: chaptersUrl)
+        guard let item = playerManager.audioManager.currentItem else { return }
+        chapters = await ChapterService.shared.fetchAllChapters(
+            chaptersUrl: item.chaptersUrl,
+            chaptersJSON: item.chaptersJSON,
+            description: item.episodeDescription
+        )
     }
 }
 

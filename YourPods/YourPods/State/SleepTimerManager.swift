@@ -15,6 +15,10 @@ final class SleepTimerManager {
     /// The originally selected duration in minutes.
     var selectedMinutes: Int = 0
     
+    /// When true, playback will stop at the end of the current episode
+    /// instead of auto-advancing to the next one.
+    var stopAfterCurrentEpisode: Bool = false
+    
     /// Preset durations offered to the user.
     static let presets: [Int] = [5, 15, 30, 60]
     
@@ -47,13 +51,14 @@ final class SleepTimerManager {
         }
     }
     
-    /// Stop and reset the timer.
+    /// Stop and reset the timer (including end-of-episode mode).
     func stop() {
         timer?.invalidate()
         timer = nil
         isActive = false
         remainingSeconds = 0
         selectedMinutes = 0
+        stopAfterCurrentEpisode = false
     }
     
     /// Extend the active timer by additional minutes.
@@ -62,6 +67,19 @@ final class SleepTimerManager {
         remainingSeconds += minutes * 60
         selectedMinutes += minutes
         logger.info("Sleep timer extended by \(minutes) minutes, \(self.remainingSeconds)s remaining")
+    }
+    
+    /// Activate "End of Episode" mode — playback stops when the current episode finishes.
+    func startEndOfEpisode() {
+        stop() // Cancel any running countdown timer
+        stopAfterCurrentEpisode = true
+        logger.info("Sleep timer: end-of-episode mode activated")
+    }
+    
+    /// Cancel "End of Episode" mode.
+    func cancelEndOfEpisode() {
+        stopAfterCurrentEpisode = false
+        logger.info("Sleep timer: end-of-episode mode cancelled")
     }
     
     /// Formatted remaining time string (e.g. "14:32").

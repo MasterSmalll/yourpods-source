@@ -69,7 +69,7 @@ final class WatchService: NSObject, ObservableObject {
     // MARK: - Queue Sync
     
     /// Sync the playback queue to the watch via application context.
-    func syncQueue(autoSyncEnabled: Bool = true, watchSyncCount: Int = 5) {
+    func syncQueue(autoSyncEnabled: Bool = true, watchSyncCount: Int = 5, watchPositionSyncInterval: Int = 30) {
         #if os(iOS)
         #if canImport(WatchConnectivity)
         guard autoSyncEnabled else { return }
@@ -108,6 +108,7 @@ final class WatchService: NSObject, ObservableObject {
         
         currentContext["queue"] = contextQueue
         currentContext["speed"] = audioManager?.playbackRate ?? 1.0
+        currentContext["positionSyncInterval"] = watchPositionSyncInterval
         
         // Update WiFi-only download policy from settings (assuming true for now, 
         // can be wired to SettingsManager later)

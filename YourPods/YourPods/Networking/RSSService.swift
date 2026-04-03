@@ -34,7 +34,10 @@ actor RSSService {
             request.setValue(authHeader, forHTTPHeaderField: "Authorization")
         }
         
-        let (data, response) = try await session.data(for: request)
+        // Use a delegate that handles auth challenges and re-attaches
+        // the Authorization header on redirects (URLSession strips it by default)
+        let delegate = authHeader != nil ? FeedAuthDelegate(authHeader: authHeader!) : nil
+        let (data, response) = try await session.data(for: request, delegate: delegate)
         
         if let http = response as? HTTPURLResponse {
             guard (200...299).contains(http.statusCode) else {
@@ -50,6 +53,68 @@ actor RSSService {
     }
 }
 
+// MARK: - URLSession Delegate for Feed Auth
+
+/// Handles HTTP authentication challenges and re-attaches the Authorization
+/// header on redirects—URLSession strips it by default, which breaks many
+/// password-protected feeds that redirect (e.g., HTTP→HTTPS).
+private final class FeedAuthDelegate: NSObject, URLSessionTaskDelegate {
+    private let authHeader: String
+    
+    init(authHeader: String) {
+        self.authHeader = authHeader
+    }
+    
+    // Re-attach the Authorization header when the server redirects
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        var redirectedRequest = request
+        redirectedRequest.setValue(authHeader, forHTTPHeaderField: "Authorization")
+        completionHandler(redirectedRequest)
+    }
+    
+    // Respond to HTTP Basic/Digest auth challenges with our credentials
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        // Only handle HTTP Basic/Digest — not server trust or other challenge types
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodHTTPBasic ||
+              challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodHTTPDigest else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        
+        // Parse username:password from the Basic auth header
+        let base64 = authHeader.replacingOccurrences(of: "Basic ", with: "")
+        guard let credData = Data(base64Encoded: base64),
+              let credString = String(data: credData, encoding: .utf8) else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        
+        let parts = credString.split(separator: ":", maxSplits: 1)
+        guard parts.count == 2 else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        
+        let credential = URLCredential(
+            user: String(parts[0]),
+            password: String(parts[1]),
+            persistence: .forSession
+        )
+        completionHandler(.useCredential, credential)
+    }
+}
+
 // MARK: - Parsed Models (intermediate, before SwiftData persistence)
 
 struct ParsedPodcast {
@@ -58,6 +123,37 @@ struct ParsedPodcast {
     var logoUrl: String?
     var website: String?
     var author: String?
+    
+    // RSS 2.0
+    var language: String?
+    var copyright: String?
+    
+    // iTunes 1.x
+    var categories: [String] = []
+    var subcategory: String?
+    var explicit: Bool?
+    var showType: String?
+    var isComplete: Bool = false
+    var newFeedUrl: String?
+    
+    // Podcasting 2.0
+    var podcastGuid: String?
+    var fundingUrl: String?
+    var fundingLabel: String?
+    var publisher: String?
+    var supportsValue4Value: Bool = false
+    var hasLiveItem: Bool = false
+    var liveItemStatus: String?
+    var liveItemStart: Date?
+    var liveItemContentLink: String?
+}
+
+/// A single Podlove Simple Chapter parsed from inline `<psc:chapter>` XML.
+struct InlineChapter {
+    let startTime: Double
+    let title: String
+    let href: String?
+    let image: String?
 }
 
 struct ParsedEpisode {
@@ -71,6 +167,17 @@ struct ParsedEpisode {
     var link: String?
     var chaptersUrl: String?
     var transcriptUrl: String?
+    
+    // Podlove Simple Chapters (inline XML)
+    var inlineChapters: [InlineChapter]?
+    
+    // iTunes 1.x / Podcasting 2.0
+    var seasonNumber: Int?
+    var seasonName: String?
+    var episodeNumber: Double?
+    var episodeDisplay: String?
+    var episodeType: String?
+    var explicit: Bool?
 }
 
 // MARK: - XML Parser
@@ -87,10 +194,15 @@ private final class RSSXMLParser: NSObject, XMLParserDelegate {
     private var isInChannel = false
     private var isInItem = false
     private var currentTranscriptType: String?  // track type for preference logic
+    private var isInLiveItem = false  // tracking podcast:liveItem context
+    private var isInCategory = false  // tracking itunes:category nesting
+    private var isInPSCChapters = false  // tracking psc:chapters context
+    private var currentInlineChapters: [InlineChapter] = []
     
     // Namespace URIs
     private let itunesNS = "http://www.itunes.com/dtds/podcast-1.0.dtd"
     private let podcastNS = "https://podcastindex.org/namespace/1.0"
+    private let pscNS = "http://podlove.org/simple-chapters"
     
     init(data: Data) {
         self.data = data
@@ -163,6 +275,88 @@ private final class RSSXMLParser: NSObject, XMLParserDelegate {
                 }
             }
             
+        // MARK: iTunes 1.x tags
+            
+        case "category" where !isInItem && isInChannel && (namespaceURI == itunesNS || qualifiedName == "itunes:category"):
+            // <itunes:category text="Technology">
+            //   <itunes:category text="Podcasting" />
+            // </itunes:category>
+            if let text = attributes["text"] {
+                if !isInCategory {
+                    podcast.categories.append(text)
+                    isInCategory = true
+                } else {
+                    podcast.subcategory = text
+                }
+            }
+            
+        // MARK: Podcasting 2.0 channel-level tags
+            
+        case "funding" where !isInItem && isInChannel && (namespaceURI == podcastNS || qualifiedName == "podcast:funding"):
+            // <podcast:funding url="https://...">Support this show!</podcast:funding>
+            if let url = attributes["url"] {
+                podcast.fundingUrl = url
+            }
+            
+        case "guid" where !isInItem && isInChannel && (namespaceURI == podcastNS || qualifiedName == "podcast:guid"):
+            // <podcast:guid>... text content ...</podcast:guid>
+            break  // text content handled in didEndElement
+            
+        case "value" where isInChannel && (namespaceURI == podcastNS || qualifiedName == "podcast:value"):
+            // <podcast:value type="lightning" ...> — just flag presence
+            podcast.supportsValue4Value = true
+            
+        case "liveItem" where isInChannel && (namespaceURI == podcastNS || qualifiedName == "podcast:liveItem"):
+            // <podcast:liveItem status="live" start="..." end="...">
+            podcast.hasLiveItem = true
+            isInLiveItem = true
+            podcast.liveItemStatus = attributes["status"]
+            if let startStr = attributes["start"] {
+                podcast.liveItemStart = parseISO8601(startStr)
+            }
+            
+        case "contentLink" where isInLiveItem && (namespaceURI == podcastNS || qualifiedName == "podcast:contentLink"):
+            // <podcast:contentLink href="https://...">Watch Live</podcast:contentLink>
+            if let href = attributes["href"] {
+                podcast.liveItemContentLink = href
+            }
+            
+        // MARK: Podcasting 2.0 item-level tags
+            
+        case "season" where isInItem && (namespaceURI == podcastNS || qualifiedName == "podcast:season"):
+            // <podcast:season name="Season Name">1</podcast:season>
+            if let name = attributes["name"] {
+                currentEpisode?.seasonName = name
+            }
+            // Number is text content, handled in didEndElement
+            
+        case "episode" where isInItem && (namespaceURI == podcastNS || qualifiedName == "podcast:episode"):
+            // <podcast:episode display="S1E3">3</podcast:episode>
+            if let display = attributes["display"] {
+                currentEpisode?.episodeDisplay = display
+            }
+            // Number is text content, handled in didEndElement
+            
+        // MARK: Podlove Simple Chapters (inline XML)
+            
+        case "chapters" where isInItem && (namespaceURI == pscNS || qualifiedName == "psc:chapters"):
+            // <psc:chapters> — begin collecting inline chapters
+            isInPSCChapters = true
+            currentInlineChapters = []
+            
+        case "chapter" where isInPSCChapters && (namespaceURI == pscNS || qualifiedName == "psc:chapter"):
+            // <psc:chapter start="00:00:00.000" title="Intro" href="..." image="..." />
+            if let startStr = attributes["start"], let title = attributes["title"] {
+                let startTime = parsePodloveTimestamp(startStr)
+                let chapter = InlineChapter(
+                    startTime: startTime,
+                    title: title,
+                    href: attributes["href"],
+                    image: attributes["image"]
+                )
+                currentInlineChapters.append(chapter)
+            }
+            
         default:
             break
         }
@@ -190,6 +384,31 @@ private final class RSSXMLParser: NSObject, XMLParserDelegate {
                 currentEpisode?.pubDate = parseRSSDate(text)
             case "duration" where namespaceURI == itunesNS || qualifiedName == "itunes:duration":
                 currentEpisode?.durationSeconds = parseDuration(text)
+                
+            // iTunes 1.x item tags
+            case "season" where namespaceURI == itunesNS || qualifiedName == "itunes:season":
+                if let num = Int(text) { currentEpisode?.seasonNumber = num }
+            case "episode" where namespaceURI == itunesNS || qualifiedName == "itunes:episode":
+                if let num = Double(text) { currentEpisode?.episodeNumber = num }
+            case "episodeType" where namespaceURI == itunesNS || qualifiedName == "itunes:episodeType":
+                currentEpisode?.episodeType = text.lowercased()
+            case "explicit" where namespaceURI == itunesNS || qualifiedName == "itunes:explicit":
+                currentEpisode?.explicit = parseExplicit(text)
+                
+            // Podcasting 2.0 item tags (text content)
+            case "season" where namespaceURI == podcastNS || qualifiedName == "podcast:season":
+                if let num = Int(text) { currentEpisode?.seasonNumber = num }
+            case "episode" where namespaceURI == podcastNS || qualifiedName == "podcast:episode":
+                if let num = Double(text) { currentEpisode?.episodeNumber = num }
+                
+            // Podlove Simple Chapters end
+            case "chapters" where namespaceURI == pscNS || qualifiedName == "psc:chapters":
+                if !currentInlineChapters.isEmpty {
+                    currentEpisode?.inlineChapters = currentInlineChapters
+                }
+                isInPSCChapters = false
+                currentInlineChapters = []
+                
             case "item":
                 if var episode = currentEpisode {
                     // Fallback: use audioUrl as guid if none provided
@@ -200,6 +419,8 @@ private final class RSSXMLParser: NSObject, XMLParserDelegate {
                 }
                 currentEpisode = nil
                 currentTranscriptType = nil
+                isInPSCChapters = false
+                currentInlineChapters = []
                 isInItem = false
             default: break
             }
@@ -211,6 +432,31 @@ private final class RSSXMLParser: NSObject, XMLParserDelegate {
             case "link": podcast.website = text
             case "author" where namespaceURI == itunesNS:
                 podcast.author = text
+            case "language": podcast.language = text
+            case "copyright": podcast.copyright = text
+                
+            // iTunes 1.x channel tags
+            case "explicit" where namespaceURI == itunesNS || qualifiedName == "itunes:explicit":
+                podcast.explicit = parseExplicit(text)
+            case "type" where namespaceURI == itunesNS || qualifiedName == "itunes:type":
+                podcast.showType = text.lowercased()
+            case "complete" where namespaceURI == itunesNS || qualifiedName == "itunes:complete":
+                podcast.isComplete = text.lowercased() == "yes"
+            case "new-feed-url" where namespaceURI == itunesNS || qualifiedName == "itunes:new-feed-url":
+                podcast.newFeedUrl = text
+            case "category" where namespaceURI == itunesNS || qualifiedName == "itunes:category":
+                isInCategory = false
+                
+            // Podcasting 2.0 channel tags (text content)
+            case "guid" where namespaceURI == podcastNS || qualifiedName == "podcast:guid":
+                podcast.podcastGuid = text
+            case "funding" where namespaceURI == podcastNS || qualifiedName == "podcast:funding":
+                if !text.isEmpty { podcast.fundingLabel = text }
+            case "publisher" where namespaceURI == podcastNS || qualifiedName == "podcast:publisher":
+                podcast.publisher = text
+            case "liveItem" where namespaceURI == podcastNS || qualifiedName == "podcast:liveItem":
+                isInLiveItem = false
+                
             case "channel":
                 isInChannel = false
             default: break
@@ -222,14 +468,21 @@ private final class RSSXMLParser: NSObject, XMLParserDelegate {
     
     // MARK: - Helpers
     
-    /// Returns a priority value for transcript formats: SRT > VTT > JSON > unknown
+    /// Returns a priority value for transcript formats: SRT > VTT > JSON > plain/html > unknown
     private func transcriptPriority(_ type: String) -> Int {
         switch type {
-        case "application/x-subrip", "application/srt": return 3
-        case "text/vtt": return 2
-        case "application/json": return 1
+        case "application/x-subrip", "application/srt": return 4
+        case "text/vtt": return 3
+        case "application/json": return 2
+        case "text/plain", "text/html": return 1
         default: return 0
         }
+    }
+    
+    /// Parse itunes:explicit values: "yes"/"true"/"explicit" → true, others → false
+    private func parseExplicit(_ text: String) -> Bool {
+        let lower = text.lowercased().trimmingCharacters(in: .whitespaces)
+        return lower == "yes" || lower == "true" || lower == "explicit"
     }
     
     /// Parse RSS date strings (RFC 822 / RFC 2822)
@@ -255,6 +508,20 @@ private final class RSSXMLParser: NSObject, XMLParserDelegate {
         return ISO8601DateFormatter().date(from: string)
     }
     
+    /// Parse ISO 8601 dates with optional fractional seconds.
+    /// Handles dates like "2024-09-26T07:30:00.000-0600" where the default
+    /// ISO8601DateFormatter fails because it doesn't expect milliseconds.
+    private func parseISO8601(_ string: String) -> Date? {
+        // Try with fractional seconds first (most common in podcast feeds)
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: string) {
+            return date
+        }
+        // Fall back to standard ISO 8601
+        return ISO8601DateFormatter().date(from: string)
+    }
+    
     /// Parse iTunes duration strings: "HH:MM:SS", "MM:SS", or plain seconds
     private func parseDuration(_ text: String) -> Int? {
         // Plain seconds
@@ -266,6 +533,22 @@ private final class RSSXMLParser: NSObject, XMLParserDelegate {
         case 3: return parts[0] * 3600 + parts[1] * 60 + parts[2]
         case 2: return parts[0] * 60 + parts[1]
         default: return nil
+        }
+    }
+    
+    /// Parse Podlove NPT (Normal Play Time) timestamps: "HH:MM:SS.mmm", "HH:MM:SS", "MM:SS"
+    private func parsePodloveTimestamp(_ text: String) -> Double {
+        // Split off optional milliseconds
+        let parts = text.split(separator: ".")
+        let timePart = String(parts[0])
+        let millis = parts.count > 1 ? (Double("0." + parts[1]) ?? 0) : 0
+        
+        let segments = timePart.split(separator: ":").compactMap { Int($0) }
+        switch segments.count {
+        case 3: return Double(segments[0] * 3600 + segments[1] * 60 + segments[2]) + millis
+        case 2: return Double(segments[0] * 60 + segments[1]) + millis
+        case 1: return Double(segments[0]) + millis
+        default: return millis
         }
     }
 }

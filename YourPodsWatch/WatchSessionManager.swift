@@ -23,6 +23,7 @@ struct WatchEpisode: Identifiable, Codable {
     let artUri: String? // Cover art URL
     let isAvailableOnPhone: Bool // If true, can be manually downloaded
     let chapters: [WatchChapter]? // Episode chapters (if available)
+    var position: Int // Playback position in seconds (synced from iOS)
 }
 
 struct WatchPodcast: Identifiable, Codable {
@@ -250,6 +251,7 @@ class WatchDownloadManager: NSObject, ObservableObject, URLSessionDownloadDelega
 class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     @Published var episodes: [WatchEpisode] = []
     @Published var playbackSpeed: Double = 1.0
+    @Published var positionSyncInterval: Double = 30.0
     
     // Remote Control State
     @Published var remoteTitle: String = "Not Playing"
@@ -280,6 +282,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         setupSession()
         loadEpisodes()
         loadLibrary()
+        loadPositionSyncInterval()
         setupDownloadHandler()
         setupBackgroundRefreshHandler()
     }
@@ -370,7 +373,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 streamUrl: old.streamUrl,
                 artUri: old.artUri,
                 isAvailableOnPhone: old.isAvailableOnPhone,
-                chapters: old.chapters
+                chapters: old.chapters,
+                position: old.position
             )
             episodes[index] = updated
             saveEpisodes()
@@ -406,7 +410,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     streamUrl: old.streamUrl,
                     artUri: old.artUri,
                     isAvailableOnPhone: old.isAvailableOnPhone,
-                    chapters: old.chapters
+                    chapters: old.chapters,
+                    position: old.position
                 )
                 episodes[index] = updated
                 saveEpisodes()
@@ -436,6 +441,16 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     }
     
+    private func loadPositionSyncInterval() {
+        if let saved = UserDefaults.standard.object(forKey: "positionSyncInterval") as? Double {
+            self.positionSyncInterval = max(saved, 10.0)
+        }
+    }
+    
+    private func savePositionSyncInterval() {
+        UserDefaults.standard.set(positionSyncInterval, forKey: "positionSyncInterval")
+    }
+    
     // MARK: - WCSessionDelegate
     
     func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
@@ -461,6 +476,12 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 self.remoteArtist = info["artist"] as? String ?? ""
                 self.remoteIsPlaying = info["isPlaying"] as? Bool ?? false
                 self.remoteEpisodeId = info["episodeId"] as? String
+            }
+            
+            // Handle position sync interval setting from iPhone
+            if let interval = applicationContext["positionSyncInterval"] as? Int {
+                self.positionSyncInterval = Double(max(interval, 10))
+                self.savePositionSyncInterval()
             }
             
             // Handle WiFi-only setting — push to download manager
@@ -600,6 +621,12 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 if parsedChapters?.isEmpty == true { parsedChapters = nil }
             }
             
+            // Use the server position, but preserve local position if it's ahead
+            // (e.g., watch was actively playing this episode)
+            let serverPosition = item["position"] as? Int ?? 0
+            let localPosition = existing?.position ?? 0
+            let effectivePosition = max(serverPosition, localPosition)
+            
             let newEpisode = WatchEpisode(
                 id: id,
                 title: item["title"] as? String ?? "Unknown",
@@ -610,7 +637,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 streamUrl: item["url"] as? String,
                 artUri: item["artUri"] as? String ?? existing?.artUri,
                 isAvailableOnPhone: item["isAvailableOnPhone"] as? Bool ?? false,
-                chapters: parsedChapters ?? existing?.chapters
+                chapters: parsedChapters ?? existing?.chapters,
+                position: effectivePosition
             )
             newEpisodes.append(newEpisode)
         }
@@ -679,7 +707,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 streamUrl: item["audioUrl"] as? String,
                 artUri: item["imageUrl"] as? String,
                 isAvailableOnPhone: false,
-                chapters: nil
+                chapters: nil,
+                position: 0
             )
             episodes.append(episode)
         }
@@ -763,7 +792,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                             streamUrl: old.streamUrl,
                             artUri: old.artUri,
                             isAvailableOnPhone: old.isAvailableOnPhone,
-                            chapters: old.chapters
+                            chapters: old.chapters,
+                            position: old.position
                         )
                         self.episodes[index] = updated
                         self.saveEpisodes()

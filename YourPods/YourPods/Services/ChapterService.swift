@@ -11,6 +11,50 @@ actor ChapterService {
     private var memoryCache: [String: (chapters: [Chapter], fetchedAt: Date)] = [:]
     private let cacheDuration: TimeInterval = 24 * 3600  // 24 hours
     
+    /// Fetches all chapters, trying URL first, then inline JSON, then description parsing.
+    func fetchAllChapters(chaptersUrl: String?, chaptersJSON: String? = nil, description: String?) async -> [Chapter] {
+        if let url = chaptersUrl, !url.isEmpty {
+            let fetched = await fetchChapters(url: url)
+            if !fetched.isEmpty {
+                return fetched
+            }
+        }
+        
+        // Podlove inline chapters (serialized as JSON from RSS)
+        if let json = chaptersJSON, !json.isEmpty {
+            let inline = Self.parseInlineChaptersJSON(json)
+            if !inline.isEmpty {
+                return inline
+            }
+        }
+        
+        if let text = description, !text.isEmpty {
+            return Self.parseChaptersFromDescription(text)
+        }
+        
+        return []
+    }
+    
+    /// Decode inline Podlove chapters from a persisted JSON string.
+    /// The JSON format matches what `mapParsedEpisodeMetadata` encodes:
+    /// `[{"startTime": 0.0, "title": "Intro", "img": null, "url": null}, ...]`
+    static func parseInlineChaptersJSON(_ json: String) -> [Chapter] {
+        struct InlineChapterData: Codable {
+            let startTime: Double
+            let title: String
+            let img: String?
+            let url: String?
+        }
+        
+        guard let data = json.data(using: .utf8),
+              let items = try? JSONDecoder().decode([InlineChapterData].self, from: data) else {
+            return []
+        }
+        
+        return items.map { Chapter(startTime: $0.startTime, title: $0.title, img: $0.img, url: $0.url) }
+            .sorted { $0.startTime < $1.startTime }
+    }
+    
     /// Fetch chapters from a Podcasting 2.0 chapters JSON URL.
     func fetchChapters(url: String) async -> [Chapter] {
         // 1. Memory cache
@@ -86,7 +130,7 @@ actor ChapterService {
     /// Returns an empty array if fewer than 2 timestamps are found (a single timestamp isn't useful as chapters).
     static func parseChaptersFromDescription(_ description: String) -> [Chapter] {
         // Strip HTML tags — convert block elements to newlines first, then remove remaining tags
-        var cleaned = description
+        let cleaned = description
             .replacingOccurrences(of: "<br[^>]*>", with: "\n", options: .regularExpression)
             .replacingOccurrences(of: "</p>", with: "\n", options: .caseInsensitive)
             .replacingOccurrences(of: "</div>", with: "\n", options: .caseInsensitive)

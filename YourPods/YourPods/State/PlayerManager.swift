@@ -11,6 +11,7 @@ final class PlayerManager {
     let audioManager: AudioManager
     var podcastManager: PodcastManager?
     var settingsManager: SettingsManager?
+    var downloadManager: DownloadManager?
     
     // Current playback state (sourced from AudioManager)
     var currentEpisodeGuid: String? { audioManager.currentItem?.id }
@@ -26,6 +27,9 @@ final class PlayerManager {
     
     /// Unresolved sync conflicts waiting for user resolution (populated when strategy = .ask)
     var pendingConflicts: [SyncConflict] = []
+    
+    /// Unresolved URL rewrite conflicts from server's `update_urls` response.
+    var pendingUrlRewrites: [URLRewriteConflict] = []
     
     // Sync state
     private var lastSyncTime = Date.distantPast
@@ -81,7 +85,9 @@ final class PlayerManager {
     // MARK: - Queue Operations
     
     func addToQueue(_ episode: Episode, playNext: Bool = false) {
-        guard let item = QueueItem.from(episode: episode) else { return }
+        guard var item = QueueItem.from(episode: episode) else { return }
+        // Apply global fallbacks for skip/speed if per-podcast isn't set
+        item = applyEffectiveSettings(item, episode: episode)
         if playNext {
             audioManager.insertNext([item])
         } else {
@@ -91,8 +97,59 @@ final class PlayerManager {
         podcastManager?.markEpisodeAsInteracted(item.podcastUrl, item.id)
     }
     
+    /// Batch add episodes to the queue, preserving their order.
+    /// When `playNext` is true, uses a single `insertNext` call so episodes
+    /// appear at the top in the correct order (not reversed).
+    func addToQueue(_ episodes: [Episode], playNext: Bool = false) {
+        let items = episodes.compactMap { ep -> QueueItem? in
+            guard var item = QueueItem.from(episode: ep) else { return nil }
+            item = applyEffectiveSettings(item, episode: ep)
+            return item
+        }
+        guard !items.isEmpty else { return }
+        if playNext {
+            audioManager.insertNext(items)
+        } else {
+            audioManager.appendToQueue(items)
+        }
+        for item in items {
+            podcastManager?.markEpisodeAsInteracted(item.podcastUrl, item.id)
+        }
+    }
+    
     func removeFromQueue(_ item: QueueItem) {
         audioManager.removeFromQueue(item)
+    }
+    
+    /// Mark the currently-playing episode as played: stop playback, remove from queue, and mark played.
+    /// Advances to the next queued episode if available, otherwise stops.
+    func markCurrentEpisodeAsPlayed() {
+        guard let item = audioManager.currentItem else { return }
+        
+        // Set isPlayed flag on the QueueItem BEFORE stopping, so that if
+        // playEpisode(preserveCurrent:) is called during cleanup, the
+        // played episode won't be re-inserted into the queue.
+        var playedItem = item
+        playedItem.isPlayed = true
+        audioManager.currentItem = playedItem
+        
+        // Mark as played in PodcastManager (SwiftData + gPodder sync)
+        podcastManager?.markEpisodeAsPlayed(
+            podcastUrl: item.podcastUrl,
+            episodeGuid: item.id
+        )
+        
+        // Stop current playback — the episode is done
+        audioManager.stop()
+    }
+    
+    /// Mark an Up Next queued episode as played: remove from queue and mark played.
+    func markQueuedEpisodeAsPlayed(_ item: QueueItem) {
+        audioManager.removeFromQueue(item)
+        podcastManager?.markEpisodeAsPlayed(
+            podcastUrl: item.podcastUrl,
+            episodeGuid: item.id
+        )
     }
     
     func moveQueueItems(from source: IndexSet, to destination: Int) {
@@ -100,12 +157,15 @@ final class PlayerManager {
     }
     
     func playEpisode(_ episode: Episode, position: TimeInterval? = nil) {
-        guard let item = QueueItem.from(episode: episode) else { return }
+        guard var item = QueueItem.from(episode: episode) else { return }
         
         // Mark interacted so episode is removed from Recently Updated
         podcastManager?.markEpisodeAsInteracted(item.podcastUrl, item.id)
         
-        // Apply per-podcast settings
+        // Apply per-podcast settings with global fallbacks
+        item = applyEffectiveSettings(item, episode: episode)
+        
+        // Also set instance-level settings for backward compatibility
         if let podcast = episode.podcast {
             let settings = podcast.effectiveSettings
             audioManager.skipIntroSeconds = settings.skipIntroSeconds ?? settingsManager?.skipIntroSeconds ?? 0
@@ -115,9 +175,23 @@ final class PlayerManager {
             audioManager.setPlaybackRate(Float(speed))
         }
         
+        // Apply headphone/remote command actions from settings
+        audioManager.nextTrackAction = settingsManager?.nextTrackAction ?? .nextEpisode
+        audioManager.previousTrackAction = settingsManager?.previousTrackAction ?? .skipBack
+        
         Task {
             await audioManager.playEpisode(item, initialPosition: position, preserveCurrent: true)
         }
+    }
+    
+    /// Resolve effective skip/speed settings for a QueueItem, applying global fallbacks.
+    private func applyEffectiveSettings(_ item: QueueItem, episode: Episode) -> QueueItem {
+        var result = item
+        let podSettings = episode.podcast?.effectiveSettings
+        result.skipIntroSeconds = podSettings?.skipIntroSeconds ?? settingsManager?.skipIntroSeconds ?? 0
+        result.skipOutroSeconds = podSettings?.skipOutroSeconds ?? settingsManager?.skipOutroSeconds ?? 0
+        result.playbackSpeed = Float(podSettings?.playbackSpeed ?? settingsManager?.playbackSpeed ?? 1.0)
+        return result
     }
     
     // MARK: - Play-Then-Sync
@@ -166,6 +240,9 @@ final class PlayerManager {
     private func handleEpisodeCompleted(_ item: QueueItem) {
         guard let podcastManager else { return }
         
+        // Capture duration BEFORE any transition resets it (playEpisode resets currentDuration to 0)
+        let totalDuration = item.durationSeconds ?? Int(audioManager.currentDuration)
+        
         // Mark as played on server
         let action = EpisodeAction(
             podcast: item.podcastUrl,
@@ -173,9 +250,9 @@ final class PlayerManager {
             guid: item.id,
             action: "play",
             timestamp: Int(Date().timeIntervalSince1970),
-            position: item.durationSeconds ?? Int(currentDuration),
+            position: totalDuration,
             started: 0,
-            total: item.durationSeconds ?? Int(currentDuration),
+            total: totalDuration,
             device: deviceId
         )
         
@@ -183,8 +260,45 @@ final class PlayerManager {
             await podcastManager.sendEpisodeAction(action)
         }
         
-        // Mark as interacted locally
-        podcastManager.markEpisodeAsInteracted(item.podcastUrl, item.id)
+        // Mark as played locally — must happen synchronously before
+        // handleItemChanged triggers sync, so the conflict detector sees
+        // isPlayed = true and skips the episode.
+        // Note: we do NOT call markEpisodeAsPlayed() because that sends
+        // a duplicate EpisodeAction to the server. We only need the local flag.
+        podcastManager.markEpisodePlayedLocally(podcastUrl: item.podcastUrl, episodeGuid: item.id)
+        
+        // Handle download cleanup based on policy
+        handleDownloadCleanup(for: item, podcastManager: podcastManager)
+    }
+    
+    /// Delete or schedule deletion of the episode's download based on the cleanup policy.
+    private func handleDownloadCleanup(for item: QueueItem, podcastManager: PodcastManager) {
+        guard let downloadManager, downloadManager.isDownloaded(item.id) else { return }
+        
+        // Resolve policy: per-podcast override → global default
+        let policy = resolveCleanupPolicy(for: item, podcastManager: podcastManager)
+        
+        switch policy {
+        case .oncePlayed:
+            downloadManager.deleteDownload(guid: item.id)
+            logger.info("Deleted download after play: \(item.id)")
+        case .afterOneWeek, .afterOneMonth:
+            downloadManager.markPlayed(guid: item.id)
+            logger.info("Marked download for deferred cleanup: \(item.id) (\(policy.rawValue))")
+        case .never:
+            break
+        }
+    }
+    
+    /// Resolve the effective download cleanup policy for an episode.
+    func resolveCleanupPolicy(for item: QueueItem, podcastManager: PodcastManager) -> DownloadCleanupPolicy {
+        // Check per-podcast override
+        if let podcast = podcastManager.subscriptions.first(where: { $0.url == item.podcastUrl }),
+           let perPodcast = podcast.effectiveSettings.downloadCleanupPolicy {
+            return perPodcast
+        }
+        // Fall back to global default
+        return settingsManager?.defaultDownloadCleanupPolicy ?? .oncePlayed
     }
     
     // MARK: - Progress Tracking
@@ -193,6 +307,8 @@ final class PlayerManager {
     /// Called frequently (every ~5s) to keep Episode.listenedSeconds and
     /// QueueItem.positionSeconds accurate for UI, queue restore, and watch sync.
     func updateLocalProgress() {
+        // Guard: don't sync stale position data during episode transitions
+        guard !audioManager.isInEpisodeTransition else { return }
         guard let podcastManager, let item = audioManager.currentItem else { return }
         let pos = Int(currentPosition)
         guard pos > 0 else { return }
@@ -219,6 +335,8 @@ final class PlayerManager {
     /// P1: Sync playback position to server at the user-configured interval (10–60s, default 30s).
     /// Also updates local model via updateLocalProgress().
     func syncProgress() {
+        // Guard: don't sync stale position data during episode transitions
+        guard !audioManager.isInEpisodeTransition else { return }
         guard let podcastManager, let item = audioManager.currentItem else { return }
         
         // Always update local state first
@@ -327,6 +445,19 @@ final class PlayerManager {
         if position > Int(currentPosition) + 5 {
             audioManager.seek(to: TimeInterval(position))
         }
+    }
+    
+    // MARK: - Sync Conflict Resolution
+    
+    /// If the resolved conflict's episode is currently playing, seek the player to the chosen position.
+    /// Called by SyncConflictSheet after resolving a conflict via PodcastManager.
+    func resolveConflictIfPlaying(_ conflict: SyncConflict, chosenPosition: Int) {
+        guard currentEpisodeGuid == conflict.episodeGuid else {
+            // Not the currently-playing episode — no seek needed
+            return
+        }
+        logger.info("Seeking to resolved position \(chosenPosition) for currently-playing episode \(conflict.episodeGuid)")
+        seek(to: TimeInterval(chosenPosition))
     }
     
     // MARK: - Formatting Helpers

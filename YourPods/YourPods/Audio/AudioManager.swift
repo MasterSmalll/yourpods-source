@@ -1,6 +1,9 @@
 import Foundation
 import AVFoundation
 import MediaPlayer
+#if canImport(UIKit)
+import UIKit
+#endif
 #if canImport(AppKit)
 import AppKit
 #endif
@@ -54,7 +57,12 @@ final class AudioManager {
     private static let maxRecoveryAttempts = 5
     
     // Auto-advance guard
-    private var isAdvancingQueue = false
+    var isAdvancingQueue = false
+    
+    /// True while a new episode is being loaded (URL resolution → seek → play)
+    /// or while auto-advancing between episodes. External code (e.g., syncProgress)
+    /// should avoid syncing progress during this window to prevent stale data leaks.
+    var isInEpisodeTransition: Bool { isLoadingNewEpisode || isAdvancingQueue }
     
     // Interruption handling (Siri, phone calls, etc.)
     private(set) var wasPlayingBeforeInterruption = false
@@ -62,12 +70,19 @@ final class AudioManager {
     // Guard: prevent persistQueue() during restoreQueue()
     private var isRestoringQueue = false
     
+    // Timer for periodic progress persistence (safety net)
+    private var persistenceTimer: Timer?
+    
     // Prevents false completion when swapping episodes
     private var isLoadingNewEpisode = false
     
     // Skip intro/outro
     var skipIntroSeconds: Int = 0
     var skipOutroSeconds: Int = 0
+    
+    // Remote command actions (AirPods double/triple-tap, lock screen controls)
+    var nextTrackAction: RemoteCommandAction = .nextEpisode
+    var previousTrackAction: RemoteCommandAction = .skipBack
     
     /// When enabled, uses time-domain pitch algorithm for better quality
     /// and applies a minor speed boost during low-volume segments.
@@ -95,6 +110,11 @@ final class AudioManager {
     // Callback for when skip-silence is toggled (used by CarPlay to refresh buttons)
     var onSkipSilenceChanged: ((Bool) -> Void)?
     
+    /// Optional gate for auto-advance. Return false to stop playback
+    /// instead of advancing to the next queued episode.
+    /// Used by the sleep timer's "End of Episode" mode.
+    var shouldAutoAdvanceToNextEpisode: (() -> Bool)?
+    
     // MARK: - Persistence Keys
     
     private static let queueKey = "savedQueue"
@@ -107,6 +127,7 @@ final class AudioManager {
         setupAudioSession()
         setupRemoteCommands()
         setupPlayerObservers()
+        startPersistenceTimer()
     }
     
     deinit {
@@ -114,6 +135,7 @@ final class AudioManager {
             player.removeTimeObserver(timeObserver)
         }
         itemObservers.forEach { $0.invalidate() }
+        persistenceTimer?.invalidate()
     }
     
     // MARK: - Audio Session
@@ -172,12 +194,12 @@ final class AudioManager {
         }
         
         commandCenter.nextTrackCommand.addTarget { [weak self] _ in
-            self?.skipToNext()
+            self?.executeRemoteAction(self?.nextTrackAction ?? .nextEpisode)
             return .success
         }
         
         commandCenter.previousTrackCommand.addTarget { [weak self] _ in
-            self?.skipToPrevious()
+            self?.executeRemoteAction(self?.previousTrackAction ?? .skipBack)
             return .success
         }
         
@@ -203,11 +225,14 @@ final class AudioManager {
             self.currentPosition = time.seconds
             self.updateNowPlayingProgress()
             
-            // Skip outro detection
-            if self.skipOutroSeconds > 0,
+            // Skip outro detection — reads from currentItem's per-episode setting
+            // Guard: don't re-trigger if we're already advancing (prevents draining queue)
+            let outroSeconds = self.currentItem?.skipOutroSeconds ?? self.skipOutroSeconds
+            if outroSeconds > 0,
                self.currentDuration > 0,
-               time.seconds >= self.currentDuration - Double(self.skipOutroSeconds) {
-                self.logger.info("Skip outro triggered at \(time.seconds)s")
+               !self.isAdvancingQueue,
+               time.seconds >= self.currentDuration - Double(outroSeconds) {
+                self.logger.info("Skip outro triggered at \(time.seconds)s (skipOutro=\(outroSeconds)s)")
                 self.skipToNext()
             }
         }
@@ -261,6 +286,17 @@ final class AudioManager {
                 }
             }
             .store(in: &cancellables)
+    }
+    
+    // MARK: - Persistence Timer
+    
+    private func startPersistenceTimer() {
+        persistenceTimer?.invalidate()
+        persistenceTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            self?.persistQueue()
+        }
+        // Fire during scrolling/tracking too — default mode pauses during UI interaction
+        RunLoop.main.add(persistenceTimer!, forMode: .common)
     }
     
     // MARK: - Playback Controls
@@ -363,7 +399,8 @@ final class AudioManager {
         errorMessage = nil
         
         // Preserve the currently playing item by moving it to the top of Up Next
-        if preserveCurrent, let previous = currentItem, previous.id != item.id {
+        // Guard: don't re-queue episodes that have been marked as played
+        if preserveCurrent, let previous = currentItem, previous.id != item.id, !previous.isPlayed {
             logger.info("Preserving current item in queue: \(previous.title)")
             queue.insert(previous, at: 0)
         }
@@ -395,21 +432,31 @@ final class AudioManager {
         // Update state
         currentItem = item
         currentDuration = 0  // Reset — will be set by duration observer for new item
+        currentPosition = 0  // Reset — prevents stale position from leaking to sync
         recoveryAttempts = 0
         
         // Remove from upcoming queue if present (it's now the current item)
         queue.removeAll { $0.id == item.id }
         
-        // Seek to initial position if provided
-        if let pos = initialPosition, pos > 0 {
-            let time = CMTime(seconds: pos, preferredTimescale: 600)
+        // Seek to initial position if provided, else fall back to the queue item's tracked position
+        let targetPosition = initialPosition ?? Double(item.positionSeconds)
+        if targetPosition > 0 {
+            let time = CMTime(seconds: targetPosition, preferredTimescale: 600)
             await player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
+            currentPosition = targetPosition  // Reflect the seek immediately for sync accuracy
         }
         
-        // Skip intro if configured
-        if skipIntroSeconds > 0, (initialPosition ?? 0) < Double(skipIntroSeconds) {
-            let introTime = CMTime(seconds: Double(skipIntroSeconds), preferredTimescale: 600)
+        // Skip intro if configured — prefer item's per-episode setting, fall back to instance var
+        let effectiveSkipIntro = item.skipIntroSeconds > 0 ? item.skipIntroSeconds : skipIntroSeconds
+        if effectiveSkipIntro > 0, targetPosition < Double(effectiveSkipIntro) {
+            let introTime = CMTime(seconds: Double(effectiveSkipIntro), preferredTimescale: 600)
             await player.seek(to: introTime, toleranceBefore: .zero, toleranceAfter: .zero)
+            currentPosition = Double(effectiveSkipIntro)
+        }
+        
+        // Apply per-episode playback speed if set
+        if item.playbackSpeed != 1.0 {
+            playbackRate = item.playbackSpeed
         }
         
         // Begin playback
@@ -450,6 +497,17 @@ final class AudioManager {
         queue.removeAll { $0.id == item.id }
     }
     
+    /// Remove all items from the upcoming queue. Does not affect the currently playing item.
+    func clearQueue() {
+        queue.removeAll()
+    }
+    
+    /// Move an existing queue item to the top (play next).
+    func moveToTop(_ item: QueueItem) {
+        queue.removeAll { $0.id == item.id }
+        queue.insert(item, at: 0)
+    }
+    
     /// Reorder upcoming queue items (indices are relative to the queue array).
     func moveQueueItems(from source: IndexSet, to destination: Int) {
         queue.move(fromOffsets: source, toOffset: destination)
@@ -457,21 +515,67 @@ final class AudioManager {
     
     /// Skip to the next item in the upcoming queue.
     func skipToNext() {
+        // Guard: prevent re-entry from periodic time observer firing
+        // multiple times before async playEpisode completes
+        guard !isAdvancingQueue else {
+            logger.debug("skipToNext: already advancing, ignoring")
+            return
+        }
         guard !queue.isEmpty else {
             logger.info("No next item in queue")
             stop()
             return
         }
         
+        isAdvancingQueue = true
+        
+        // Fire completion callback for the current item (skip-outro, manual skip)
+        // so it gets marked as played and removed from the queue
+        if let completed = currentItem {
+            logger.notice("Skipping from: \(completed.title)")
+            onEpisodeCompleted?(completed)
+        }
+        
         let next = queue.removeFirst()
-        logger.info("Skipping to next: \(next.title)")
-        Task { await playEpisode(next, preserveCurrent: true) }
+        logger.notice("Skipping to next: \(next.title)")
+        Task {
+            // Request background execution time so iOS doesn't suspend us
+            // before the next track starts playing
+            #if os(iOS)
+            let bgTaskId = await UIApplication.shared.beginBackgroundTask(withName: "SkipToNext") {
+                self.logger.warning("Background task expired during skipToNext")
+            }
+            #endif
+            
+            await playEpisode(next, preserveCurrent: false)
+            isAdvancingQueue = false
+            
+            #if os(iOS)
+            await UIApplication.shared.endBackgroundTask(bgTaskId)
+            #endif
+        }
     }
     
-    /// Restart current episode (or no-op if nothing playing).
+    /// Restart current episode from the beginning.
     func skipToPrevious() {
-        if currentPosition > 3 {
-            seek(to: 0)
+        seek(to: 0)
+    }
+    
+    /// Execute a configurable remote command action (AirPods, lock screen).
+    func executeRemoteAction(_ action: RemoteCommandAction) {
+        switch action {
+        case .skipBack:
+            // Uses the user's configured skip-back duration (default 15s)
+            let interval = Double(UserDefaults.standard.object(forKey: "skipBackwardSeconds") as? Int ?? 15)
+            seekRelative(seconds: -interval)
+        case .skipForward:
+            // Uses the user's configured skip-forward duration (default 30s)
+            let interval = Double(UserDefaults.standard.object(forKey: "skipForwardSeconds") as? Int ?? 30)
+            seekRelative(seconds: interval)
+        case .previousEpisode:
+            skipToPrevious()
+        case .nextEpisode:
+            skipToNext()
         }
     }
     
@@ -479,6 +583,24 @@ final class AudioManager {
     
     private func handlePlaybackCompleted() {
         guard !isAdvancingQueue, !isLoadingNewEpisode else { return }
+        
+        // Guard: reject completions where duration hasn't loaded yet.
+        // This catches the KVO race where player.removeAllItems() inside playEpisode
+        // fires a stale currentItem→nil callback AFTER isLoadingNewEpisode and
+        // isAdvancingQueue have been reset. At that point currentDuration is 0 for
+        // the new episode — a genuinely completed episode always has a known duration.
+        guard currentDuration > 0 else {
+            logger.debug("Ignoring completion with duration=0 (KVO race)")
+            return
+        }
+        
+        // Refresh position directly from AVPlayer — the periodic time observer
+        // may be stale in the background, causing a real completion to look
+        // spurious (currentPosition far from currentDuration).
+        let actualPosition = player.currentTime().seconds
+        if actualPosition.isFinite && actualPosition > 0 {
+            currentPosition = actualPosition
+        }
         
         // Guard: spurious "end of track" — if we're nowhere near the actual end,
         // this is a stream failure disguised as completion (common in Simulator).
@@ -510,10 +632,26 @@ final class AudioManager {
             return
         }
         
+        // Check if external code (e.g., sleep timer "End of Episode") vetoes auto-advance
+        if let shouldAdvance = shouldAutoAdvanceToNextEpisode, !shouldAdvance() {
+            logger.info("Auto-advance vetoed by shouldAutoAdvanceToNextEpisode — stopping")
+            isAdvancingQueue = false
+            stop()
+            return
+        }
+        
         let next = queue.removeFirst()
         logger.info("Auto-advancing to: \(next.title)")
         
         Task {
+            // Request background execution time so iOS doesn't suspend us
+            // before the next track starts playing
+            #if os(iOS)
+            let bgTaskId = await UIApplication.shared.beginBackgroundTask(withName: "AutoAdvance") {
+                self.logger.warning("Background task expired during auto-advance")
+            }
+            #endif
+            
             // Re-activate audio session (iOS may have deactivated it)
             #if os(iOS)
             do {
@@ -525,6 +663,10 @@ final class AudioManager {
             
             await playEpisode(next)
             isAdvancingQueue = false
+            
+            #if os(iOS)
+            await UIApplication.shared.endBackgroundTask(bgTaskId)
+            #endif
         }
     }
     
@@ -610,7 +752,7 @@ final class AudioManager {
     // MARK: - Current Item Change
     
     private func handleCurrentItemChanged(_ item: AVPlayerItem?) {
-        if item == nil && isPlaying && !isLoadingNewEpisode {
+        if item == nil && isPlaying && !isLoadingNewEpisode && !isAdvancingQueue {
             // Player ran out of items (not a mid-swap transition)
             handlePlaybackCompleted()
         }
@@ -688,7 +830,8 @@ final class AudioManager {
     private func updateNowPlayingInfo(for item: QueueItem) {
         var info: [String: Any] = [
             MPMediaItemPropertyTitle: item.title,
-            MPMediaItemPropertyArtist: item.podcastTitle,
+            MPMediaItemPropertyArtist: item.podcastAuthor ?? item.podcastTitle,
+            MPMediaItemPropertyAlbumTitle: item.podcastTitle,
             MPNowPlayingInfoPropertyPlaybackRate: playbackRate,
             MPNowPlayingInfoPropertyDefaultPlaybackRate: Float(1.0),
             MPNowPlayingInfoPropertyElapsedPlaybackTime: currentPosition,
@@ -761,7 +904,35 @@ final class AudioManager {
             queue.insert(previous, at: 0)
         }
         currentItem = item
+        currentPosition = 0   // Reset — mirrors playEpisode's reset
+        currentDuration = 0   // Reset — mirrors playEpisode's reset
         queue.removeAll { $0.id == item.id }
+    }
+    
+    /// Test helper: mirrors the position-resume logic from `playEpisode` without AVPlayer.
+    /// Computes `targetPosition = initialPosition ?? item.positionSeconds`, applies it to
+    /// `currentPosition`, and handles skipIntro — exactly matching the production path.
+    /// Returns the computed targetPosition for assertion.
+    @discardableResult
+    func testablePlayEpisodePositionResume(_ item: QueueItem, initialPosition: TimeInterval? = nil) -> TimeInterval {
+        // Mirror playEpisode: reset, then compute target
+        currentItem = item
+        currentPosition = 0
+        currentDuration = 0
+        queue.removeAll { $0.id == item.id }
+        
+        let targetPosition = initialPosition ?? Double(item.positionSeconds)
+        if targetPosition > 0 {
+            currentPosition = targetPosition
+        }
+        
+        // Skip intro if configured
+        let effectiveSkipIntro = item.skipIntroSeconds > 0 ? item.skipIntroSeconds : skipIntroSeconds
+        if effectiveSkipIntro > 0, targetPosition < Double(effectiveSkipIntro) {
+            currentPosition = Double(effectiveSkipIntro)
+        }
+        
+        return targetPosition
     }
     
     /// Test helper: set position and duration without AVPlayer.
@@ -774,6 +945,83 @@ final class AudioManager {
     /// Mirrors the guard logic in `handlePlaybackCompleted()`.
     func testableIsSpuriousCompletion() -> Bool {
         return currentDuration > 30 && (currentDuration - currentPosition) > 10
+    }
+    
+    /// Test helper: set the episode transition state.
+    /// Allows tests to simulate the mid-transition window where sync should be blocked.
+    func testableSetTransitionState(_ inTransition: Bool) {
+        isLoadingNewEpisode = inTransition
+    }
+    
+    /// When set, `testableHandlePlaybackCompleted` uses this value instead of
+    /// the stale `currentPosition` to simulate AVPlayer position refresh.
+    /// Set to nil for the old behavior (stale position).
+    var testableOverridePosition: TimeInterval? = nil
+    
+    /// Test helper: simulate the full handlePlaybackCompleted flow without AVPlayer.
+    /// This mirrors the real auto-advance path: mark current as complete → pop next from queue
+    /// → switch to it (resetting position/duration). Returns the completed item and the new current item.
+    @discardableResult
+    func testableHandlePlaybackCompleted() -> (completed: QueueItem?, next: QueueItem?) {
+        guard !isAdvancingQueue, !isLoadingNewEpisode else { return (nil, nil) }
+        
+        // Duration guard (same as real handlePlaybackCompleted) — an episode
+        // with duration 0 hasn't loaded yet and cannot have genuinely completed.
+        guard currentDuration > 0 else { return (nil, nil) }
+        
+        // Position refresh (mirrors real code: player.currentTime().seconds)
+        // In tests, use testableOverridePosition to simulate fresh AVPlayer position.
+        if let override = testableOverridePosition {
+            currentPosition = override
+            testableOverridePosition = nil  // consume once
+        }
+        
+        // Spurious completion guard (same as real handlePlaybackCompleted)
+        if currentDuration > 30, (currentDuration - currentPosition) > 10 {
+            return (nil, nil)
+        }
+        
+        isAdvancingQueue = true
+        
+        let completed = currentItem
+        if let completed {
+            onEpisodeCompleted?(completed)
+        }
+        
+        guard !queue.isEmpty else {
+            currentItem = nil
+            currentPosition = 0
+            currentDuration = 0
+            isPlaying = false
+            isAdvancingQueue = false
+            return (completed, nil)
+        }
+        
+        // Check if external code vetoes auto-advance (e.g., sleep timer "End of Episode")
+        if let shouldAdvance = shouldAutoAdvanceToNextEpisode, !shouldAdvance() {
+            currentItem = nil
+            currentPosition = 0
+            currentDuration = 0
+            isPlaying = false
+            isAdvancingQueue = false
+            return (completed, nil)
+        }
+        
+        let next = queue.removeFirst()
+        
+        // This mirrors what playEpisode does synchronously:
+        currentItem = next
+        currentPosition = 0   // Critical: reset before any sync can fire
+        currentDuration = 0   // Critical: reset before any sync can fire
+        isLoadingNewEpisode = true
+        
+        // Fire the onItemChanged callback (which triggers syncPlaybackState in production)
+        onItemChanged?(next)
+        
+        isLoadingNewEpisode = false
+        isAdvancingQueue = false
+        
+        return (completed, next)
     }
     
     /// Test helper: simulate an audio session interruption.
@@ -846,33 +1094,122 @@ struct QueueItem: Identifiable, Equatable, Codable {
     var positionSeconds: Int = 0
     let podcastUrl: String
     let pubDate: Date?
+    var podcastAuthor: String? = nil
     var chaptersUrl: String? = nil
     var transcriptUrl: String? = nil
     var episodeDescription: String? = nil
+    var chaptersJSON: String? = nil
+    
+    // Per-episode playback settings (resolved at enqueue time)
+    var skipIntroSeconds: Int = 0
+    var skipOutroSeconds: Int = 0
+    var playbackSpeed: Float = 1.0
+    
+    /// Whether this episode has been marked as played (runtime-only, not serialized).
+    /// Used by AudioManager.playEpisode(preserveCurrent:) to skip re-queuing played episodes.
+    var isPlayed: Bool = false
     
     /// Auth headers for protected feeds (not serialized)
     var authHeaders: [String: String]? = nil
     
     enum CodingKeys: String, CodingKey {
-        case id, title, podcastTitle, audioUrl, artworkUrl, durationSeconds, positionSeconds, podcastUrl, pubDate, chaptersUrl, transcriptUrl, episodeDescription
+        case id, title, podcastTitle, audioUrl, artworkUrl, durationSeconds, positionSeconds, podcastUrl, pubDate, podcastAuthor, chaptersUrl, transcriptUrl, episodeDescription, chaptersJSON
+        case skipIntroSeconds, skipOutroSeconds, playbackSpeed
     }
     
-    /// Convert from SwiftData Episode model
-    static func from(episode: Episode, positionSeconds: Int = 0) -> QueueItem? {
+    /// Custom decoder with backward-compatible defaults for new fields.
+    /// Queues persisted before this change won't have skip/speed keys — they decode as 0/1.0.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        title = try c.decode(String.self, forKey: .title)
+        podcastTitle = try c.decode(String.self, forKey: .podcastTitle)
+        audioUrl = try c.decode(String.self, forKey: .audioUrl)
+        artworkUrl = try c.decodeIfPresent(String.self, forKey: .artworkUrl)
+        durationSeconds = try c.decodeIfPresent(Int.self, forKey: .durationSeconds)
+        positionSeconds = try c.decodeIfPresent(Int.self, forKey: .positionSeconds) ?? 0
+        podcastUrl = try c.decode(String.self, forKey: .podcastUrl)
+        pubDate = try c.decodeIfPresent(Date.self, forKey: .pubDate)
+        podcastAuthor = try c.decodeIfPresent(String.self, forKey: .podcastAuthor)
+        chaptersUrl = try c.decodeIfPresent(String.self, forKey: .chaptersUrl)
+        transcriptUrl = try c.decodeIfPresent(String.self, forKey: .transcriptUrl)
+        episodeDescription = try c.decodeIfPresent(String.self, forKey: .episodeDescription)
+        chaptersJSON = try c.decodeIfPresent(String.self, forKey: .chaptersJSON)
+        skipIntroSeconds = try c.decodeIfPresent(Int.self, forKey: .skipIntroSeconds) ?? 0
+        skipOutroSeconds = try c.decodeIfPresent(Int.self, forKey: .skipOutroSeconds) ?? 0
+        playbackSpeed = try c.decodeIfPresent(Float.self, forKey: .playbackSpeed) ?? 1.0
+    }
+    
+    /// Memberwise init (used in code and tests)
+    init(
+        id: String,
+        title: String,
+        podcastTitle: String,
+        audioUrl: String,
+        artworkUrl: String?,
+        durationSeconds: Int?,
+        positionSeconds: Int = 0,
+        podcastUrl: String,
+        pubDate: Date?,
+        podcastAuthor: String? = nil,
+        chaptersUrl: String? = nil,
+        transcriptUrl: String? = nil,
+        episodeDescription: String? = nil,
+        chaptersJSON: String? = nil,
+        skipIntroSeconds: Int = 0,
+        skipOutroSeconds: Int = 0,
+        playbackSpeed: Float = 1.0
+    ) {
+        self.id = id
+        self.title = title
+        self.podcastTitle = podcastTitle
+        self.audioUrl = audioUrl
+        self.artworkUrl = artworkUrl
+        self.durationSeconds = durationSeconds
+        self.positionSeconds = positionSeconds
+        self.podcastUrl = podcastUrl
+        self.pubDate = pubDate
+        self.podcastAuthor = podcastAuthor
+        self.chaptersUrl = chaptersUrl
+        self.transcriptUrl = transcriptUrl
+        self.episodeDescription = episodeDescription
+        self.chaptersJSON = chaptersJSON
+        self.skipIntroSeconds = skipIntroSeconds
+        self.skipOutroSeconds = skipOutroSeconds
+        self.playbackSpeed = playbackSpeed
+    }
+    
+    /// Convert from SwiftData Episode model, resolving per-podcast settings.
+    static func from(episode: Episode, positionSeconds: Int? = nil) -> QueueItem? {
         guard let audioUrl = episode.audioUrl else { return nil }
-        return QueueItem(
+        
+        // Resolve per-podcast skip/speed settings
+        let settings = episode.podcast?.effectiveSettings
+        
+        var item = QueueItem(
             id: episode.guid,
             title: episode.title,
             podcastTitle: episode.podcastTitle ?? "",
             audioUrl: audioUrl,
             artworkUrl: episode.imageUrl ?? episode.podcast?.logoUrl,
             durationSeconds: episode.durationSeconds,
-            positionSeconds: positionSeconds,
+            positionSeconds: positionSeconds ?? episode.listenedSeconds,
             podcastUrl: episode.podcastUrl ?? "",
             pubDate: episode.pubDate,
+            podcastAuthor: episode.podcast?.author,
             chaptersUrl: episode.chaptersUrl,
             transcriptUrl: episode.transcriptUrl,
-            episodeDescription: episode.episodeDescription
+            episodeDescription: episode.episodeDescription,
+            chaptersJSON: episode.chaptersJSON,
+            skipIntroSeconds: settings?.skipIntroSeconds ?? 0,
+            skipOutroSeconds: settings?.skipOutroSeconds ?? 0,
+            playbackSpeed: Float(settings?.playbackSpeed ?? 1.0)
         )
+        // Attach auth headers for protected feeds
+        if let podcast = episode.podcast, podcast.requiresAuth,
+           let header = KeychainHelper.shared.buildBasicAuthHeader(forPodcastUrl: podcast.url) {
+            item.authHeaders = ["Authorization": header]
+        }
+        return item
     }
 }

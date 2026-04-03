@@ -189,6 +189,9 @@ struct ProfileSelectionView: View {
             return
         }
         let password = KeychainHelper.shared.password(forProfileId: active.id) ?? ""
+        // NOTE: HTTP is intentionally allowed here. Users may self-host gPodder on
+        // local networks without TLS. URLSanitizer defaults bare domains to HTTPS;
+        // the UI warns if HTTP is used. Do NOT make this init throwing for HTTPS enforcement.
         let client = GPodderClient(baseUrl: baseUrl, username: username, password: password)
         podcastManager.setGPodderClient(client, deviceId: active.deviceId)
     }
@@ -222,7 +225,7 @@ struct ProfileSelectionView: View {
         syncStatusMessage = "Syncing subscriptions..."
         Task {
             do {
-                try await podcastManager.syncSubscriptions()
+                _ = try await podcastManager.syncSubscriptions()
                 syncStatusMessage = "Syncing episode progress..."
                 _ = try await podcastManager.syncEpisodeActions()
                 syncStatusMessage = "Sync complete ✓"
@@ -423,11 +426,13 @@ struct EditProfileView: View {
                 Section("Credentials") {
                     TextField("Username", text: $username)
                         #if os(iOS)
+                        .textContentType(.username)
                         .textInputAutocapitalization(.never)
                         #endif
                         .autocorrectionDisabled()
                     
                     SecureField("Password", text: $password)
+                        .textContentType(.password)
                     
                     Toggle("Save Password", isOn: $savePassword)
                 }
@@ -611,11 +616,13 @@ private struct AddProfileSheet: View {
                 Section("Credentials") {
                     TextField("Username", text: $username)
                         #if os(iOS)
+                        .textContentType(.username)
                         .textInputAutocapitalization(.never)
                         #endif
                         .autocorrectionDisabled()
                     
                     SecureField("Password", text: $password)
+                        .textContentType(.password)
                     
                     Toggle("Save Password", isOn: $savePassword)
                 }

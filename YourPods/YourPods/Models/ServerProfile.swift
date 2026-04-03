@@ -43,9 +43,15 @@ struct SyncConflict: Identifiable {
     let episodeGuid: String
     let episodeTitle: String?
     let podcastTitle: String?
+    let podcastUrl: String?
+    let artworkUrl: String?
+    let audioUrl: String?
     let localPosition: Int
     let serverPosition: Int
     let serverTimestamp: Int
+    let totalDuration: Int?
+    /// Number of times this conflict has been detected across sync cycles.
+    let occurrenceCount: Int
 }
 
 /// Sync strategy for resolving conflicts.
@@ -59,5 +65,21 @@ enum SyncStrategy: String, Codable, CaseIterable {
 enum QueueSyncStrategy: String, Codable, CaseIterable {
     case serverWins
     case deviceWins
+    case ask
+}
+
+/// Represents a URL rewrite conflict from the server's `update_urls` response.
+struct URLRewriteConflict: Identifiable {
+    var id: String { oldUrl }
+    let oldUrl: String
+    let newUrl: String
+    let podcastTitle: String?
+    let artworkUrl: String?
+}
+
+/// Strategy for handling server URL rewrites.
+enum URLRewriteStrategy: String, Codable, CaseIterable {
+    case alwaysAccept
+    case alwaysKeepLocal
     case ask
 }

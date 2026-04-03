@@ -17,6 +17,7 @@ actor URLResolver {
     private let logger = Logger(subsystem: "com.yourpods", category: "URLResolver")
     
     private var cache: [String: CacheEntry] = [:]
+    private var activeTasks: [String: Task<String, Never>] = [:]
     private let cacheTTL: TimeInterval
     private let resolveTimeout: TimeInterval = 5.0
     
@@ -45,17 +46,34 @@ actor URLResolver {
             return cached.resolvedUrl
         }
         
-        do {
-            let resolved = try await doResolve(originalUrl, headers: headers)
-            cache[originalUrl] = CacheEntry(resolvedUrl: resolved, resolvedAt: Date())
-            if resolved != originalUrl {
-                logger.info("Resolved \(originalUrl) → \(resolved)")
-            }
-            return resolved
-        } catch {
-            logger.warning("Resolution failed for \(originalUrl) (falling back): \(error.localizedDescription)")
-            return originalUrl
+        // Coalesce duplicate concurrent requests for the same URL
+        if let activeTask = activeTasks[originalUrl] {
+            logger.debug("Coalescing duplicate resolution request for \(originalUrl)")
+            return await activeTask.value
         }
+        
+        let task = Task {
+            do {
+                let resolved = try await doResolve(originalUrl, headers: headers)
+                return resolved
+            } catch {
+                logger.warning("Resolution failed for \(originalUrl) (falling back): \(error.localizedDescription)")
+                return originalUrl
+            }
+        }
+        
+        activeTasks[originalUrl] = task
+        let result = await task.value
+        activeTasks.removeValue(forKey: originalUrl)
+        
+        // Always cache the result to avoid re-requesting even if no redirect occurred
+        cache[originalUrl] = CacheEntry(resolvedUrl: result, resolvedAt: Date())
+        
+        if result != originalUrl {
+            logger.info("Resolved \(originalUrl) → \(result)")
+        }
+        
+        return result
     }
     
     /// Clear the cached entry for a URL, forcing re-resolution next time.
@@ -75,8 +93,9 @@ actor URLResolver {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = resolveTimeout
         
-        // Use a delegate that follows redirects and records the final URL
-        let delegate = RedirectTracker()
+        // Use a delegate that follows redirects, records the final URL,
+        // and protects auth headers from leaking on cross-host redirects.
+        let delegate = RedirectTracker(authHeader: headers?["Authorization"])
         let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
         defer { session.invalidateAndCancel() }
         
@@ -109,8 +128,15 @@ actor URLResolver {
 }
 
 /// Tracks redirects through the URLSession delegate to capture the final URL.
+/// Strips Authorization headers on cross-host or HTTPS→HTTP downgrade redirects
+/// to prevent credential leakage through tracking/CDN redirect chains.
 private final class RedirectTracker: NSObject, URLSessionTaskDelegate {
     var finalURL: URL?
+    private let authHeader: String?
+    
+    init(authHeader: String? = nil) {
+        self.authHeader = authHeader
+    }
     
     func urlSession(
         _ session: URLSession,
@@ -120,6 +146,25 @@ private final class RedirectTracker: NSObject, URLSessionTaskDelegate {
         completionHandler: @escaping (URLRequest?) -> Void
     ) {
         finalURL = request.url
-        completionHandler(request)  // Follow the redirect
+        
+        // Re-attach Authorization header only if host matches and no downgrade occurs.
+        // This prevents credentials from leaking to third-party tracking/CDN hosts.
+        guard let authHeader,
+              let originalUrl = task.originalRequest?.url,
+              let newUrl = request.url,
+              originalUrl.host == newUrl.host else {
+            completionHandler(request)
+            return
+        }
+        
+        // Prevent credential leakage on HTTPS → HTTP downgrade
+        if originalUrl.scheme == "https" && newUrl.scheme == "http" {
+            completionHandler(request)
+            return
+        }
+        
+        var redirectedRequest = request
+        redirectedRequest.setValue(authHeader, forHTTPHeaderField: "Authorization")
+        completionHandler(redirectedRequest)
     }
 }

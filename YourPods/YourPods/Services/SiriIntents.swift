@@ -14,6 +14,9 @@ extension Notification.Name {
     static let siriPlayLatest = Notification.Name("com.yourpods.siri.playLatest")
     static let siriSetSpeed = Notification.Name("com.yourpods.siri.setSpeed")
     static let siriPlayPodcast = Notification.Name("com.yourpods.siri.playPodcast")
+    static let siriSetSleepTimer = Notification.Name("com.yourpods.siri.setSleepTimer")
+    static let siriCancelSleepTimer = Notification.Name("com.yourpods.siri.cancelSleepTimer")
+    static let siriWhatsPlaying = Notification.Name("com.yourpods.siri.whatsPlaying")
 }
 
 // MARK: - Play / Resume Intent
@@ -189,6 +192,62 @@ struct SetPlaybackSpeedIntent: AppIntent {
     }
 }
 
+// MARK: - Set Sleep Timer Intent
+
+@available(iOS 16.0, *)
+struct SetSleepTimerIntent: AppIntent {
+    static var title: LocalizedStringResource = "Set Sleep Timer"
+    static var description = IntentDescription("Set a sleep timer to pause playback after a duration.")
+    static var openAppWhenRun: Bool = false
+    
+    @Parameter(title: "Minutes", description: "Number of minutes until playback pauses (e.g. 15, 30, 60)")
+    var minutes: Int
+    
+    @MainActor
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        let clampedMinutes = min(max(minutes, 1), 480)
+        NotificationCenter.default.post(
+            name: .siriSetSleepTimer,
+            object: nil,
+            userInfo: ["minutes": clampedMinutes]
+        )
+        return .result(dialog: "Sleep timer set for \(clampedMinutes) minutes")
+    }
+}
+
+// MARK: - Cancel Sleep Timer Intent
+
+@available(iOS 16.0, *)
+struct CancelSleepTimerIntent: AppIntent {
+    static var title: LocalizedStringResource = "Cancel Sleep Timer"
+    static var description = IntentDescription("Cancel the active sleep timer.")
+    static var openAppWhenRun: Bool = false
+    
+    @MainActor
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        NotificationCenter.default.post(name: .siriCancelSleepTimer, object: nil)
+        return .result(dialog: "Sleep timer cancelled")
+    }
+}
+
+// MARK: - What's Playing Intent
+
+@available(iOS 16.0, *)
+struct WhatsPlayingIntent: AppIntent {
+    static var title: LocalizedStringResource = "What's Playing"
+    static var description = IntentDescription("Find out what episode is currently playing.")
+    static var openAppWhenRun: Bool = false
+    
+    @MainActor
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        // Post notification and return a generic response.
+        // The actual title comes from MPNowPlayingInfoCenter which Siri can read,
+        // but we provide a dialog fallback.
+        NotificationCenter.default.post(name: .siriWhatsPlaying, object: nil)
+        return .result(dialog: "Check YourPods for the currently playing episode.")
+    }
+}
+
 // MARK: - App Shortcuts Provider
 
 @available(iOS 16.0, *)
@@ -201,19 +260,12 @@ struct YourPodsShortcuts: AppShortcutsProvider {
                 "Resume playback in \(.applicationName)",
                 "Play \(.applicationName)",
                 "Start \(.applicationName)",
-            ],
-            shortTitle: "Play Queue",
-            systemImageName: "play.circle.fill"
-        )
-        AppShortcut(
-            intent: ResumePlaybackIntent(),
-            phrases: [
                 "Resume \(.applicationName)",
                 "Continue playing in \(.applicationName)",
                 "Unpause \(.applicationName)",
             ],
-            shortTitle: "Resume",
-            systemImageName: "play.fill"
+            shortTitle: "Play Queue",
+            systemImageName: "play.circle.fill"
         )
         AppShortcut(
             intent: PausePodcastIntent(),
@@ -253,15 +305,6 @@ struct YourPodsShortcuts: AppShortcutsProvider {
             systemImageName: "goforward.30"
         )
         AppShortcut(
-            intent: SkipBackwardIntent(),
-            phrases: [
-                "Skip backward in \(.applicationName)",
-                "Rewind in \(.applicationName)",
-            ],
-            shortTitle: "Skip Backward",
-            systemImageName: "gobackward.15"
-        )
-        AppShortcut(
             intent: SkipToNextIntent(),
             phrases: [
                 "Skip to next in \(.applicationName)",
@@ -269,6 +312,42 @@ struct YourPodsShortcuts: AppShortcutsProvider {
             ],
             shortTitle: "Next Episode",
             systemImageName: "forward.end.fill"
+        )
+        AppShortcut(
+            intent: SetPlaybackSpeedIntent(),
+            phrases: [
+                "Set playback speed in \(.applicationName)",
+                "Change speed in \(.applicationName)",
+            ],
+            shortTitle: "Set Speed",
+            systemImageName: "gauge.with.dots.needle.67percent"
+        )
+        AppShortcut(
+            intent: SetSleepTimerIntent(),
+            phrases: [
+                "Set sleep timer in \(.applicationName)",
+                "Sleep timer for \(.applicationName)",
+            ],
+            shortTitle: "Sleep Timer",
+            systemImageName: "moon.zzz.fill"
+        )
+        AppShortcut(
+            intent: CancelSleepTimerIntent(),
+            phrases: [
+                "Cancel sleep timer in \(.applicationName)",
+                "Turn off sleep timer in \(.applicationName)",
+            ],
+            shortTitle: "Cancel Timer",
+            systemImageName: "moon.fill"
+        )
+        AppShortcut(
+            intent: WhatsPlayingIntent(),
+            phrases: [
+                "What's playing in \(.applicationName)",
+                "What am I listening to in \(.applicationName)",
+            ],
+            shortTitle: "What's Playing",
+            systemImageName: "info.circle.fill"
         )
     }
 }

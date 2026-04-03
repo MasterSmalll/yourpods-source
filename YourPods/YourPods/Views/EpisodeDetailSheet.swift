@@ -14,13 +14,18 @@ struct EpisodeDetailSheet: View {
     @State private var dragValue: Double = 0
     @State private var showChapters = false
     @State private var showTranscript = false
+    @State private var showShareOptions = false
     @State private var chapters: [Chapter]
     @State private var transcript: Transcript?
     
     init(episode: Episode) {
         self.episode = episode
-        // Pre-populate chapters synchronously from description if no chapters URL
-        if let desc = episode.episodeDescription, (episode.chaptersUrl ?? "").isEmpty {
+        // Pre-populate chapters synchronously: Podlove inline JSON → description parsing
+        // (URL-based chapters are fetched async in .task)
+        if let json = episode.chaptersJSON, !json.isEmpty, (episode.chaptersUrl ?? "").isEmpty {
+            let inline = ChapterService.parseInlineChaptersJSON(json)
+            _chapters = State(initialValue: inline)
+        } else if let desc = episode.episodeDescription, (episode.chaptersUrl ?? "").isEmpty {
             _chapters = State(initialValue: ChapterService.parseChaptersFromDescription(desc))
         } else {
             _chapters = State(initialValue: [])
@@ -65,11 +70,21 @@ struct EpisodeDetailSheet: View {
                 .padding()
             }
             .task {
-                // Fetch URL-based chapters (overrides description-parsed ones if available)
+                // Yield to ensure view update completes before mutating state
+                try? await Task.sleep(for: .milliseconds(50))
+                
+                // Fetch chapters: URL → inline JSON → description
                 if let chaptersUrl = episode.chaptersUrl, !chaptersUrl.isEmpty {
                     let fetched = await ChapterService.shared.fetchChapters(url: chaptersUrl)
                     if !fetched.isEmpty {
                         chapters = fetched
+                    }
+                }
+                // If URL-fetch didn't produce chapters, try inline JSON
+                if chapters.isEmpty, let json = episode.chaptersJSON, !json.isEmpty {
+                    let inline = ChapterService.parseInlineChaptersJSON(json)
+                    if !inline.isEmpty {
+                        chapters = inline
                     }
                 }
                 if let transcriptUrl = episode.transcriptUrl, !transcriptUrl.isEmpty {
@@ -107,6 +122,7 @@ struct EpisodeDetailSheet: View {
                     }
                 }
             }
+
         }
     }
     
@@ -211,7 +227,7 @@ struct EpisodeDetailSheet: View {
         return AsyncImage(url: URL(string: imageUrl ?? "")) { phase in
             switch phase {
             case .success(let image):
-                image.resizable().aspectRatio(contentMode: .fit)
+                image.resizable().aspectRatio(contentMode: .fill)
             default:
                 RoundedRectangle(cornerRadius: 16)
                     .fill(.ultraThinMaterial)
@@ -239,6 +255,56 @@ struct EpisodeDetailSheet: View {
                 Text(podcastTitle)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+            }
+            
+            // Season / Episode / Type badges
+            HStack(spacing: 8) {
+                if let seasonNum = episode.seasonNumber {
+                    let epNum = episode.episodeNumber.map { Int($0) }
+                    let label = episode.episodeDisplay
+                        ?? (epNum != nil ? "S\(seasonNum)E\(epNum!)" : "Season \(seasonNum)")
+                    Text(label)
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Color.indigo.opacity(0.12))
+                        .foregroundStyle(.indigo)
+                        .clipShape(Capsule())
+                } else if let epNum = episode.episodeNumber {
+                    Text(episode.episodeDisplay ?? "Episode \(Int(epNum))")
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Color.indigo.opacity(0.12))
+                        .foregroundStyle(.indigo)
+                        .clipShape(Capsule())
+                }
+                
+                if let seasonName = episode.seasonName {
+                    Text(seasonName)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                
+                if let type = episode.episodeType, type != "full" {
+                    Text(type.capitalized)
+                        .font(.caption.bold())
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(type == "trailer" ? Color.orange.opacity(0.15) : Color.purple.opacity(0.15))
+                        .foregroundStyle(type == "trailer" ? .orange : .purple)
+                        .clipShape(Capsule())
+                }
+                
+                if episode.explicit == true {
+                    Text("Explicit")
+                        .font(.caption.bold())
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Color.red.opacity(0.12))
+                        .foregroundStyle(.red)
+                        .clipShape(Capsule())
+                }
             }
             
             HStack(spacing: 16) {
@@ -321,16 +387,74 @@ struct EpisodeDetailSheet: View {
                         downloadManager.deleteDownload(guid: episode.guid)
                     } else if let audioUrl = episode.audioUrl {
                         Task {
-                            try? await downloadManager.downloadEpisode(guid: episode.guid, audioUrl: audioUrl)
+                            let authHeaders: [String: String]? = episode.podcast?.requiresAuth == true
+                                ? KeychainHelper.shared.buildBasicAuthHeader(forPodcastUrl: episode.podcast!.url)
+                                    .map { ["Authorization": $0] }
+                                : nil
+                            downloadManager.downloadEpisode(guid: episode.guid, audioUrl: audioUrl, authHeaders: authHeaders)
                         }
                     }
                 }
                 
                 ActionButton(title: "Played", icon: "checkmark") {
-                    if let podcastUrl = episode.podcastUrl {
-                        podcastManager.markEpisodeAsPlayed(podcastUrl: podcastUrl, episodeGuid: episode.guid)
+                    let resolvedUrl = EpisodeDetailSheetHelper.resolvePodcastUrl(
+                        episodePodcastUrl: episode.podcastUrl,
+                        currentItemPodcastUrl: playerManager.audioManager.currentItem?.podcastUrl,
+                        episodeGuid: episode.guid,
+                        subscriptions: podcastManager.subscriptions
+                    )
+                    if let resolvedUrl {
+                        podcastManager.markEpisodeAsPlayed(podcastUrl: resolvedUrl, episodeGuid: episode.guid)
                     }
                     dismiss()
+                }
+                
+                Menu {
+                    Button {
+                        SharePresenter.present(items: ShareService.shareEpisode(
+                            title: episode.title,
+                            podcastTitle: episode.podcastTitle ?? "",
+                            link: episode.link,
+                            audioUrl: episode.audioUrl
+                        ))
+                    } label: {
+                        Label("Share Episode", systemImage: "waveform")
+                    }
+                    
+                    Button {
+                        SharePresenter.present(items: ShareService.sharePodcast(
+                            title: episode.podcastTitle ?? "",
+                            website: episode.podcast?.website,
+                            feedUrl: episode.podcastUrl ?? ""
+                        ))
+                    } label: {
+                        Label("Share Podcast", systemImage: "antenna.radiowaves.left.and.right")
+                    }
+                    
+                    if isCurrentlyPlaying {
+                        Button {
+                            SharePresenter.present(items: ShareService.sharePosition(
+                                episodeTitle: episode.title,
+                                podcastTitle: episode.podcastTitle ?? "",
+                                position: playerManager.currentPosition,
+                                link: episode.link,
+                                audioUrl: episode.audioUrl
+                            ))
+                        } label: {
+                            Label("Share Position", systemImage: "clock")
+                        }
+                    }
+                } label: {
+                    VStack(spacing: 4) {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.title3)
+                        Text("Share")
+                            .font(.caption2)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(Color(.systemGray5))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
                 }
             }
         }

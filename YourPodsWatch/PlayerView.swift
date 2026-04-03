@@ -334,6 +334,13 @@ struct PlayerView: View {
                     self.hasSetupAudio = true
                     self.startTimer()
                     
+                    // Resume from synced position (from iOS)
+                    if self.episode.position > 0 {
+                        let targetTime = CMTime(seconds: Double(self.episode.position), preferredTimescale: 1)
+                        self.player?.seek(to: targetTime)
+                        self.progress = Double(self.episode.position)
+                    }
+                    
                     if self.playbackSource == .streaming {
                         self.statusText = "Streaming..."
                     } else {
@@ -376,10 +383,15 @@ struct PlayerView: View {
             if let p = player {
                 progress = CMTimeGetSeconds(p.currentTime())
                 
-                // Periodic Progress Sync to Phone (every 10 seconds)
-                if Date().timeIntervalSince(lastSyncTime) >= 10.0 {
+                // Periodic Progress Sync to Phone (using configurable interval)
+                if Date().timeIntervalSince(lastSyncTime) >= sessionManager.positionSyncInterval {
                     sessionManager.sendProgress(episodeId: episode.id, position: Int(progress))
                     lastSyncTime = Date()
+                    
+                    // Update local WatchEpisode position for persistence
+                    if let index = sessionManager.episodes.firstIndex(where: { $0.id == episode.id }) {
+                        sessionManager.episodes[index].position = Int(progress)
+                    }
                 }
 
                 if let error = p.currentItem?.error {

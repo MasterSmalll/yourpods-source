@@ -1,8 +1,10 @@
 import SwiftUI
 import SwiftData
+import os
 
 @main
 struct YourPodsApp: App {
+    private static let logger = Logger(subsystem: "com.yourpods", category: "app")
     let modelContainer: ModelContainer
     @State private var audioManager: AudioManager
     @State private var settingsManager: SettingsManager
@@ -20,6 +22,10 @@ struct YourPodsApp: App {
     /// Key for storing the last-launched build number.
     private static let lastBuildKey = "lastLaunchedBuildNumber"
     
+    /// Sentinel key: set before a heavy save, cleared after.
+    /// If still set on next launch, the previous save crashed the process.
+    private static let saveSentinelKey = "saveSentinelInProgress"
+    
     /// The current build number from the bundle.
     private static var currentBuild: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0"
@@ -30,6 +36,16 @@ struct YourPodsApp: App {
         let lastBuild = UserDefaults.standard.string(forKey: Self.lastBuildKey) ?? ""
         if Self.currentBuild != lastBuild {
             UserDefaults.standard.set(Self.currentBuild, forKey: Self.lastBuildKey)
+        }
+        
+        // ── Crash sentinel check ──
+        // If the sentinel is still set from a previous launch, it means
+        // modelContext.save() crashed the process (signal crash, not a Swift error).
+        // Nuke the store so we can start clean.
+        if UserDefaults.standard.bool(forKey: Self.saveSentinelKey) {
+            Self.logger.warning("Save sentinel detected — previous launch crashed during save. Deleting store...")
+            UserDefaults.standard.set(false, forKey: Self.saveSentinelKey)
+            Self.deleteStoreFiles()
         }
         
         let schema = Schema([Podcast.self, Episode.self])
@@ -47,31 +63,48 @@ struct YourPodsApp: App {
             }
             
             // Delete stale SwiftData store
-            if let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
-                let storeURL = appSupport.appendingPathComponent("default.store")
-                for ext in ["", "-wal", "-shm"] {
-                    try? FileManager.default.removeItem(at: URL(fileURLWithPath: storeURL.path + ext))
-                }
-            }
+            Self.deleteStoreFiles()
         }
         
+        // ── Create ModelContainer with corruption recovery ──
+        // Step 1: Create the container (catches schema migration failures)
+        var container: ModelContainer
         do {
-            modelContainer = try ModelContainer(for: schema, configurations: [config])
+            container = try ModelContainer(for: schema, configurations: [config])
         } catch {
-            // Last-resort recovery — delete and retry
-            let urls = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            if let appSupport = urls.first {
-                let storeURL = appSupport.appendingPathComponent("default.store")
-                for ext in ["", "-wal", "-shm"] {
-                    try? FileManager.default.removeItem(at: URL(fileURLWithPath: storeURL.path + ext))
-                }
-            }
+            Self.deleteStoreFiles()
             do {
-                modelContainer = try ModelContainer(for: schema, configurations: [config])
+                container = try ModelContainer(for: schema, configurations: [config])
             } catch {
                 fatalError("Failed to create ModelContainer after reset: \(error)")
             }
         }
+        
+        // Step 2: Write health probe — exercises the same SQLite page-write paths
+        // that crash with pread() on a corrupted store. A read-only fetch won't
+        // catch corruption in writable pages.
+        //
+        // The probe sets a UserDefaults sentinel BEFORE calling save().
+        // If pread() kills the process with a signal crash (which do/catch
+        // cannot intercept), the sentinel will still be set on next launch,
+        // triggering automatic store deletion (see sentinel check above).
+        let storeCorrupted = StoreHealthProbe.run(
+            context: container.mainContext,
+            sentinelKey: Self.saveSentinelKey
+        )
+        
+        if storeCorrupted {
+            Self.logger.warning("SQLite store corruption detected — auto-recovering...")
+            Self.deleteStoreFiles()
+            do {
+                container = try ModelContainer(for: schema, configurations: [config])
+            } catch {
+                fatalError("Failed to create ModelContainer after corruption recovery: \(error)")
+            }
+            Self.logger.info("Store rebuilt. Data will re-sync from server.")
+        }
+        
+        modelContainer = container
         
         let audio = AudioManager()
         let settings = SettingsManager()
@@ -83,6 +116,11 @@ struct YourPodsApp: App {
         player.settingsManager = settings
         
         let download = DownloadManager()
+        player.downloadManager = download
+        
+        // Apply headphone/remote command action settings at startup
+        audio.nextTrackAction = settings.nextTrackAction
+        audio.previousTrackAction = settings.previousTrackAction
         
         _audioManager = State(initialValue: audio)
         _settingsManager = State(initialValue: settings)
@@ -98,8 +136,19 @@ struct YourPodsApp: App {
         }
         _sleepTimerManager = State(initialValue: sleepTimer)
         
+        // Wire "End of Episode" mode: when active, stop after current episode
+        audio.shouldAutoAdvanceToNextEpisode = { [weak sleepTimer] in
+            guard let sleepTimer else { return true }
+            if sleepTimer.stopAfterCurrentEpisode {
+                sleepTimer.cancelEndOfEpisode()
+                return false
+            }
+            return true
+        }
+        
         // ── Migrate passwords from UserDefaults to Keychain (one-time) ──
         KeychainHelper.migrateFromUserDefaultsIfNeeded()
+        KeychainHelper.migratePodcastIndexCredsFromUserDefaultsIfNeeded()
         
         // ── Wire GPodder client from saved active profile ──
         if let activeId = settings.activeProfileId,
@@ -117,7 +166,13 @@ struct YourPodsApp: App {
         
         // Restore persisted episode action map and apply to episodes
         podcast.loadActionMap()
+        podcast.loadConflictCounts()
+        
+        // Set sentinel before the heavy save — if this crashes the process,
+        // the sentinel will be detected on next launch to auto-recover.
+        UserDefaults.standard.set(true, forKey: Self.saveSentinelKey)
         podcast.applyEpisodeActions(strategy: settings.syncConflictStrategy)
+        UserDefaults.standard.set(false, forKey: Self.saveSentinelKey)
         
         // ── P0: Wire service singletons ──
         
@@ -132,6 +187,7 @@ struct YourPodsApp: App {
         let bgRefresh = BackgroundRefreshService.shared
         bgRefresh.podcastManager = podcast
         bgRefresh.audioManager = audio
+        bgRefresh.settingsManager = settings
         bgRefresh.registerTasks()
         bgRefresh.scheduleRefresh()
         
@@ -247,6 +303,18 @@ struct YourPodsApp: App {
                 }
             }
         }
+        nc.addObserver(forName: .siriSetSleepTimer, object: nil, queue: .main) { notification in
+            if let minutes = notification.userInfo?["minutes"] as? Int {
+                sleepTimer.start(minutes: minutes)
+            }
+        }
+        nc.addObserver(forName: .siriCancelSleepTimer, object: nil, queue: .main) { _ in
+            sleepTimer.stop()
+        }
+        nc.addObserver(forName: .siriWhatsPlaying, object: nil, queue: .main) { _ in
+            // No-op: MPNowPlayingInfoCenter already exposes the current track to Siri.
+            // This observer exists for future enhancements (e.g., logging queries).
+        }
         
         // ── P2: Chain Live Activity + Watch sync onto existing callbacks ──
         // PlayerManager.init() already sets these; we wrap them instead of replacing.
@@ -259,7 +327,8 @@ struct YourPodsApp: App {
             WatchService.shared.updatePlaybackState()
             WatchService.shared.syncQueue(
                 autoSyncEnabled: settings.watchSyncEnabled,
-                watchSyncCount: settings.watchSyncPodcastLimit
+                watchSyncCount: settings.watchSyncPodcastLimit,
+                watchPositionSyncInterval: settings.watchPositionSyncInterval
             )
             
             // Live Activity disabled — MPNowPlayingInfoCenter already provides
@@ -290,7 +359,8 @@ struct YourPodsApp: App {
             // Sync watch after episode completes
             WatchService.shared.syncQueue(
                 autoSyncEnabled: settings.watchSyncEnabled,
-                watchSyncCount: settings.watchSyncPodcastLimit
+                watchSyncCount: settings.watchSyncPodcastLimit,
+                watchPositionSyncInterval: settings.watchPositionSyncInterval
             )
         }
         
@@ -299,15 +369,17 @@ struct YourPodsApp: App {
             guard let settings else { return }
             WatchService.shared.syncQueue(
                 autoSyncEnabled: settings.watchSyncEnabled,
-                watchSyncCount: settings.watchSyncPodcastLimit
+                watchSyncCount: settings.watchSyncPodcastLimit,
+                watchPositionSyncInterval: settings.watchPositionSyncInterval
             )
         }
         
         // ── Progress tracking timer ──
-        // Calls syncProgress() every 1s; internal throttle handles cadence:
-        //   - Local model writes every 5s
-        //   - Server sync at user-configured interval (10–60s, default 30s)
-        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak player] _ in
+        // Matches the local-save cadence (5s). Server sync uses its own
+        // throttle (user-configured, default 30s). UI progress bar and
+        // lock screen / CarPlay now-playing are driven by the separate
+        // 0.5s AVPlayer periodic time observer — not this timer.
+        Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak player] _ in
             Task { @MainActor in
                 player?.syncProgress()
             }
@@ -341,12 +413,43 @@ struct YourPodsApp: App {
                     UserDefaults.standard.set(Self.currentBuild, forKey: Self.lastBuildKey)
                     viewTreeId = UUID()
                 }
+                
+                // Run time-based download cleanup (after 1 week / 1 month policies)
+                let globalPolicy = settingsManager.defaultDownloadCleanupPolicy
+                var podcastPolicies: [String: DownloadCleanupPolicy] = [:]
+                for podcast in podcastManager.subscriptions {
+                    if let policy = podcast.effectiveSettings.downloadCleanupPolicy {
+                        for episode in podcast.episodes {
+                            podcastPolicies[episode.guid] = policy
+                        }
+                    }
+                }
+                downloadManager.cleanupExpiredDownloads(
+                    globalPolicy: globalPolicy,
+                    podcastPolicies: podcastPolicies
+                )
             }
             if newPhase == .background {
                 // Persist position immediately so app kills don't lose progress
                 playerManager.forceSyncProgress()
                 audioManager.persistQueueToDisk()
             }
+        }
+    }
+    
+    // MARK: - Store Recovery
+    
+    /// Delete the SwiftData SQLite store and its WAL/SHM files.
+    /// Used for corruption recovery and Flutter migration cleanup.
+    private static func deleteStoreFiles() {
+        guard let appSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask
+        ).first else { return }
+        let storeURL = appSupport.appendingPathComponent("default.store")
+        for ext in ["", "-wal", "-shm"] {
+            try? FileManager.default.removeItem(
+                at: URL(fileURLWithPath: storeURL.path + ext)
+            )
         }
     }
 }

@@ -20,6 +20,10 @@ final class PodcastManager {
     /// Map of episodeGuid → latest EpisodeAction (for sync lookups)
     private(set) var actionMap: [String: EpisodeAction] = [:]
     
+    /// Tracks how many times each episode's sync conflict has been detected.
+    /// Persisted to UserDefaults so counts survive app restarts.
+    private var conflictCounts: [String: Int] = [:]
+    
     /// Interacted episode GUIDs per podcast URL (marks episodes as "seen")
     private var interactedKeys: [String: Set<String>] = [:]
     
@@ -119,12 +123,20 @@ final class PodcastManager {
         loadSubscriptions()
     }
     
-    func addSubscription(url: String) async throws {
+    func addSubscription(url: String, username: String? = nil, password: String? = nil) async throws {
         // Check if already subscribed
         guard !subscriptions.contains(where: { $0.url == url }) else { return }
         
+        // Build auth header if credentials provided
+        var authHeader: String? = nil
+        if let username, let password {
+            let combined = "\(username):\(password)"
+            let encoded = Data(combined.utf8).base64EncodedString()
+            authHeader = "Basic \(encoded)"
+        }
+        
         // Fetch the feed to get metadata
-        let (parsed, episodes) = try await rssService.fetchFeed(url: url)
+        let (parsed, episodes) = try await rssService.fetchFeed(url: url, authHeader: authHeader)
         
         let podcast = Podcast(
             url: url,
@@ -132,9 +144,19 @@ final class PodcastManager {
             podcastDescription: parsed.description,
             logoUrl: parsed.logoUrl,
             website: parsed.website,
-            author: parsed.author
+            author: parsed.author,
+            requiresAuth: username != nil
         )
+        podcast.feedUsername = username
         podcast.sortOrder = subscriptions.count
+        
+        // Map new spec fields
+        mapParsedPodcastMetadata(parsed, to: podcast)
+        
+        // Store feed credentials in Keychain
+        if let username, let password {
+            KeychainHelper.shared.saveFeedCredentials(username: username, password: password, forPodcastUrl: url)
+        }
         
         // Set markedPlayedBefore to now so we don't flood the queue with back catalog
         podcast.effectiveSettings.markedPlayedBefore = Date()
@@ -156,6 +178,7 @@ final class PodcastManager {
                 transcriptUrl: ep.transcriptUrl,
                 podcast: podcast
             )
+            mapParsedEpisodeMetadata(ep, to: episode)
             modelContext.insert(episode)
         }
         
@@ -165,7 +188,7 @@ final class PodcastManager {
         
         // Sync to server
         if let client = gpodderClient {
-            try? await client.updateSubscriptions(deviceId: deviceId, add: [url])
+            _ = try? await client.updateSubscriptions(deviceId: deviceId, add: [url])
         }
         
         logger.info("Subscribed to \(parsed.title) with \(episodes.count) episodes")
@@ -179,7 +202,7 @@ final class PodcastManager {
         loadSubscriptions()
         
         if let client = gpodderClient {
-            try? await client.updateSubscriptions(deviceId: deviceId, remove: [url])
+            _ = try? await client.updateSubscriptions(deviceId: deviceId, remove: [url])
         }
     }
     
@@ -206,11 +229,17 @@ final class PodcastManager {
     
     /// Refresh feeds, auto-queue new episodes, and auto-download based on per-podcast settings.
     /// This is the "Refresh & Sync" button action.
+    ///
+    /// - Parameter strategy: How to handle conflicts between local and server positions.
+    ///   Pass the user's configured `syncConflictStrategy` so the setting is honored.
+    /// - Returns: Unresolved conflicts (only populated when strategy is `.ask`).
+    @discardableResult
     func refreshAndSync(
         playerManager: PlayerManager,
         downloadManager: DownloadManager,
-        settingsManager: SettingsManager
-    ) async {
+        settingsManager: SettingsManager,
+        strategy: SyncStrategy = .serverWins
+    ) async -> [SyncConflict] {
         let newEpisodes = await refreshAllFeeds()
         
         // Group new episodes by podcast URL
@@ -220,47 +249,65 @@ final class PodcastManager {
             guard let podcast = subscriptions.first(where: { $0.url == podcastUrl }) else { continue }
             let podSettings = podcast.effectiveSettings
             
-            // Filter to only truly "new" episodes (after markedPlayedBefore)
+            // Filter to only truly "new" unplayed episodes
             let markedBefore = podSettings.markedPlayedBefore
+            let sessionInteracted = interactedKeys[podcastUrl] ?? []
             let newOnly = episodes.filter { ep in
-                guard let pubDate = ep.pubDate else { return true }
-                if let markedBefore { return pubDate > markedBefore }
-                return true
+                // Skip already-played episodes
+                guard !ep.isPlayed else { return false }
+                // Skip episodes the user already interacted with (queued, dismissed)
+                guard !ep.isInteracted else { return false }
+                guard !sessionInteracted.contains(ep.guid) else { return false }
+                // Skip if published before markedPlayedBefore
+                if let markedBefore, let pubDate = ep.pubDate, pubDate <= markedBefore {
+                    return false
+                }
+                // Must have audio
+                return ep.audioUrl != nil
             }
             
-            // Auto-queue
+            // Auto-queue new episodes from RSS
             let queueMode = podSettings.autoQueueMode ?? settingsManager.defaultAutoQueueMode
             if queueMode != .off {
-                for episode in newOnly {
-                    playerManager.addToQueue(episode, playNext: queueMode == .priority)
-                }
+                // Sort newest first so priority inserts show newest at top of Up Next
+                let sorted = newOnly.sorted { ($0.pubDate ?? .distantPast) > ($1.pubDate ?? .distantPast) }
+                playerManager.addToQueue(sorted, playNext: queueMode == .priority)
             }
             
             // Auto-download
             let shouldDownload = podSettings.autoDownloadNewEpisodes ?? settingsManager.defaultAutoDownload
             if shouldDownload {
-                await withTaskGroup(of: Void.self) { group in
-                    for episode in newOnly {
-                        if let audioUrl = episode.audioUrl, !downloadManager.isDownloaded(episode.guid) {
-                            group.addTask {
-                                try? await downloadManager.downloadEpisode(guid: episode.guid, audioUrl: audioUrl)
-                            }
-                        }
+                for episode in newOnly {
+                    if let audioUrl = episode.audioUrl, !downloadManager.isDownloaded(episode.guid) {
+                        let authHeaders: [String: String]? = podcast.requiresAuth
+                            ? KeychainHelper.shared.buildBasicAuthHeader(forPodcastUrl: podcast.url)
+                                .map { ["Authorization": $0] }
+                            : nil
+                        downloadManager.downloadEpisode(guid: episode.guid, audioUrl: audioUrl, authHeaders: authHeaders)
                     }
                 }
             }
         }
         
-        // Sync episode actions with server
+        // Auto-queue existing unplayed episodes for all subscriptions
+        autoQueueExistingEpisodes(playerManager: playerManager, settingsManager: settingsManager)
+        
+        // Sync episode actions with server, honoring the user's conflict resolution strategy
+        var conflicts: [SyncConflict] = []
         do {
-            _ = try await syncEpisodeActions()
+            conflicts = try await syncEpisodeActions(strategy: strategy)
         } catch {
             logger.error("Sync failed during refreshAndSync: \(error.localizedDescription)")
+            // Even if network sync failed, apply local actionMap with the configured strategy
+            conflicts = applyEpisodeActions(strategy: strategy)
         }
+        return conflicts
     }
     
     func refreshFeed(for podcast: Podcast) async throws -> [Episode] {
-        let authHeader: String? = nil  // TODO: build auth header from GPodder credentials for protected feeds
+        let authHeader = podcast.requiresAuth
+            ? KeychainHelper.shared.buildBasicAuthHeader(forPodcastUrl: podcast.url)
+            : nil
         let (parsed, parsedEpisodes) = try await rssService.fetchFeed(url: podcast.url, authHeader: authHeader)
         
         // Update podcast metadata
@@ -269,6 +316,24 @@ final class PodcastManager {
         podcast.logoUrl = parsed.logoUrl
         podcast.website = parsed.website
         podcast.author = parsed.author
+        
+        // Map new spec fields
+        mapParsedPodcastMetadata(parsed, to: podcast)
+        
+        // Handle feed URL migration (itunes:new-feed-url)
+        if let newUrl = parsed.newFeedUrl, !newUrl.isEmpty, newUrl != podcast.url {
+            logger.warning("Feed \(podcast.title) declares new URL: \(newUrl). Auto-migrating.")
+            let oldUrl = podcast.url
+            podcast.url = newUrl
+            podcast.newFeedUrl = nil  // Clear after migration
+            // Update profile associations
+            disassociateFromCurrentProfile(url: oldUrl)
+            associateWithCurrentProfile(url: newUrl)
+            // Sync change to server
+            if let client = gpodderClient {
+                _ = try? await client.updateSubscriptions(deviceId: deviceId, add: [newUrl], remove: [oldUrl])
+            }
+        }
         
         // Find existing episode GUIDs
         let existingGuids = Set(podcast.episodes.map(\.guid))
@@ -288,8 +353,16 @@ final class PodcastManager {
                 transcriptUrl: ep.transcriptUrl,
                 podcast: podcast
             )
+            mapParsedEpisodeMetadata(ep, to: episode)
             modelContext.insert(episode)
             newEpisodes.append(episode)
+        }
+        
+        // Update existing episodes with new metadata fields
+        for ep in parsedEpisodes where existingGuids.contains(ep.guid) {
+            if let existing = podcast.episodes.first(where: { $0.guid == ep.guid }) {
+                mapParsedEpisodeMetadata(ep, to: existing)
+            }
         }
         
         try modelContext.save()
@@ -308,15 +381,20 @@ final class PodcastManager {
     
     // MARK: - Auto-Queue Candidates
     
-    func getAutoQueueCandidates(for podcast: Podcast) -> [Episode] {
+    func getAutoQueueCandidates(for podcast: Podcast, globalDefault: AutoQueueMode = .off) -> [Episode] {
         let settings = podcast.effectiveSettings
-        guard let mode = settings.autoQueueMode, mode != .off else { return [] }
+        let mode = settings.autoQueueMode ?? globalDefault
+        guard mode != .off else { return [] }
         
         let markedBefore = settings.markedPlayedBefore
         let interacted = interactedKeys[podcast.url] ?? []
         
         return podcast.episodes.filter { episode in
-            // Skip if already interacted
+            // Skip if already played
+            guard !episode.isPlayed else { return false }
+            // Skip if already interacted (persisted in SwiftData)
+            guard !episode.isInteracted else { return false }
+            // Skip if interacted this session (in-memory, covers current session before SwiftData save)
             guard !interacted.contains(episode.guid) else { return false }
             // Skip if published before markedPlayedBefore
             if let markedBefore, let pubDate = episode.pubDate, pubDate <= markedBefore {
@@ -325,6 +403,21 @@ final class PodcastManager {
             // Must have audio
             return episode.audioUrl != nil
         }.sorted { ($0.pubDate ?? .distantPast) > ($1.pubDate ?? .distantPast) }
+    }
+    
+    /// Auto-queue the most recent unplayed episode for each subscription.
+    /// This covers the initial subscribe case — only the latest episode is queued,
+    /// not the entire back-catalog. Future new episodes are handled by refreshAllFeeds().
+    /// Extracted for testability — called by refreshAndSync.
+    func autoQueueExistingEpisodes(playerManager: PlayerManager, settingsManager: SettingsManager) {
+        let globalDefault = settingsManager.defaultAutoQueueMode
+        for podcast in subscriptions {
+            let candidates = getAutoQueueCandidates(for: podcast, globalDefault: globalDefault)
+            // Only queue the most recent episode (candidates are sorted newest-first)
+            guard let mostRecent = candidates.first else { continue }
+            let mode = podcast.effectiveSettings.autoQueueMode ?? globalDefault
+            playerManager.addToQueue([mostRecent], playNext: mode == .priority)
+        }
     }
     
     /// Update listen progress for an episode during playback.
@@ -400,6 +493,19 @@ final class PodcastManager {
         logger.info("Marked episode \(episodeGuid) as played")
     }
     
+    /// Mark an episode as played locally (sets isPlayed flag only, no server action).
+    /// Used by handleEpisodeCompleted which sends its own EpisodeAction separately.
+    func markEpisodePlayedLocally(podcastUrl: String, episodeGuid: String) {
+        markEpisodeAsInteracted(podcastUrl, episodeGuid)
+        
+        if let podcast = subscriptions.first(where: { $0.url == podcastUrl }),
+           let episode = podcast.episodes.first(where: { $0.guid == episodeGuid }) {
+            episode.isPlayed = true
+            try? modelContext.save()
+            logger.info("Marked episode \(episodeGuid) as played (local only)")
+        }
+    }
+    
     /// Mark an episode as unplayed (resets position)
     func markEpisodeAsUnplayed(podcastUrl: String, episodeGuid: String) {
         let podcast = subscriptions.first { $0.url == podcastUrl }
@@ -471,7 +577,7 @@ final class PodcastManager {
             for batch in stride(from: 0, to: actions.count, by: 50) {
                 let end = min(batch + 50, actions.count)
                 let slice = Array(actions[batch..<end])
-                try? await client.uploadEpisodeActions(slice)
+                _ = try? await client.uploadEpisodeActions(slice)
             }
             logger.info("Uploaded \(count) play actions to server")
         }
@@ -481,10 +587,11 @@ final class PodcastManager {
     
     /// Pull subscription list from server and subscribe to any missing feeds.
     /// Also pushes any local-only subscriptions to the server.
-    func syncSubscriptions() async throws {
+    /// Returns any URL rewrites from the server that need to be handled.
+    func syncSubscriptions() async throws -> [URLRewriteConflict] {
         guard let client = gpodderClient else {
             logger.info("No gPodder client configured, skipping subscription sync")
-            return
+            return []
         }
         
         let profileId = activeProfileId ?? "global"
@@ -519,12 +626,14 @@ final class PodcastManager {
         
         // Push any local subscriptions the server doesn't know about
         // (for since == 0 full sync, delta.add is the full list)
+        var allRewrites: [URLRewrite] = []
         if since > 0 {
             let serverUrls = Set(delta.add)
             let localOnly = subscriptions.filter { !serverUrls.contains($0.url) }
             if !localOnly.isEmpty {
                 let urls = localOnly.map(\.url)
-                try? await client.updateSubscriptions(deviceId: deviceId, add: urls)
+                let rewrites = (try? await client.updateSubscriptions(deviceId: deviceId, add: urls)) ?? []
+                allRewrites.append(contentsOf: rewrites)
                 logger.info("Pushed \(urls.count) local subscriptions to server")
             }
         }
@@ -534,6 +643,17 @@ final class PodcastManager {
         loadSubscriptions()
         
         logger.info("Subscription sync complete: \(addedCount) added, \(delta.remove.count) removed")
+        
+        // Convert URL rewrites to user-facing conflicts
+        return allRewrites.map { rewrite in
+            let podcast = subscriptions.first(where: { $0.url == rewrite.oldUrl })
+            return URLRewriteConflict(
+                oldUrl: rewrite.oldUrl,
+                newUrl: rewrite.newUrl,
+                podcastTitle: podcast?.title,
+                artworkUrl: podcast?.logoUrl
+            )
+        }
     }
     
     func syncEpisodeActions(force: Bool = true, strategy: SyncStrategy = .serverWins) async throws -> [SyncConflict] {
@@ -558,19 +678,47 @@ final class PodcastManager {
             let existing = actionMap[key]
             
             if let existing, let existingPos = existing.position, let newPos = action.position {
-                if abs(existingPos - newPos) > 5 {
-                    conflicts.append(SyncConflict(
-                        episodeGuid: key,
-                        episodeTitle: nil,
-                        podcastTitle: nil,
-                        localPosition: existingPos,
-                        serverPosition: newPos,
-                        serverTimestamp: action.timestamp
-                    ))
+                // Only overwrite actionMap when the server action is newer
+                if action.timestamp >= existing.timestamp {
+                    actionMap[key] = action
                 }
+                
+                if abs(existingPos - newPos) > 5 {
+                    // Look up episode/podcast metadata for the conflict UI
+                    let (epTitle, podTitle, podUrl, artUrl, audioUrl, totalDur) = lookupEpisodeMetadata(guid: key)
+                    
+                    // Skip conflict for episodes already marked as played
+                    let isAlreadyPlayed = isEpisodePlayed(guid: key)
+                    
+                    // Skip conflict for episodes that are effectively complete
+                    // (either position is ≥95% of total duration)
+                    let isEffectivelyComplete: Bool = {
+                        guard let total = totalDur, total > 60 else { return false }
+                        let threshold = Int(Double(total) * 0.95)
+                        return existingPos >= threshold || newPos >= threshold
+                    }()
+                    
+                    if !isAlreadyPlayed && !isEffectivelyComplete {
+                        let count = incrementConflictCount(for: key)
+                        conflicts.append(SyncConflict(
+                            episodeGuid: key,
+                            episodeTitle: epTitle,
+                            podcastTitle: podTitle,
+                            podcastUrl: podUrl,
+                            artworkUrl: artUrl,
+                            audioUrl: audioUrl,
+                            localPosition: existingPos,
+                            serverPosition: newPos,
+                            serverTimestamp: action.timestamp,
+                            totalDuration: totalDur,
+                            occurrenceCount: count
+                        ))
+                    }
+                }
+            } else {
+                // No existing entry — just store the server action
+                actionMap[key] = action
             }
-            
-            actionMap[key] = action
         }
         
         UserDefaults.standard.set(Int(Date().timeIntervalSince1970), forKey: "lastEpisodeActionSync_\(epProfileId)")
@@ -579,8 +727,10 @@ final class PodcastManager {
         // Apply synced positions to Episode objects using the configured strategy
         let applyConflicts = applyEpisodeActions(strategy: strategy)
         
-        // Merge conflicts from action map diff + apply phase
-        let allConflicts = conflicts + applyConflicts
+        // Merge conflicts — deduplicate by episodeGuid, prefer applyConflicts (has richer metadata)
+        let applyGuids = Set(applyConflicts.map(\.episodeGuid))
+        let uniqueActionMapConflicts = conflicts.filter { !applyGuids.contains($0.episodeGuid) }
+        let allConflicts = uniqueActionMapConflicts + applyConflicts
         
         let totalStored = self.actionMap.count
         logger.info("Episode action sync complete: \(actions.count) received, \(totalStored) total stored, \(allConflicts.count) conflicts")
@@ -623,26 +773,50 @@ final class PodcastManager {
                         }
                         
                     case .ask:
-                        // If positions differ significantly, collect as conflict
-                        if abs(serverPosition - localPosition) > conflictThreshold {
-                            unresolvedConflicts.append(SyncConflict(
-                                episodeGuid: episode.guid,
-                                episodeTitle: episode.title,
-                                podcastTitle: podcast.title,
-                                localPosition: localPosition,
-                                serverPosition: serverPosition,
-                                serverTimestamp: action.timestamp
-                            ))
-                            // Don't overwrite — let user decide
-                        } else {
-                            // Close enough — auto-resolve with the higher value
+                        // Skip conflict for episodes already marked as played —
+                        // completed episodes should never generate conflicts
+                        if episode.isPlayed {
                             episode.listenedSeconds = max(localPosition, serverPosition)
+                        } else {
+                            // Also skip if episode is effectively complete
+                            // (position is ≥95% of total duration)
+                            let total = episode.durationSeconds ?? 0
+                            let isEffectivelyComplete = total > 60 && (
+                                localPosition >= Int(Double(total) * 0.95) ||
+                                serverPosition >= Int(Double(total) * 0.95)
+                            )
+                            
+                            if isEffectivelyComplete {
+                                // Auto-resolve: take the higher position
+                                episode.listenedSeconds = max(localPosition, serverPosition)
+                            } else if abs(serverPosition - localPosition) > conflictThreshold {
+                                let count = incrementConflictCount(for: episode.guid)
+                                unresolvedConflicts.append(SyncConflict(
+                                    episodeGuid: episode.guid,
+                                    episodeTitle: episode.title,
+                                    podcastTitle: podcast.title,
+                                    podcastUrl: podcast.url,
+                                    artworkUrl: episode.imageUrl ?? podcast.logoUrl,
+                                    audioUrl: episode.audioUrl,
+                                    localPosition: localPosition,
+                                    serverPosition: serverPosition,
+                                    serverTimestamp: action.timestamp,
+                                    totalDuration: episode.durationSeconds,
+                                    occurrenceCount: count
+                                ))
+                                // Don't overwrite — let user decide
+                            } else {
+                                // Close enough — auto-resolve with the higher value
+                                episode.listenedSeconds = max(localPosition, serverPosition)
+                            }
                         }
                     }
                 }
                 
                 // Mark as played if position >= total (or very close)
-                if let position = action.position, let total = action.total, total > 0 {
+                // Guard: require both position and total > 60s to avoid marking episodes
+                // as played from corrupt sync data (e.g., stale position during auto-advance)
+                if let position = action.position, let total = action.total, total > 60, position > 60 {
                     let progress = Double(position) / Double(total)
                     if progress >= 0.95 {
                         episode.isPlayed = true
@@ -653,7 +827,11 @@ final class PodcastManager {
             }
         }
         
-        try? modelContext.save()
+        do {
+            try modelContext.save()
+        } catch {
+            logger.error("Failed to save episode actions (possible store corruption): \(error.localizedDescription)")
+        }
         logger.info("Applied listen status to \(updatedCount) episodes (strategy: \(strategy.rawValue), \(unresolvedConflicts.count) unresolved)")
         return unresolvedConflicts
     }
@@ -662,11 +840,107 @@ final class PodcastManager {
         actionMap[action.guid ?? action.episode] = action
         persistActionMap()
         guard let client = gpodderClient else { return }
-        try? await client.uploadEpisodeActions([action])
+        _ = try? await client.uploadEpisodeActions([action])
     }
     
     func getLatestAction(for guid: String) -> EpisodeAction? {
         actionMap[guid]
+    }
+    
+    // MARK: - Conflict Resolution
+    
+    /// Look up episode metadata from subscriptions for conflict display.
+    private func lookupEpisodeMetadata(guid: String) -> (episodeTitle: String?, podcastTitle: String?, podcastUrl: String?, artworkUrl: String?, audioUrl: String?, totalDuration: Int?) {
+        for podcast in subscriptions {
+            if let episode = podcast.episodes.first(where: { $0.guid == guid }) {
+                return (
+                    episode.title,
+                    podcast.title,
+                    podcast.url,
+                    episode.imageUrl ?? podcast.logoUrl,
+                    episode.audioUrl,
+                    episode.durationSeconds
+                )
+            }
+        }
+        return (nil, nil, nil, nil, nil, nil)
+    }
+    
+    /// Check if an episode is already marked as played (used to skip conflict detection).
+    private func isEpisodePlayed(guid: String) -> Bool {
+        for podcast in subscriptions {
+            if let episode = podcast.episodes.first(where: { $0.guid == guid }) {
+                return episode.isPlayed
+            }
+        }
+        return false
+    }
+    
+    /// Resolve a sync conflict by updating the local model, actionMap, and server.
+    /// This prevents the conflict from reappearing on next sync.
+    func resolveConflict(_ conflict: SyncConflict, chosenPosition: Int) {
+        // 1. Update local Episode.listenedSeconds
+        updateEpisodeProgressByGuid(episodeGuid: conflict.episodeGuid, position: chosenPosition)
+        
+        // 2. Build an EpisodeAction with the resolved position
+        let action = EpisodeAction(
+            podcast: conflict.podcastUrl ?? "",
+            episode: conflict.audioUrl ?? "",
+            guid: conflict.episodeGuid,
+            action: "play",
+            timestamp: Int(Date().timeIntervalSince1970),
+            position: chosenPosition,
+            started: 0,
+            total: conflict.totalDuration ?? chosenPosition,
+            device: deviceId
+        )
+        
+        // 3. Update actionMap so next sync won't re-detect this conflict
+        actionMap[conflict.episodeGuid] = action
+        persistActionMap()
+        
+        // 4. Clear conflict count since user resolved it
+        clearConflictCount(for: conflict.episodeGuid)
+        
+        // 5. Upload to server
+        Task {
+            guard let client = gpodderClient else { return }
+            do {
+                _ = try await client.uploadEpisodeActions([action])
+                logger.info("Uploaded conflict resolution for \(conflict.episodeGuid) at position \(chosenPosition)")
+            } catch {
+                logger.error("Failed to upload conflict resolution: \(error.localizedDescription)")
+            }
+        }
+    }
+    
+    // MARK: - URL Rewrite Resolution
+    
+    /// Accept a server URL rewrite — update the local podcast's feed URL.
+    func acceptUrlRewrite(_ rewrite: URLRewriteConflict) {
+        guard let podcast = subscriptions.first(where: { $0.url == rewrite.oldUrl }) else {
+            logger.warning("Cannot apply URL rewrite: no podcast found for \(rewrite.oldUrl)")
+            return
+        }
+        
+        let oldUrl = podcast.url
+        podcast.url = rewrite.newUrl
+        
+        // Update profile associations
+        disassociateFromCurrentProfile(url: oldUrl)
+        associateWithCurrentProfile(url: rewrite.newUrl)
+        
+        try? modelContext.save()
+        loadSubscriptions()
+        
+        logger.info("Accepted URL rewrite: \(oldUrl) → \(rewrite.newUrl)")
+    }
+    
+    /// Reject a server URL rewrite — keep the local URL unchanged.
+    func rejectUrlRewrite(_ rewrite: URLRewriteConflict) {
+        logger.info("Rejected URL rewrite for \(rewrite.oldUrl) → \(rewrite.newUrl). Keeping local URL.")
+        // No action needed — the local URL stays as-is.
+        // This may cause drift if the server has already updated its records.
     }
     
     // MARK: - Action Map Persistence
@@ -679,6 +953,37 @@ final class PodcastManager {
         self.actionMap = decoded
         let count = self.actionMap.count
         logger.info("Loaded \(count) persisted episode actions")
+    }
+    
+    // MARK: - Conflict Count Tracking
+    
+    /// Load conflict counts from UserDefaults.
+    func loadConflictCounts() {
+        if let data = UserDefaults.standard.data(forKey: "syncConflictCounts"),
+           let decoded = try? JSONDecoder().decode([String: Int].self, from: data) {
+            conflictCounts = decoded
+        }
+    }
+    
+    /// Increment and persist the conflict count for an episode. Returns the new count.
+    @discardableResult
+    private func incrementConflictCount(for guid: String) -> Int {
+        let count = (conflictCounts[guid] ?? 0) + 1
+        conflictCounts[guid] = count
+        persistConflictCounts()
+        return count
+    }
+    
+    /// Clear the conflict count for a resolved episode.
+    private func clearConflictCount(for guid: String) {
+        conflictCounts.removeValue(forKey: guid)
+        persistConflictCounts()
+    }
+    
+    private func persistConflictCounts() {
+        if let data = try? JSONEncoder().encode(conflictCounts) {
+            UserDefaults.standard.set(data, forKey: "syncConflictCounts")
+        }
     }
     
     private func persistActionMap() {
@@ -706,5 +1011,60 @@ final class PodcastManager {
             return false
         }
         return profiles.contains { $0.id != profileId }
+    }
+    
+    // MARK: - Parsed Metadata Mapping
+    
+    /// Map new RSS/iTunes/Podcasting 2.0 fields from parsed data to a Podcast model.
+    private func mapParsedPodcastMetadata(_ parsed: ParsedPodcast, to podcast: Podcast) {
+        podcast.language = parsed.language
+        podcast.copyright = parsed.copyright
+        podcast.categories = parsed.categories
+        podcast.subcategory = parsed.subcategory
+        podcast.explicit = parsed.explicit
+        podcast.showType = parsed.showType
+        podcast.isComplete = parsed.isComplete
+        podcast.newFeedUrl = parsed.newFeedUrl
+        podcast.podcastGuid = parsed.podcastGuid
+        podcast.fundingUrl = parsed.fundingUrl
+        podcast.fundingLabel = parsed.fundingLabel
+        podcast.publisher = parsed.publisher
+        podcast.supportsValue4Value = parsed.supportsValue4Value
+        podcast.hasLiveItem = parsed.hasLiveItem
+        podcast.liveItemStatus = parsed.liveItemStatus
+        podcast.liveItemStart = parsed.liveItemStart
+        podcast.liveItemContentLink = parsed.liveItemContentLink
+    }
+    
+    /// Map new iTunes/Podcasting 2.0 fields from parsed data to an Episode model.
+    private func mapParsedEpisodeMetadata(_ parsed: ParsedEpisode, to episode: Episode) {
+        episode.seasonNumber = parsed.seasonNumber
+        episode.seasonName = parsed.seasonName
+        episode.episodeNumber = parsed.episodeNumber
+        episode.episodeDisplay = parsed.episodeDisplay
+        episode.episodeType = parsed.episodeType
+        episode.explicit = parsed.explicit
+        
+        // Update transcript and chapters URLs (feeds may add these to existing episodes)
+        if let transcriptUrl = parsed.transcriptUrl, !transcriptUrl.isEmpty {
+            episode.transcriptUrl = transcriptUrl
+        }
+        if let chaptersUrl = parsed.chaptersUrl, !chaptersUrl.isEmpty {
+            episode.chaptersUrl = chaptersUrl
+        }
+        
+        // Encode Podlove inline chapters to JSON for persistence
+        if let chapters = parsed.inlineChapters, !chapters.isEmpty {
+            struct InlineChapterData: Codable {
+                let startTime: Double
+                let title: String
+                let img: String?
+                let url: String?
+            }
+            let encoded = chapters.map { InlineChapterData(startTime: $0.startTime, title: $0.title, img: $0.image, url: $0.href) }
+            if let data = try? JSONEncoder().encode(encoded) {
+                episode.chaptersJSON = String(data: data, encoding: .utf8)
+            }
+        }
     }
 }

@@ -13,7 +13,8 @@ struct SettingsView: View {
     @State private var isImportingOPML = false
     @State private var showOPMLExport = false
     @State private var opmlExportURL: URL?
-    @State private var isForceSyncing = false
+    @State private var isPushing = false
+    @State private var isPulling = false
     
     var body: some View {
         NavigationStack {
@@ -54,25 +55,52 @@ struct SettingsView: View {
                     // Force sync buttons
                     Button {
                         Task {
-                            isForceSyncing = true
-                            _ = try? await podcastManager.syncEpisodeActions()
-                            isForceSyncing = false
+                            isPushing = true
+                            // Force Push: upload local actions, then sync with .deviceWins
+                            // so local positions are preserved on the device
+                            let conflicts = try? await podcastManager.syncEpisodeActions(
+                                strategy: .deviceWins
+                            )
+                            if let conflicts, !conflicts.isEmpty {
+                                playerManager.pendingConflicts = conflicts
+                            }
+                            isPushing = false
                         }
                     } label: {
-                        Label("Force Push to Server", systemImage: "arrow.up.circle")
+                        HStack {
+                            Label("Force Push to Server", systemImage: "arrow.up.circle")
+                            if isPushing {
+                                Spacer()
+                                ProgressView()
+                            }
+                        }
                     }
-                    .disabled(isForceSyncing)
+                    .disabled(isPushing || isPulling)
                     
                     Button {
                         Task {
-                            isForceSyncing = true
-                            _ = try? await podcastManager.syncEpisodeActions()
-                            isForceSyncing = false
+                            isPulling = true
+                            // Force Pull: sync using the user's configured strategy
+                            // so conflicts surface when strategy is .ask
+                            let strategy = settings.syncConflictStrategy
+                            let conflicts = try? await podcastManager.syncEpisodeActions(
+                                strategy: strategy
+                            )
+                            if let conflicts, !conflicts.isEmpty, strategy == .ask {
+                                playerManager.pendingConflicts = conflicts
+                            }
+                            isPulling = false
                         }
                     } label: {
-                        Label("Force Pull from Server", systemImage: "arrow.down.circle")
+                        HStack {
+                            Label("Force Pull from Server", systemImage: "arrow.down.circle")
+                            if isPulling {
+                                Spacer()
+                                ProgressView()
+                            }
+                        }
                     }
-                    .disabled(isForceSyncing)
+                    .disabled(isPushing || isPulling)
                     
                     NavigationLink {
                         EpisodeActivityView()
@@ -178,6 +206,38 @@ struct SettingsView: View {
                     Label("Playback", systemImage: "play.circle")
                 }
                 
+                // MARK: - Headphone Controls
+                Section {
+                    Picker("Next Track", selection: Binding(
+                        get: { settings.nextTrackAction },
+                        set: {
+                            settings.nextTrackAction = $0
+                            playerManager.audioManager.nextTrackAction = $0
+                        }
+                    )) {
+                        Text("Next Episode").tag(RemoteCommandAction.nextEpisode)
+                        Text("Skip Forward").tag(RemoteCommandAction.skipForward)
+                        Text("Skip Back").tag(RemoteCommandAction.skipBack)
+                    }
+                    
+                    Picker("Previous Track", selection: Binding(
+                        get: { settings.previousTrackAction },
+                        set: {
+                            settings.previousTrackAction = $0
+                            playerManager.audioManager.previousTrackAction = $0
+                        }
+                    )) {
+                        Text("Skip Back").tag(RemoteCommandAction.skipBack)
+                        Text("Restart Episode").tag(RemoteCommandAction.previousEpisode)
+                        Text("Next Episode").tag(RemoteCommandAction.nextEpisode)
+                        Text("Skip Forward").tag(RemoteCommandAction.skipForward)
+                    }
+                } header: {
+                    Label("Headphone Controls", systemImage: "headphones")
+                } footer: {
+                    Text("Controls AirPods double/triple-tap and lock screen previous/next. Skip durations use your Playback settings above (\(settings.skipBackwardSeconds)s back, \(settings.skipForwardSeconds)s forward).")
+                }
+                
                 // MARK: - Feed Cache
                 Section {
                     VStack(alignment: .leading, spacing: 8) {
@@ -205,9 +265,9 @@ struct SettingsView: View {
                         get: { settings.defaultAutoQueueMode },
                         set: { settings.defaultAutoQueueMode = $0 }
                     )) {
-                        Text("Off").tag(AutoQueueMode.off)
-                        Text("Normal").tag(AutoQueueMode.normal)
-                        Text("Priority").tag(AutoQueueMode.priority)
+                        ForEach(AutoQueueMode.allCases, id: \.self) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
                     }
                     
                     Toggle("Auto-Download New Episodes", isOn: Binding(
@@ -215,10 +275,14 @@ struct SettingsView: View {
                         set: { settings.defaultAutoDownload = $0 }
                     ))
                     
-                    Toggle("Remove After Playing", isOn: Binding(
-                        get: { settings.defaultRemoveAfterPlay },
-                        set: { settings.defaultRemoveAfterPlay = $0 }
-                    ))
+                    Picker("Download Cleanup", selection: Binding(
+                        get: { settings.defaultDownloadCleanupPolicy },
+                        set: { settings.defaultDownloadCleanupPolicy = $0 }
+                    )) {
+                        ForEach(DownloadCleanupPolicy.allCases, id: \.self) { policy in
+                            Text(policy.displayName).tag(policy)
+                        }
+                    }
                     
                     Toggle("Archive on Complete", isOn: Binding(
                         get: { settings.defaultArchiveOnComplete },
@@ -226,6 +290,22 @@ struct SettingsView: View {
                     ))
                 } header: {
                     Label("New Podcast Defaults", systemImage: "star")
+                }
+                
+                // MARK: - Queue Management
+                Section {
+                    Picker("On Queue Removal", selection: Binding(
+                        get: { settings.queueRemovalAction },
+                        set: { settings.queueRemovalAction = $0 }
+                    )) {
+                        Text("Just Remove").tag(QueueRemovalAction.removeOnly)
+                        Text("Remove & Mark Played").tag(QueueRemovalAction.removeAndMarkPlayed)
+                        Text("Always Ask").tag(QueueRemovalAction.ask)
+                    }
+                } header: {
+                    Label("Queue Management", systemImage: "list.bullet")
+                } footer: {
+                    Text("Choose what happens when you remove an episode from the Up Next queue.")
                 }
                 
                 // MARK: - Search Provider
@@ -252,6 +332,7 @@ struct SettingsView: View {
                             get: { settings.podcastIndexApiSecret ?? "" },
                             set: { settings.podcastIndexApiSecret = $0.isEmpty ? nil : $0 }
                         ))
+                        .textContentType(.password)
                         
                         Link("Get API Keys", destination: URL(string: "https://api.podcastindex.org")!)
                             .font(.caption)
@@ -273,6 +354,17 @@ struct SettingsView: View {
                                     get: { settings.watchSyncPodcastLimit },
                                     set: { settings.watchSyncPodcastLimit = $0 }
                                 ), in: 1...20)
+                        
+                        Picker("Position Sync Interval", selection: Binding(
+                            get: { settings.watchPositionSyncInterval },
+                            set: { settings.watchPositionSyncInterval = $0 }
+                        )) {
+                            Text("10 seconds").tag(10)
+                            Text("15 seconds").tag(15)
+                            Text("30 seconds").tag(30)
+                            Text("1 minute").tag(60)
+                            Text("2 minutes").tag(120)
+                        }
                     }
                 } header: {
                     Label("Apple Watch", systemImage: "applewatch")
@@ -318,24 +410,7 @@ struct SettingsView: View {
                 } header: {
                     Label("Data", systemImage: "externaldrive")
                 }
-                
-                // MARK: - About
-                Section {
-                    HStack {
-                        Text("Version")
-                        Spacer()
-                        Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0")
-                            .foregroundStyle(.secondary)
-                    }
-                    HStack {
-                        Text("Build")
-                        Spacer()
-                        Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1")
-                            .foregroundStyle(.secondary)
-                    }
-                } header: {
-                    Label("About", systemImage: "info.circle")
-                }
+
                 
                 // MARK: - Siri Commands
                 Section {
@@ -389,10 +464,47 @@ struct SettingsView: View {
                         title: "Set Playback Speed",
                         phrases: ["\"Set playback speed to 1.5 in YourPods\""]
                     )
+                    
+                    // Timer
+                    SiriCommandRow(
+                        icon: "moon.zzz.fill",
+                        title: "Set Sleep Timer",
+                        phrases: ["\"Set sleep timer to 30 minutes in YourPods\""]
+                    )
+                    SiriCommandRow(
+                        icon: "moon.fill",
+                        title: "Cancel Sleep Timer",
+                        phrases: ["\"Cancel sleep timer in YourPods\""]
+                    )
+                    
+                    // Info
+                    SiriCommandRow(
+                        icon: "info.circle.fill",
+                        title: "What's Playing",
+                        phrases: ["\"What's playing in YourPods?\""]
+                    )
                 } header: {
                     Label("Siri Commands", systemImage: "mic.circle")
                 } footer: {
                     Text("Say \"Hey Siri\" followed by any command above. You can also add these as Shortcuts in the Shortcuts app.")
+                }
+                
+                // MARK: - About
+                Section {
+                    HStack {
+                        Text("Version")
+                        Spacer()
+                        Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0")
+                            .foregroundStyle(.secondary)
+                    }
+                    HStack {
+                        Text("Build")
+                        Spacer()
+                        Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1")
+                            .foregroundStyle(.secondary)
+                    }
+                } header: {
+                    Label("About", systemImage: "info.circle")
                 }
             }
             .navigationTitle("Settings")

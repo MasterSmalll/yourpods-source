@@ -11,7 +11,7 @@ struct SleepTimerSheet: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 24) {
-                if sleepTimer.isActive {
+                if sleepTimer.isActive || sleepTimer.stopAfterCurrentEpisode {
                     activeTimerView
                 } else {
                     presetView
@@ -38,40 +38,57 @@ struct SleepTimerSheet: View {
                 .font(.system(size: 48))
                 .foregroundStyle(.indigo)
             
-            Text(sleepTimer.formattedRemaining)
-                .font(.system(size: 48, weight: .bold, design: .monospaced))
-                .foregroundStyle(.primary)
-            
-            Text("remaining")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-            
-            HStack(spacing: 16) {
-                Button {
-                    sleepTimer.extend(minutes: 5)
-                } label: {
-                    Label("+5 min", systemImage: "plus.circle")
-                        .font(.subheadline.bold())
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                        .background(.ultraThinMaterial)
-                        .clipShape(Capsule())
-                }
+            if sleepTimer.stopAfterCurrentEpisode {
+                // End of Episode mode
+                Text("End of Episode")
+                    .font(.system(size: 28, weight: .bold))
+                    .foregroundStyle(.primary)
                 
-                Button {
-                    sleepTimer.extend(minutes: 15)
-                } label: {
-                    Label("+15 min", systemImage: "plus.circle")
-                        .font(.subheadline.bold())
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                        .background(.ultraThinMaterial)
-                        .clipShape(Capsule())
+                Text("Playback will stop when\nthe current episode finishes")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            } else {
+                // Countdown timer mode
+                Text(sleepTimer.formattedRemaining)
+                    .font(.system(size: 48, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.primary)
+                
+                Text("remaining")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                
+                HStack(spacing: 16) {
+                    Button {
+                        sleepTimer.extend(minutes: 5)
+                    } label: {
+                        Label("+5 min", systemImage: "plus.circle")
+                            .font(.subheadline.bold())
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 10)
+                            .background(.ultraThinMaterial)
+                            .clipShape(Capsule())
+                    }
+                    
+                    Button {
+                        sleepTimer.extend(minutes: 15)
+                    } label: {
+                        Label("+15 min", systemImage: "plus.circle")
+                            .font(.subheadline.bold())
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 10)
+                            .background(.ultraThinMaterial)
+                            .clipShape(Capsule())
+                    }
                 }
             }
             
             Button(role: .destructive) {
-                sleepTimer.stop()
+                if sleepTimer.stopAfterCurrentEpisode {
+                    sleepTimer.cancelEndOfEpisode()
+                } else {
+                    sleepTimer.stop()
+                }
             } label: {
                 Text("Cancel Timer")
                     .font(.headline)
@@ -97,6 +114,25 @@ struct SleepTimerSheet: View {
             
             // Preset buttons
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+                // "End of Episode" option
+                Button {
+                    sleepTimer.startEndOfEpisode()
+                    dismiss()
+                } label: {
+                    VStack(spacing: 4) {
+                        Image(systemName: "stop.circle")
+                            .font(.title3)
+                        Text("End of\nEpisode")
+                            .font(.subheadline.bold())
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(Color.indigo.opacity(0.25))
+                    .foregroundColor(.indigo)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                }
+                
                 ForEach(SleepTimerManager.presets, id: \.self) { minutes in
                     Button {
                         sleepTimer.start(minutes: minutes)

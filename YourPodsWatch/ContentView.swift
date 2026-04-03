@@ -9,7 +9,7 @@ struct ContentView: View {
                 // MARK: - Now Playing on iPhone (if active)
                 if sessionManager.remoteTitle != "Not Playing" {
                     Section {
-                        NavigationLink(destination: RemotePlayerView()) {
+                        NavigationLink(destination: nowPlayingDestination) {
                             HStack {
                                 Image(systemName: sessionManager.remoteIsPlaying ? "speaker.wave.2.fill" : "speaker.fill")
                                     .foregroundColor(.green)
@@ -109,6 +109,23 @@ struct ContentView: View {
                 }
             }
             .navigationTitle("YourPods")
+        }
+    }
+    
+    
+    /// Routes Now Playing to PlayerView when the episode is available locally
+    /// (downloaded file or streamable), otherwise falls back to RemotePlayerView
+    /// for iPhone remote control. This prevents stalled playback when the episode
+    /// is downloaded on the watch but Now Playing was only sending remote commands.
+    @ViewBuilder
+    private var nowPlayingDestination: some View {
+        if let episode = sessionManager.currentEpisode,
+           episode.localPath != nil || episode.streamUrl != nil {
+            // Play on watch — PlayerView handles local file + streaming + position resumption
+            PlayerView(episode: episode)
+        } else {
+            // No local episode data — fall back to remote control
+            RemotePlayerView()
         }
     }
     

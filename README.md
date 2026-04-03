@@ -18,7 +18,7 @@
 ---
 
 > [!IMPORTANT]
-> **YourPods 2.0 — Complete Swift Rewrite**
+> **YourPods 2.0.2 — Complete Swift Rewrite**
 >
 > YourPods has been completely rewritten in native **Swift and SwiftUI** for version 2.0. The original Flutter/Dart codebase (v1.3.1 and earlier) has been archived on the [`flutter-v1`](https://github.com/asecretcompany/yourpods-source/tree/flutter-v1) branch and is no longer maintained.
 
@@ -35,13 +35,13 @@ YourPods is a gPodder-compatible, privacy-first, and self-hosted podcast player.
 
 ## Installation
 
-The current codebase corresponds to the 2.0 release in the [Apple App Store](https://apps.apple.com/us/app/yourpods/id6757721236).
+The current codebase corresponds to the 2.0.2 release in the [Apple App Store](https://apps.apple.com/us/app/yourpods/id6757721236).
 
 - **App Store**: Get automatic updates and hassle-free installation. Purchasing the App Store version directly funds YourPods development! 🙏
 - **TestFlight**: Join the [TestFlight Beta](https://testflight.apple.com/join/jF18YknW) to test new features for free.
 - **Source**: Build it yourself from this repository using the [developer instructions](#getting-started-for-developers).
 
-For the most up-to-date features, check our [website](https://asecretcompany.com/yourpods/).
+For the most up-to-date features, check our [website](https://yourpods.app).
 
 ## Feature Highlights
 

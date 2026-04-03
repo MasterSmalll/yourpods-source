@@ -78,6 +78,6 @@ Each podcast can have individual settings (auto-queue mode, auto-download, remov
 
 ## External Links
 
-- [Website](https://asecretcompany.com/yourpods/)
+- [Website](https://yourpods.app)
 - [App Store](https://apps.apple.com/us/app/yourpods/id6757721236)
 - [TestFlight Beta](https://testflight.apple.com/join/jF18YknW)

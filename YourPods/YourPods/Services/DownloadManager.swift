@@ -3,15 +3,28 @@ import os
 import CryptoKit
 
 /// Manages episode downloads for offline listening.
+///
+/// Uses `URLSession` background downloads so downloads survive app backgrounding.
+///
+/// **Limitation: Password-protected feeds**
+/// `URLSessionConfiguration.background` does not support custom request headers
+/// (like `Authorization`) set at the task level. For protected feeds, downloads
+/// fall back to a foreground URLSession. If the app is backgrounded during a
+/// protected-feed download, it will be retried on next app launch.
 @Observable
 @MainActor
-final class DownloadManager {
+final class DownloadManager: NSObject {
     private let logger = Logger(subsystem: "com.yourpods", category: "DownloadManager")
     
     var activeDownloads: [String: DownloadTask] = [:]  // episodeGuid → task
     var downloadedFiles: [String: URL] = [:]  // episodeGuid → local file URL
     
     private let fileManager = FileManager.default
+    private var backgroundSession: URLSession!
+    
+    /// Completion handler provided by the system when the app is woken for background download events.
+    /// Must be called after all delegate events have been delivered.
+    var backgroundSessionCompletionHandler: (() -> Void)?
     
     private var downloadsDirectory: URL {
         let paths = fileManager.urls(for: .documentDirectory, in: .userDomainMask)
@@ -26,44 +39,84 @@ final class DownloadManager {
     /// In-memory manifest: episodeGuid → relative filename
     private var manifest: [String: String] = [:]
     
-    init() {
+    override init() {
+        super.init()
         try? fileManager.createDirectory(at: downloadsDirectory, withIntermediateDirectories: true)
+        
+        let config = URLSessionConfiguration.background(withIdentifier: "com.yourpods.downloads")
+        config.sessionSendsLaunchEvents = true
+        config.isDiscretionary = false
+        self.backgroundSession = URLSession(configuration: config, delegate: self, delegateQueue: .main)
+        
         loadManifest()
         scanExistingDownloads()
+        loadPlayedDates()
     }
     
     // MARK: - Download
     
-    func downloadEpisode(guid: String, audioUrl: String) async throws {
-        guard activeDownloads[guid] == nil else { return }
+    /// Start downloading an episode for offline listening.
+    ///
+    /// For protected feeds, pass `authHeaders` with the `Authorization` header.
+    /// Note: Protected-feed downloads use a foreground session (background sessions
+    /// don't support custom auth headers). These downloads will pause if the app
+    /// is backgrounded and resume on next launch.
+    func downloadEpisode(guid: String, audioUrl: String, authHeaders: [String: String]? = nil) {
+        if let existing = activeDownloads[guid], existing.status != .failed {
+            return
+        }
         guard let url = URL(string: audioUrl) else { return }
         
         let task = DownloadTask(guid: guid, url: audioUrl, progress: 0, status: .downloading)
         activeDownloads[guid] = task
         
+        if let headers = authHeaders, !headers.isEmpty {
+            // Protected feed: use foreground download (background sessions
+            // strip custom headers). Falls back gracefully.
+            logger.info("Starting foreground download for protected feed: \(guid)")
+            Task {
+                do {
+                    var request = URLRequest(url: url)
+                    for (key, value) in headers {
+                        request.setValue(value, forHTTPHeaderField: key)
+                    }
+                    let (tempUrl, _) = try await URLSession.shared.download(for: request)
+                    handleDownloadCompleted(guid: guid, url: url, location: tempUrl)
+                } catch {
+                    activeDownloads[guid]?.status = .failed
+                    logger.error("Foreground download failed for \(guid): \(error.localizedDescription)")
+                }
+            }
+        } else {
+            // Public feed: use background session for best reliability
+            let downloadTask = backgroundSession.downloadTask(with: url)
+            downloadTask.taskDescription = guid
+            downloadTask.resume()
+            logger.info("Started background download for \(guid)")
+        }
+    }
+    
+    /// Handle completed download (shared between foreground and background paths).
+    private func handleDownloadCompleted(guid: String, url: URL, location: URL) {
+        let ext = url.pathExtension.isEmpty ? "mp3" : url.pathExtension
+        let safeFilename = "\(safeFilePrefix(for: guid)).\(ext)"
+        let localUrl = downloadsDirectory.appendingPathComponent(safeFilename)
+        
         do {
-            let (tempUrl, _) = try await URLSession.shared.download(from: url)
-            let ext = url.pathExtension.isEmpty ? "mp3" : url.pathExtension
-            let safeFilename = "\(safeFilePrefix(for: guid)).\(ext)"
-            let localUrl = downloadsDirectory.appendingPathComponent(safeFilename)
-            
             if fileManager.fileExists(atPath: localUrl.path) {
                 try? fileManager.removeItem(at: localUrl)
             }
-            try fileManager.moveItem(at: tempUrl, to: localUrl)
+            try fileManager.moveItem(at: location, to: localUrl)
             
             downloadedFiles[guid] = localUrl
             manifest[guid] = safeFilename
             saveManifest()
             
-            activeDownloads[guid]?.status = .completed
             activeDownloads.removeValue(forKey: guid)
-            
-            logger.info("Downloaded episode \(guid) → \(safeFilename)")
+            logger.info("Completed download for \(guid) → \(safeFilename)")
         } catch {
             activeDownloads[guid]?.status = .failed
-            logger.error("Download failed for \(guid): \(error.localizedDescription)")
-            throw error
+            logger.error("Failed to move downloaded file for \(guid): \(error.localizedDescription)")
         }
     }
     
@@ -149,6 +202,81 @@ final class DownloadManager {
         saveManifest()
     }
     
+    // MARK: - Played Date Tracking (for time-based cleanup)
+    
+    /// Dates when episodes were marked as played, for time-based cleanup.
+    /// episodeGuid → date played
+    var playedDates: [String: Date] = [:]
+    
+    private var playedDatesURL: URL {
+        downloadsDirectory.appendingPathComponent("_played_dates.json")
+    }
+    
+    /// Record that a downloaded episode has been played (for time-based cleanup).
+    func markPlayed(guid: String) {
+        guard downloadedFiles[guid] != nil else { return }
+        playedDates[guid] = Date()
+        savePlayedDates()
+        logger.info("Marked played date for download: \(guid)")
+    }
+    
+    /// Delete downloads whose played date exceeds the retention period.
+    /// - Parameters:
+    ///   - globalPolicy: The global default cleanup policy.
+    ///   - podcastPolicies: Per-podcast policy overrides, keyed by episode guid.
+    func cleanupExpiredDownloads(globalPolicy: DownloadCleanupPolicy, podcastPolicies: [String: DownloadCleanupPolicy]) {
+        let now = Date()
+        var cleaned = 0
+        
+        for (guid, playedDate) in playedDates {
+            guard downloadedFiles[guid] != nil else {
+                // Download was already removed — clean up stale entry
+                playedDates.removeValue(forKey: guid)
+                continue
+            }
+            
+            let policy = podcastPolicies[guid] ?? globalPolicy
+            let shouldDelete: Bool
+            
+            switch policy {
+            case .oncePlayed:
+                shouldDelete = true // Should have been deleted immediately, clean up
+            case .afterOneWeek:
+                shouldDelete = now.timeIntervalSince(playedDate) >= 7 * 24 * 3600
+            case .afterOneMonth:
+                shouldDelete = now.timeIntervalSince(playedDate) >= 30 * 24 * 3600
+            case .never:
+                shouldDelete = false
+            }
+            
+            if shouldDelete {
+                deleteDownload(guid: guid)
+                playedDates.removeValue(forKey: guid)
+                cleaned += 1
+            }
+        }
+        
+        if cleaned > 0 {
+            savePlayedDates()
+            logger.info("Cleaned up \(cleaned) expired downloads")
+        }
+    }
+    
+    private func loadPlayedDates() {
+        guard let data = try? Data(contentsOf: playedDatesURL),
+              let decoded = try? JSONDecoder().decode([String: Date].self, from: data) else {
+            return
+        }
+        playedDates = decoded
+    }
+    
+    private func savePlayedDates() {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(playedDates) else { return }
+        try? data.write(to: playedDatesURL, options: .atomic)
+    }
+    
     // MARK: - Bulk Operations
     
     /// Delete all downloaded episodes.
@@ -180,6 +308,42 @@ final class DownloadManager {
     /// Total size of all downloads in bytes.
     var totalDownloadSize: Int64 {
         downloadedFiles.keys.reduce(0) { $0 + fileSize(for: $1) }
+    }
+}
+
+// MARK: - URLSessionDownloadDelegate
+
+extension DownloadManager: URLSessionDownloadDelegate {
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        guard let guid = downloadTask.taskDescription,
+              let originalUrl = downloadTask.originalRequest?.url else { return }
+        handleDownloadCompleted(guid: guid, url: originalUrl, location: location)
+    }
+    
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+        guard let guid = downloadTask.taskDescription else { return }
+        if totalBytesExpectedToWrite > 0 {
+            let progress = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
+            activeDownloads[guid]?.progress = progress
+        }
+    }
+    
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        guard let guid = task.taskDescription else { return }
+        if let error {
+            activeDownloads[guid]?.status = .failed
+            logger.error("Background download failed for \(guid): \(error.localizedDescription)")
+        }
+    }
+    
+    /// Called when all background session delegate messages have been delivered.
+    /// Must call the system completion handler to let iOS know we're done.
+    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        logger.info("Background session finished delivering events")
+        DispatchQueue.main.async { [weak self] in
+            self?.backgroundSessionCompletionHandler?()
+            self?.backgroundSessionCompletionHandler = nil
+        }
     }
 }
 

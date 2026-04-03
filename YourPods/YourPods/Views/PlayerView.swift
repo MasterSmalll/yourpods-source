@@ -25,7 +25,7 @@ struct PlayerView: View {
                     AsyncImage(url: URL(string: item.artworkUrl ?? "")) { phase in
                         switch phase {
                         case .success(let image):
-                            image.resizable().aspectRatio(contentMode: .fit)
+                            image.resizable().aspectRatio(contentMode: .fill)
                         default:
                             RoundedRectangle(cornerRadius: 20)
                                 .fill(.ultraThinMaterial)
@@ -199,13 +199,12 @@ struct PlayerView: View {
                 transcript = nil
                 guard let item = playerManager.audioManager.currentItem else { return }
                 
-                // Fetch chapters from URL, or parse from description as fallback
-                if let chaptersUrl = item.chaptersUrl, !chaptersUrl.isEmpty {
-                    chapters = await ChapterService.shared.fetchChapters(url: chaptersUrl)
-                }
-                if chapters.isEmpty, let desc = item.episodeDescription {
-                    chapters = ChapterService.parseChaptersFromDescription(desc)
-                }
+                // Fetch chapters from URL, inline JSON, or parse from description as fallback
+                chapters = await ChapterService.shared.fetchAllChapters(
+                    chaptersUrl: item.chaptersUrl,
+                    chaptersJSON: item.chaptersJSON,
+                    description: item.episodeDescription
+                )
                 
                 // Fetch transcript
                 if let transcriptUrl = item.transcriptUrl, !transcriptUrl.isEmpty {

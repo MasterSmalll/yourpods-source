@@ -74,6 +74,36 @@ final class SettingsManager {
         }
     }
     
+    // MARK: - Headphone / Remote Command Actions
+    
+    var nextTrackAction: RemoteCommandAction {
+        get {
+            access(keyPath: \.nextTrackAction)
+            guard let raw = defaults.string(forKey: "nextTrackAction"),
+                  let action = RemoteCommandAction(rawValue: raw) else { return .nextEpisode }
+            return action
+        }
+        set {
+            withMutation(keyPath: \.nextTrackAction) {
+                defaults.set(newValue.rawValue, forKey: "nextTrackAction")
+            }
+        }
+    }
+    
+    var previousTrackAction: RemoteCommandAction {
+        get {
+            access(keyPath: \.previousTrackAction)
+            guard let raw = defaults.string(forKey: "previousTrackAction"),
+                  let action = RemoteCommandAction(rawValue: raw) else { return .skipBack }
+            return action
+        }
+        set {
+            withMutation(keyPath: \.previousTrackAction) {
+                defaults.set(newValue.rawValue, forKey: "previousTrackAction")
+            }
+        }
+    }
+    
     // MARK: - Sync Settings
     
     var syncInterval: Int {
@@ -198,14 +228,51 @@ final class SettingsManager {
         }
     }
     
-    var defaultRemoveAfterPlay: Bool {
+    var defaultDownloadCleanupPolicy: DownloadCleanupPolicy {
         get {
-            access(keyPath: \.defaultRemoveAfterPlay)
-            return defaults.bool(forKey: "defaultRemoveAfterPlay")
+            access(keyPath: \.defaultDownloadCleanupPolicy)
+            // Try new key first
+            if let raw = defaults.string(forKey: "defaultDownloadCleanupPolicy"),
+               let policy = DownloadCleanupPolicy(rawValue: raw) {
+                return policy
+            }
+            // Migrate from legacy Bool key
+            if defaults.object(forKey: "defaultRemoveAfterPlay") != nil {
+                return defaults.bool(forKey: "defaultRemoveAfterPlay") ? .oncePlayed : .never
+            }
+            return .oncePlayed
         }
         set {
-            withMutation(keyPath: \.defaultRemoveAfterPlay) {
-                defaults.set(newValue, forKey: "defaultRemoveAfterPlay")
+            withMutation(keyPath: \.defaultDownloadCleanupPolicy) {
+                defaults.set(newValue.rawValue, forKey: "defaultDownloadCleanupPolicy")
+            }
+        }
+    }
+    
+    // MARK: - Queue Management
+    
+    var queueRemovalAction: QueueRemovalAction {
+        get {
+            access(keyPath: \.queueRemovalAction)
+            guard let raw = defaults.string(forKey: "queueRemovalAction"),
+                  let action = QueueRemovalAction(rawValue: raw) else { return .ask }
+            return action
+        }
+        set {
+            withMutation(keyPath: \.queueRemovalAction) {
+                defaults.set(newValue.rawValue, forKey: "queueRemovalAction")
+            }
+        }
+    }
+    
+    var hasChosenQueueRemovalAction: Bool {
+        get {
+            access(keyPath: \.hasChosenQueueRemovalAction)
+            return defaults.bool(forKey: "hasChosenQueueRemovalAction")
+        }
+        set {
+            withMutation(keyPath: \.hasChosenQueueRemovalAction) {
+                defaults.set(newValue, forKey: "hasChosenQueueRemovalAction")
             }
         }
     }
@@ -243,11 +310,15 @@ final class SettingsManager {
     var podcastIndexApiKey: String? {
         get {
             access(keyPath: \.podcastIndexApiKey)
-            return defaults.string(forKey: "podcastIndexApiKey")
+            return KeychainHelper.shared.podcastIndexCredential(forAccount: "apiKey")
         }
         set {
             withMutation(keyPath: \.podcastIndexApiKey) {
-                defaults.set(newValue, forKey: "podcastIndexApiKey")
+                if let value = newValue, !value.isEmpty {
+                    KeychainHelper.shared.savePodcastIndexCredential(value, forAccount: "apiKey")
+                } else {
+                    KeychainHelper.shared.deletePodcastIndexCredential(forAccount: "apiKey")
+                }
             }
         }
     }
@@ -255,11 +326,15 @@ final class SettingsManager {
     var podcastIndexApiSecret: String? {
         get {
             access(keyPath: \.podcastIndexApiSecret)
-            return defaults.string(forKey: "podcastIndexApiSecret")
+            return KeychainHelper.shared.podcastIndexCredential(forAccount: "apiSecret")
         }
         set {
             withMutation(keyPath: \.podcastIndexApiSecret) {
-                defaults.set(newValue, forKey: "podcastIndexApiSecret")
+                if let value = newValue, !value.isEmpty {
+                    KeychainHelper.shared.savePodcastIndexCredential(value, forAccount: "apiSecret")
+                } else {
+                    KeychainHelper.shared.deletePodcastIndexCredential(forAccount: "apiSecret")
+                }
             }
         }
     }
@@ -286,6 +361,21 @@ final class SettingsManager {
         set {
             withMutation(keyPath: \.watchSyncPodcastLimit) {
                 defaults.set(newValue, forKey: "watchSyncPodcastLimit")
+            }
+        }
+    }
+    
+    /// Interval (in seconds) at which the watch sends position updates to the phone
+    /// during on-watch playback. Lower values = more timely sync but higher battery drain.
+    /// Clamped to a minimum of 10 seconds.
+    var watchPositionSyncInterval: Int {
+        get {
+            access(keyPath: \.watchPositionSyncInterval)
+            return defaults.object(forKey: "watchPositionSyncInterval") as? Int ?? 30
+        }
+        set {
+            withMutation(keyPath: \.watchPositionSyncInterval) {
+                defaults.set(max(newValue, 10), forKey: "watchPositionSyncInterval")
             }
         }
     }
