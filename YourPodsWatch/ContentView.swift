@@ -2,12 +2,42 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var sessionManager: WatchSessionManager
+    @EnvironmentObject var audioManager: WatchAudioManager
     
     var body: some View {
         NavigationView {
             List {
+                // MARK: - Now Playing on Watch (local playback)
+                if let currentEpisode = audioManager.currentEpisode {
+                    Section {
+                        NavigationLink(destination: PlayerView(episode: currentEpisode)) {
+                            HStack {
+                                Image(systemName: audioManager.isPlaying ? "waveform" : "pause.fill")
+                                    .foregroundColor(.accentColor)
+                                    .font(.title3)
+                                    .symbolEffect(.variableColor, isActive: audioManager.isPlaying)
+                                
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Now Playing")
+                                        .font(.caption)
+                                        .foregroundColor(.accentColor)
+                                    Text(currentEpisode.title)
+                                        .font(.headline)
+                                        .lineLimit(1)
+                                    Text(currentEpisode.album)
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                        .lineLimit(1)
+                                }
+                            }
+                            .accessibilityElement(children: .combine)
+                            .accessibilityLabel("Now Playing on Watch, \(currentEpisode.title), \(currentEpisode.album), \(audioManager.isPlaying ? "playing" : "paused")")
+                        }
+                    }
+                }
+                
                 // MARK: - Now Playing on iPhone (if active)
-                if sessionManager.remoteTitle != "Not Playing" {
+                if sessionManager.remoteTitle != "Not Playing" && audioManager.currentEpisode == nil {
                     Section {
                         NavigationLink(destination: nowPlayingDestination) {
                             HStack {
@@ -58,6 +88,32 @@ struct ContentView: View {
                                 .font(.headline)
                         }
                     }
+                }
+                
+                // MARK: - Recently Updated
+                Section {
+                    NavigationLink(destination: WatchRecentlyUpdatedView()) {
+                        HStack {
+                            Image(systemName: "sparkles")
+                                .foregroundColor(.orange)
+                                .font(.title3)
+                            Text("Recently Updated")
+                                .font(.headline)
+                            
+                            Spacer()
+                            
+                            if !sessionManager.recentEpisodes.isEmpty {
+                                Text("\(sessionManager.recentEpisodes.count)")
+                                    .font(.caption2.bold())
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.orange)
+                                    .clipShape(Capsule())
+                            }
+                        }
+                    }
+                    .accessibilityLabel("Recently Updated, \(sessionManager.recentEpisodes.count) episodes")
                 }
                 
                 // MARK: - Episode Queue

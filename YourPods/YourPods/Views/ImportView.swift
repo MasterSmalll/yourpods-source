@@ -50,7 +50,7 @@ struct ImportView: View {
             }
             .navigationTitle("Import / Export")
             #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
+            .inlineNavigationBarTitle()
             #endif
             .fileImporter(
                 isPresented: $showFileImporter,

@@ -1,7 +1,6 @@
 import SwiftUI
 
 /// Listening history / stats view.
-/// Port of history/stats screens from Flutter.
 struct HistoryView: View {
     @Environment(PodcastManager.self) private var podcastManager
     @State private var stats: ListeningStats = .empty
@@ -28,7 +27,7 @@ struct HistoryView: View {
                         
                         ForEach(stats.topPodcasts) { podStats in
                             HStack(spacing: 12) {
-                                AsyncImage(url: URL(string: podStats.logoUrl ?? "")) { image in
+                                CachedAsyncImage(url: URL(string: podStats.logoUrl ?? "")) { image in
                                     image.resizable().aspectRatio(contentMode: .fill)
                                 } placeholder: {
                                     RoundedRectangle(cornerRadius: 6).fill(.quaternary)

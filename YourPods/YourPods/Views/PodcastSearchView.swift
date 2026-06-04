@@ -17,6 +17,9 @@ struct PodcastSearchView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 20) {
+                    // Connectivity banner
+                    OfflineBanner()
+                    
                     // Prominent Search Box
                     VStack(alignment: .leading, spacing: 12) {
                         Label("Search", systemImage: "magnifyingglass")
@@ -71,6 +74,8 @@ struct PodcastSearchView: View {
             .navigationTitle("Add Podcasts")
             .sheet(item: $selectedResult) { result in
                 PodcastPreviewSheet(result: result)
+                    .environment(podcastManager)
+                    .environment(playerManager)
             }
         }
     }
@@ -164,7 +169,7 @@ private struct SearchResultRow: View {
     var body: some View {
         Button(action: onTap) {
             HStack(spacing: 12) {
-                AsyncImage(url: URL(string: result.artworkUrl ?? "")) { image in
+                CachedAsyncImage(url: URL(string: result.artworkUrl ?? "")) { image in
                     image.resizable().aspectRatio(contentMode: .fill)
                 } placeholder: {
                     RoundedRectangle(cornerRadius: 8).fill(.quaternary)
@@ -358,7 +363,7 @@ private struct ProtectedFeedCard: View {
                     .background(.ultraThinMaterial)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
                 
-                SecureField("Password", text: $password)
+                RevealableSecureField(label: "Password", text: $password)
                     .textContentType(.password)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
@@ -440,13 +445,18 @@ private struct PodcastPreviewSheet: View {
     @State private var feedDescription: String?
     @State private var feedWebsite: String?
     
+    /// Tracks episode IDs that have been added to the queue, for visual feedback.
+    @State private var queuedEpisodeIds: Set<UUID> = []
+    /// Tracks episode IDs already in the queue (checked on load).
+    @State private var alreadyInQueueIds: Set<UUID> = []
+    
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     // Podcast Header
                     HStack(spacing: 16) {
-                        AsyncImage(url: URL(string: result.artworkUrl ?? "")) { image in
+                        CachedAsyncImage(url: URL(string: result.artworkUrl ?? "")) { image in
                             image.resizable().aspectRatio(contentMode: .fill)
                         } placeholder: {
                             RoundedRectangle(cornerRadius: 12).fill(.quaternary)
@@ -531,7 +541,7 @@ private struct PodcastPreviewSheet: View {
                         .padding(.horizontal)
                     }
                     
-                    // Latest Episodes with Stream Button
+                    // Latest Episodes with Stream + Queue Buttons
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Latest Episodes")
                             .font(.headline)
@@ -550,42 +560,7 @@ private struct PodcastPreviewSheet: View {
                                 .padding(.horizontal)
                         } else {
                             ForEach(previewEpisodes) { episode in
-                                VStack(alignment: .leading, spacing: 4) {
-                                    HStack(alignment: .top) {
-                                        VStack(alignment: .leading, spacing: 3) {
-                                            Text(episode.title)
-                                                .font(.subheadline.bold())
-                                                .lineLimit(2)
-                                            if let pubDate = episode.pubDate {
-                                                Text(pubDate, style: .date)
-                                                    .font(.caption2)
-                                                    .foregroundStyle(.secondary)
-                                            }
-                                        }
-                                        
-                                        Spacer()
-                                        
-                                        // Stream button (play without subscribing)
-                                        if let audioUrl = episode.audioUrl {
-                                            Button {
-                                                streamEpisode(episode, audioUrl: audioUrl)
-                                            } label: {
-                                                Image(systemName: "play.circle.fill")
-                                                    .font(.title2)
-                                                    .foregroundColor(.accentColor)
-                                            }
-                                        }
-                                    }
-                                    
-                                    if let description = episode.description {
-                                        Text(description.strippingHTML())
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                            .lineLimit(3)
-                                    }
-                                }
-                                .padding(.horizontal)
-                                .padding(.vertical, 4)
+                                previewEpisodeRow(episode)
                                 
                                 if episode.id != previewEpisodes.last?.id {
                                     Divider()
@@ -599,7 +574,7 @@ private struct PodcastPreviewSheet: View {
             }
             .navigationTitle("Preview")
             #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
+            .inlineNavigationBarTitle()
             #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -611,6 +586,100 @@ private struct PodcastPreviewSheet: View {
             }
         }
     }
+    
+    // MARK: - Episode Row
+    
+    @ViewBuilder
+    private func previewEpisodeRow(_ episode: PreviewEpisode) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(episode.title)
+                        .font(.subheadline.bold())
+                        .lineLimit(2)
+                    if let pubDate = episode.pubDate {
+                        Text(pubDate, style: .date)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                
+                Spacer()
+                
+                if let audioUrl = episode.audioUrl {
+                    HStack(spacing: 8) {
+                        // Add to Up Next button (with visual feedback)
+                        if queuedEpisodeIds.contains(episode.id) {
+                            // Just added — show confirmation
+                            Label("Added", systemImage: "checkmark.circle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.green)
+                                .transition(.scale.combined(with: .opacity))
+                        } else if alreadyInQueueIds.contains(episode.id) {
+                            // Already in queue from previous add
+                            Text("In Queue")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            // Add to queue button
+                            Button {
+                                addToQueue(episode, audioUrl: audioUrl, playNext: false)
+                            } label: {
+                                Image(systemName: "plus.circle.fill")
+                                    .font(.title3)
+                                    .foregroundColor(.orange)
+                            }
+                            .accessibilityLabel("Add to Up Next")
+                        }
+                        
+                        // Stream button (play without subscribing)
+                        Button {
+                            streamEpisode(episode, audioUrl: audioUrl)
+                        } label: {
+                            Image(systemName: "play.circle.fill")
+                                .font(.title2)
+                                .foregroundColor(.accentColor)
+                        }
+                        .accessibilityLabel("Stream episode")
+                    }
+                }
+            }
+            
+            if let description = episode.description {
+                Text(description.strippingHTML())
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 4)
+        .contextMenu {
+            if let audioUrl = episode.audioUrl {
+                Button {
+                    addToQueue(episode, audioUrl: audioUrl, playNext: true)
+                } label: {
+                    Label("Play Next", systemImage: "text.insert")
+                }
+                
+                Button {
+                    addToQueue(episode, audioUrl: audioUrl, playNext: false)
+                } label: {
+                    Label("Add to Queue", systemImage: "text.append")
+                }
+                
+                Divider()
+                
+                Button {
+                    streamEpisode(episode, audioUrl: audioUrl)
+                } label: {
+                    Label("Stream Now", systemImage: "play.fill")
+                }
+            }
+        }
+    }
+    
+    // MARK: - Actions
     
     private func subscribe() {
         isSubscribing = true
@@ -626,20 +695,52 @@ private struct PodcastPreviewSheet: View {
         }
     }
     
-    private func streamEpisode(_ episode: PreviewEpisode, audioUrl: String) {
-        let tempItem = QueueItem(
-            id: UUID().uuidString,
+    /// Creates a QueueItem from preview episode data — no subscription required.
+    /// Carries all available RSS metadata so the detail sheet can display full episode info
+    /// even when the podcast is not in the user's library.
+    private func makeQueueItem(from episode: PreviewEpisode, audioUrl: String) -> QueueItem {
+        QueueItem(
+            id: episode.id.uuidString,
             title: episode.title,
             podcastTitle: result.title,
             audioUrl: audioUrl,
-            artworkUrl: result.artworkUrl,
-            durationSeconds: nil,
+            artworkUrl: episode.imageUrl ?? result.artworkUrl,
+            durationSeconds: episode.durationSeconds,
             positionSeconds: 0,
             podcastUrl: result.feedUrl,
-            pubDate: episode.pubDate
+            pubDate: episode.pubDate,
+            podcastAuthor: result.author,
+            chaptersUrl: episode.chaptersUrl,
+            transcriptUrl: episode.transcriptUrl,
+            episodeDescription: episode.description
         )
+    }
+    
+    private func streamEpisode(_ episode: PreviewEpisode, audioUrl: String) {
+        let tempItem = makeQueueItem(from: episode, audioUrl: audioUrl)
         Task {
             await playerManager.audioManager.playEpisode(tempItem, preserveCurrent: true)
+        }
+    }
+    
+    private func addToQueue(_ episode: PreviewEpisode, audioUrl: String, playNext: Bool) {
+        let item = makeQueueItem(from: episode, audioUrl: audioUrl)
+        if playNext {
+            playerManager.audioManager.insertNext([item])
+        } else {
+            playerManager.audioManager.appendToQueue([item])
+        }
+        
+        // Visual feedback — show "Added" for 2 seconds
+        withAnimation(.easeInOut(duration: 0.3)) {
+            _ = queuedEpisodeIds.insert(episode.id)
+        }
+        Task {
+            try? await Task.sleep(for: .seconds(2))
+            withAnimation(.easeInOut(duration: 0.3)) {
+                _ = queuedEpisodeIds.remove(episode.id)
+                _ = alreadyInQueueIds.insert(episode.id)
+            }
         }
     }
     
@@ -652,12 +753,16 @@ private struct PodcastPreviewSheet: View {
             feedDescription = podcast.description
             feedWebsite = podcast.website
             let sorted = episodes.sorted { ($0.pubDate ?? .distantPast) > ($1.pubDate ?? .distantPast) }
-            previewEpisodes = sorted.prefix(5).map { ep in
+            previewEpisodes = sorted.prefix(20).map { ep in
                 PreviewEpisode(
                     title: ep.title,
                     pubDate: ep.pubDate,
                     description: ep.description,
-                    audioUrl: ep.audioUrl
+                    audioUrl: ep.audioUrl,
+                    imageUrl: ep.imageUrl,
+                    durationSeconds: ep.durationSeconds,
+                    chaptersUrl: ep.chaptersUrl,
+                    transcriptUrl: ep.transcriptUrl
                 )
             }
         } catch {
@@ -674,4 +779,14 @@ private struct PreviewEpisode: Identifiable {
     let pubDate: Date?
     let description: String?
     let audioUrl: String?
+    /// Episode-specific artwork (e.g., The Daily uses unique photos per episode).
+    /// Falls back to podcast artwork in makeQueueItem if nil.
+    let imageUrl: String?
+    /// Duration in seconds from itunes:duration in the RSS feed.
+    let durationSeconds: Int?
+    /// Podcasting 2.0 chapters URL
+    let chaptersUrl: String?
+    /// Podcasting 2.0 transcript URL
+    let transcriptUrl: String?
 }
+

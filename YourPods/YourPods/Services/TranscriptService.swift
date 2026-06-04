@@ -18,7 +18,7 @@ struct TranscriptItem: Identifiable {
 }
 
 /// Fetches and parses transcripts in SRT, VTT, JSON, plain text, and HTML formats.
-/// Port of transcript_service.dart.
+///
 actor TranscriptService {
     static let shared = TranscriptService()
     private let logger = Logger(subsystem: "com.yourpods", category: "TranscriptService")

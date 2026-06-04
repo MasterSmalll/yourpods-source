@@ -37,7 +37,7 @@ struct SyncConflictSheet: View {
                     if hasRecurringConflicts {
                         Section {
                             Label {
-                                Text("Recurring conflicts are usually caused by another podcast app (e.g. AntennaPod, gPodder) updating the same server. Each app writes its own position, causing repeated mismatches.")
+                                Text("Recurring conflicts are usually caused by other podcast clients (e.g. gPodder) updating the same server. Each client writes its own position, causing repeated mismatches.")
                                     .font(.caption)
                             } icon: {
                                 Image(systemName: "info.circle.fill")
@@ -71,12 +71,13 @@ struct SyncConflictSheet: View {
                 }
             }
             .navigationTitle("Sync Conflicts")
-            .navigationBarTitleDisplayMode(.inline)
+            .inlineNavigationBarTitle()
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Dismiss") { dismiss() }
                 }
                 if hasPositionConflicts {
+                    #if os(iOS)
                     ToolbarItemGroup(placement: .bottomBar) {
                         Button {
                             resolveAll(resolution: .device)
@@ -94,8 +95,29 @@ struct SyncConflictSheet: View {
                         .buttonStyle(.bordered)
                         .tint(.purple)
                     }
+                    #else
+                    ToolbarItemGroup(placement: .automatic) {
+                        Button {
+                            resolveAll(resolution: .device)
+                        } label: {
+                            Label("Use All Device", systemImage: "iphone")
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.blue)
+                        Button {
+                            resolveAll(resolution: .server)
+                        } label: {
+                            Label("Use All Server", systemImage: "cloud")
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.purple)
+                    }
+                    #endif
                 }
             }
+            #if os(macOS)
+            .frame(minWidth: 550, minHeight: 450)
+            #endif
         }
     }
     
@@ -113,6 +135,9 @@ struct SyncConflictSheet: View {
         
         // If the resolved episode is currently playing, seek the player to the chosen position
         playerManager.resolveConflictIfPlaying(conflict, chosenPosition: position)
+        
+        // Also resolve for queue items — updates QueueItem position and pushes to server
+        playerManager.resolveQueueConflict(conflict, chosenPosition: position)
         
         // Remove from pending list
         playerManager.pendingConflicts.removeAll { $0.id == conflict.id }
@@ -136,6 +161,9 @@ struct SyncConflictSheet: View {
             
             // If the resolved episode is currently playing, seek the player to the chosen position
             playerManager.resolveConflictIfPlaying(conflict, chosenPosition: position)
+            
+            // Also resolve for queue items
+            playerManager.resolveQueueConflict(conflict, chosenPosition: position)
         }
         
         playerManager.pendingConflicts.removeAll()
@@ -177,7 +205,7 @@ private struct ConflictRow: View {
             // Episode info with album art
             HStack(alignment: .top, spacing: 12) {
                 // Album art
-                AsyncImage(url: URL(string: conflict.artworkUrl ?? "")) { image in
+                CachedAsyncImage(url: URL(string: conflict.artworkUrl ?? "")) { image in
                     image
                         .resizable()
                         .aspectRatio(contentMode: .fill)
@@ -303,7 +331,7 @@ private struct URLRewriteRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top, spacing: 12) {
-                AsyncImage(url: URL(string: rewrite.artworkUrl ?? "")) { image in
+                CachedAsyncImage(url: URL(string: rewrite.artworkUrl ?? "")) { image in
                     image
                         .resizable()
                         .aspectRatio(contentMode: .fill)

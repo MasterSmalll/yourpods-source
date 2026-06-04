@@ -114,7 +114,7 @@ struct DownloadsView: View {
         }
         .navigationTitle("Downloads")
         #if os(iOS)
-        .navigationBarTitleDisplayMode(.inline)
+        .inlineNavigationBarTitle()
         #endif
         .confirmationDialog("Delete All Downloads?", isPresented: $showDeleteAllConfirm, titleVisibility: .visible) {
             Button("Delete All", role: .destructive) {
@@ -131,7 +131,7 @@ struct DownloadsView: View {
     private func episodeRow(_ episode: Episode) -> some View {
         HStack(spacing: 12) {
             let imageUrl = episode.imageUrl ?? episode.podcast?.logoUrl
-            AsyncImage(url: URL(string: imageUrl ?? "")) { image in
+            CachedAsyncImage(url: URL(string: imageUrl ?? "")) { image in
                 image.resizable().aspectRatio(contentMode: .fill)
             } placeholder: {
                 RoundedRectangle(cornerRadius: 6).fill(.quaternary)
@@ -158,6 +158,20 @@ struct DownloadsView: View {
             }
             
             Spacer()
+        }
+        // MARK: VoiceOver
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel({
+            var label = episode.title
+            if let duration = episode.durationSeconds {
+                label += ", \(EpisodeAccessibility.spokenDuration(duration))"
+            }
+            label += ", \(formatSize(downloadManager.fileSize(for: episode.guid)))"
+            label += ", Downloaded"
+            return label
+        }())
+        .accessibilityAction(named: "Delete Download") {
+            downloadManager.deleteDownload(guid: episode.guid)
         }
     }
     

@@ -1,25 +1,59 @@
 import Foundation
 
-/// Represents a user profile — either a gPodder server account or a local-only profile.
+// ─── YourPods Sync ───────────────────────────────────────────────────────
+// ProfileType distinguishes sync backends. The app supports multiple sync
+// modes: local-only (Vault), legacy gPodder, and YourPods Sync enhanced API.
+// Firebase/Sync features are NOT required — see https://opensource.yourpods.app
+// ─────────────────────────────────────────────────────────────────────────
+
+/// The sync backend for a profile.
+enum ProfileType: String, Codable, CaseIterable {
+    /// Nextcloud gPodder sync or any self-hosted gPodder-compatible server.
+    case gpodder
+    /// gpodder.net — the free, public podcast sync service.
+    case gpodderNet
+    /// YourPods Sync enhanced sync API (queue, settings, playback handoff).
+    case yourpodsPro
+}
+
+/// Represents a user profile — Vault Mode (on-device), gPodder sync, or YourPods Sync.
 struct ServerProfile: Identifiable, Codable, Hashable {
     let id: String   // UUID string
     var name: String
     var baseUrl: String?
     var username: String?
-    /// The device identifier sent to the gPodder server for sync. Defaults to "yourpods-ios".
     var deviceId: String
+    /// The sync backend type. Defaults to `.gpodder` for backward compatibility.
+    var profileType: ProfileType
+    /// The YourPods Sync "Sync Profile Name" — shared across all devices that should
+    /// sync the same settings, groups, and positions. Defaults to `"yourpodssync"`.
+    ///
+    /// Multiple devices with the same `proProfileName` share a common server profile.
+    /// Changing this value forks the profile (a copy of the current settings is saved
+    /// under the new name before switching).
+    var proProfileName: String
     /// Password stored in Keychain, not serialized here.
     var isLocal: Bool { baseUrl == nil }
-    
-    init(id: String = UUID().uuidString, name: String, baseUrl: String? = nil, username: String? = nil, deviceId: String = "yourpods-ios") {
+
+    init(
+        id: String = UUID().uuidString,
+        name: String,
+        baseUrl: String? = nil,
+        username: String? = nil,
+        deviceId: String = "yourpods-ios",
+        profileType: ProfileType = .gpodder,
+        proProfileName: String = "yourpodssync"
+    ) {
         self.id = id
         self.name = name
         self.baseUrl = baseUrl
         self.username = username
         self.deviceId = deviceId
+        self.profileType = profileType
+        self.proProfileName = proProfileName
     }
-    
-    /// Custom decoding to handle existing profiles that don't have a deviceId field yet.
+
+    /// Custom decoding to handle existing profiles saved before `proProfileName` was added.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
@@ -27,6 +61,10 @@ struct ServerProfile: Identifiable, Codable, Hashable {
         baseUrl = try container.decodeIfPresent(String.self, forKey: .baseUrl)
         username = try container.decodeIfPresent(String.self, forKey: .username)
         deviceId = try container.decodeIfPresent(String.self, forKey: .deviceId) ?? "yourpods-ios"
+        // Backward compat: profiles saved before YourPods Pro default to .gpodder
+        profileType = try container.decodeIfPresent(ProfileType.self, forKey: .profileType) ?? .gpodder
+        // Backward compat: profiles saved before proProfileName default to "yourpodssync"
+        proProfileName = try container.decodeIfPresent(String.self, forKey: .proProfileName) ?? "yourpodssync"
     }
 }
 

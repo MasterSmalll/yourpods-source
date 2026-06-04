@@ -61,11 +61,22 @@ final class DownloadManager: NSObject {
     /// Note: Protected-feed downloads use a foreground session (background sessions
     /// don't support custom auth headers). These downloads will pause if the app
     /// is backgrounded and resume on next launch.
-    func downloadEpisode(guid: String, audioUrl: String, authHeaders: [String: String]? = nil) {
+    func downloadEpisode(guid: String, audioUrl: String, authHeaders: [String: String]? = nil, privacyMode: Bool = false) {
         if let existing = activeDownloads[guid], existing.status != .failed {
             return
         }
-        guard let url = URL(string: audioUrl) else { return }
+        
+        // P3: strip tracking/DAI prefixes before downloading
+        var effectiveUrl = audioUrl
+        if privacyMode {
+            let result = TrackingURLStripper.strip(audioUrl)
+            if result.wasModified {
+                logger.info("P3: downloading with stripped URL [\(result.trackersRemoved.joined(separator: ", "))]")
+            }
+            effectiveUrl = result.url
+        }
+        
+        guard let url = URL(string: effectiveUrl) else { return }
         
         let task = DownloadTask(guid: guid, url: audioUrl, progress: 0, status: .downloading)
         activeDownloads[guid] = task
@@ -314,35 +325,41 @@ final class DownloadManager: NSObject {
 // MARK: - URLSessionDownloadDelegate
 
 extension DownloadManager: URLSessionDownloadDelegate {
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-        guard let guid = downloadTask.taskDescription,
-              let originalUrl = downloadTask.originalRequest?.url else { return }
-        handleDownloadCompleted(guid: guid, url: originalUrl, location: location)
-    }
-    
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
-        guard let guid = downloadTask.taskDescription else { return }
-        if totalBytesExpectedToWrite > 0 {
-            let progress = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
-            activeDownloads[guid]?.progress = progress
+    nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        MainActor.assumeIsolated {
+            guard let guid = downloadTask.taskDescription,
+                  let originalUrl = downloadTask.originalRequest?.url else { return }
+            handleDownloadCompleted(guid: guid, url: originalUrl, location: location)
         }
     }
     
-    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        guard let guid = task.taskDescription else { return }
-        if let error {
-            activeDownloads[guid]?.status = .failed
-            logger.error("Background download failed for \(guid): \(error.localizedDescription)")
+    nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+        MainActor.assumeIsolated {
+            guard let guid = downloadTask.taskDescription else { return }
+            if totalBytesExpectedToWrite > 0 {
+                let progress = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
+                activeDownloads[guid]?.progress = progress
+            }
+        }
+    }
+    
+    nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        MainActor.assumeIsolated {
+            guard let guid = task.taskDescription else { return }
+            if let error {
+                activeDownloads[guid]?.status = .failed
+                logger.error("Background download failed for \(guid): \(error.localizedDescription)")
+            }
         }
     }
     
     /// Called when all background session delegate messages have been delivered.
     /// Must call the system completion handler to let iOS know we're done.
-    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
-        logger.info("Background session finished delivering events")
-        DispatchQueue.main.async { [weak self] in
-            self?.backgroundSessionCompletionHandler?()
-            self?.backgroundSessionCompletionHandler = nil
+    nonisolated func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        MainActor.assumeIsolated {
+            logger.info("Background session finished delivering events")
+            backgroundSessionCompletionHandler?()
+            backgroundSessionCompletionHandler = nil
         }
     }
 }

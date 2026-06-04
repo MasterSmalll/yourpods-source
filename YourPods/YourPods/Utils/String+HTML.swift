@@ -1,4 +1,5 @@
 import Foundation
+import os
 #if canImport(UIKit)
 import UIKit
 #elseif canImport(AppKit)
@@ -63,14 +64,25 @@ extension String {
     /// Injects base CSS to match the system font appearance.
     @MainActor
     func htmlAttributedString(baseSize: CGFloat = 15) -> AttributedString {
+        // Build a color hex for the label color
+        let colorHex: String
         #if os(iOS)
-        let labelColor = UIColor.label
+        do {
+            var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+            UIColor.label.getRed(&r, green: &g, blue: &b, alpha: &a)
+            colorHex = String(format: "#%02X%02X%02X", Int(r * 255), Int(g * 255), Int(b * 255))
+        }
         #else
-        let labelColor = NSColor.labelColor
+        // macOS: NSColor.labelColor is a catalog color — must convert to sRGB first
+        if let rgbColor = NSColor.labelColor.usingColorSpace(.sRGB) {
+            colorHex = String(format: "#%02X%02X%02X",
+                              Int(rgbColor.redComponent * 255),
+                              Int(rgbColor.greenComponent * 255),
+                              Int(rgbColor.blueComponent * 255))
+        } else {
+            colorHex = "#FFFFFF" // Fallback for dark mode
+        }
         #endif
-        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-        labelColor.getRed(&r, green: &g, blue: &b, alpha: &a)
-        let colorHex = String(format: "#%02X%02X%02X", Int(r * 255), Int(g * 255), Int(b * 255))
         
         let css = """
         <style>
@@ -85,20 +97,37 @@ extension String {
         """
         let html = css + self
         
-        guard let data = html.data(using: .utf8),
-              let nsAttr = try? NSAttributedString(
+        guard let data = html.data(using: .utf8) else {
+            return AttributedString(self.strippingHTML())
+        }
+        
+        // NSAttributedString(data:options:.html) internally uses WebKit, which can
+        // throw an Objective-C assertion failure (NSException) when called during
+        // certain run loop phases (e.g., FBSSceneSnapshotAction for the app switcher).
+        // Swift's try/catch cannot intercept ObjC exceptions, so we use an ObjC
+        // @try/@catch wrapper to prevent the crash and fall back to strippingHTML().
+        var nsAttr: NSAttributedString?
+        let error = ObjCExceptionCatcher.catch {
+            nsAttr = try? NSAttributedString(
                 data: data,
                 options: [
                     .documentType: NSAttributedString.DocumentType.html,
                     .characterEncoding: String.Encoding.utf8.rawValue
                 ],
                 documentAttributes: nil
-              ),
-              let attributed = try? AttributedString(nsAttr)
-        else {
+            )
+        }
+        
+        if let error {
+            Logger(subsystem: "com.yourpods", category: "html")
+                .warning("HTML rendering threw ObjC exception, falling back to stripped text: \(error.localizedDescription)")
             return AttributedString(self.strippingHTML())
         }
         
-        return attributed
+        guard let nsAttr else {
+            return AttributedString(self.strippingHTML())
+        }
+        
+        return AttributedString(nsAttr)
     }
 }

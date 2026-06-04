@@ -10,7 +10,7 @@ import ActivityKit
 /// Button taps on the Dynamic Island are received via URL scheme (yourpods://action/...)
 /// and forwarded to a callback so PlayerManager can route them to play/pause/skip.
 ///
-/// Port of live_activity_service.dart — identical data model and URL scheme.
+///
 final class LiveActivityService {
     static let shared = LiveActivityService()
     

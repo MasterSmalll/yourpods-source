@@ -3,17 +3,31 @@ options:
   bundleIdPrefix: com.asecretcompany
   deploymentTarget:
     iOS: "17.0"
+    macOS: "14.0"
   xcodeVersion: "15.0"
   createIntermediateGroups: true
   generateEmptyDirectories: false
 
+# ─── YourPods Sync ──────────────────────────────────────────────────────────
+# The Firebase SDK is used EXCLUSIVELY for YourPods Sync account
+# authentication. It is NOT required to build or run the app —
+# Vault Mode (local-only) and gPodder sync work without it.
+#
+# For up-to-date information on the app source and YourPods Sync
+# spec/source, visit: https://opensource.yourpods.app
+# ───────────────────────────────────────────────────────────────────────────
+packages:
+  Firebase:
+    url: https://github.com/firebase/firebase-ios-sdk.git
+    minorVersion: "11.0.0"
+
 settings:
   base:
     SWIFT_VERSION: "5.9"
-    DEVELOPMENT_TEAM: FAKE_TEAM_ID
+    DEVELOPMENT_TEAM: YOUR_TEAM_ID
     CODE_SIGN_STYLE: Automatic
-    MARKETING_VERSION: "2.0.2"
-    CURRENT_PROJECT_VERSION: "32"
+    MARKETING_VERSION: "2.0.4"
+    CURRENT_PROJECT_VERSION: "78"
     ENABLE_USER_SCRIPT_SANDBOXING: false
 
 targets:
@@ -23,21 +37,21 @@ targets:
     sources:
       - path: YourPods/YourPods
         type: group
+      - path: YourPods/GoogleService-Info.plist
+        type: file
+        buildPhase: resources
+      - path: YourPods/PrivacyInfo.xcprivacy
+        type: file
+        buildPhase: resources
+
     preBuildScripts:
       - name: "Sync Version to Info.plist"
         basedOnDependencyAnalysis: false
         script: |
-          VERSION=$(awk '/^ *CURRENT_PROJECT_VERSION:/ {print $2; exit}' "${SRCROOT}/project.yml" | tr -d '"')
-          MARKETING=$(awk '/^ *MARKETING_VERSION:/ {print $2; exit}' "${SRCROOT}/project.yml" | tr -d '"')
-          
-          for plist in "YourPods/Info.plist" "YourPodsWidgets/Info.plist" "YourPodsWatch/Info.plist" "YourPodsComplication/Info.plist"; do
+          for plist in "YourPods/Info.plist" "YourPods/Info-macOS.plist" "YourPodsWidgets/Info.plist" "YourPodsWatch/Info.plist" "YourPodsComplication/Info.plist"; do
             if [ -f "${SRCROOT}/$plist" ]; then
-              if [ ! -z "$VERSION" ]; then
-                /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "${SRCROOT}/$plist"
-              fi
-              if [ ! -z "$MARKETING" ]; then
-                /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $MARKETING" "${SRCROOT}/$plist"
-              fi
+              /usr/libexec/PlistBuddy -c "Set :CFBundleVersion \$(CURRENT_PROJECT_VERSION)" "${SRCROOT}/$plist"
+              /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString \$(MARKETING_VERSION)" "${SRCROOT}/$plist"
             fi
           done
     settings:
@@ -47,9 +61,11 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: false
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: false
         ENABLE_PREVIEWS: true
         SKIP_INSTALL: false
         INSTALL_PATH: "$(LOCAL_APPS_DIR)"
+        SWIFT_OBJC_BRIDGING_HEADER: YourPods/YourPods/Utilities/BridgingHeader.h
     entitlements:
       path: YourPods/YourPods.entitlements
       properties:
@@ -99,6 +115,8 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
     dependencies:
+      - package: Firebase
+        product: FirebaseAuth
       - target: YourPodsWidgets
         embed: true
         codeSign: true
@@ -157,6 +175,68 @@ targets:
         com.apple.security.application-groups:
           - group.com.asecretcompany.yourpods
 
+  YourPodsMac:
+    type: application
+    platform: macOS
+    sources:
+      - path: YourPods/YourPods
+        type: group
+        excludes:
+          - "Services/CarPlayService.swift"
+      - path: YourPods/GoogleService-Info.plist
+        type: file
+        buildPhase: resources
+      - path: YourPods/PrivacyInfo.xcprivacy
+        type: file
+        buildPhase: resources
+    preBuildScripts:
+      - name: "Sync Version to Info.plist"
+        basedOnDependencyAnalysis: false
+        script: |
+          for plist in "YourPods/Info.plist" "YourPods/Info-macOS.plist" "YourPodsWidgets/Info.plist" "YourPodsWatch/Info.plist" "YourPodsComplication/Info.plist"; do
+            if [ -f "${SRCROOT}/$plist" ]; then
+              /usr/libexec/PlistBuddy -c "Set :CFBundleVersion \$(CURRENT_PROJECT_VERSION)" "${SRCROOT}/$plist"
+              /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString \$(MARKETING_VERSION)" "${SRCROOT}/$plist"
+            fi
+          done
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.asecretcompany.yourpods
+        PRODUCT_NAME: YourPods
+        INFOPLIST_FILE: YourPods/Info-macOS.plist
+        ENABLE_PREVIEWS: true
+        SKIP_INSTALL: false
+        INSTALL_PATH: "$(LOCAL_APPS_DIR)"
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        ARCHS: arm64
+        SWIFT_OBJC_BRIDGING_HEADER: YourPods/YourPods/Utilities/BridgingHeader.h
+    entitlements:
+      path: YourPods/YourPodsMac.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.network.client: true
+        com.apple.security.files.user-selected.read-write: true
+        com.apple.security.application-groups:
+          - group.com.asecretcompany.yourpods
+    info:
+      path: YourPods/Info-macOS.plist
+      properties:
+        CFBundleDisplayName: YourPods
+        CFBundleName: YourPods
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        CFBundleURLTypes:
+          - CFBundleURLSchemes:
+              - yourpods
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        NSSiriUsageDescription: "Play podcasts using Siri."
+        ITSAppUsesNonExemptEncryption: false
+        LSApplicationCategoryType: public.app-category.music
+        NSPrincipalClass: $(PRODUCT_MODULE_NAME).YourPodsApplication
+    dependencies:
+      - package: Firebase
+        product: FirebaseAuth
 
   YourPodsWatch:
     type: application
@@ -262,3 +342,17 @@ schemes:
     run:
       config: Debug
       executable: YourPodsWatch
+
+  YourPodsMac:
+    build:
+      targets:
+        YourPodsMac: all
+    run:
+      config: Debug
+      executable: YourPodsMac
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release

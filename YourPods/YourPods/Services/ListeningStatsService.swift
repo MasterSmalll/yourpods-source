@@ -12,7 +12,7 @@ struct PodcastStats: Codable, Identifiable {
 }
 
 /// Aggregate listening statistics computed from episode actions.
-/// Port of listening_stats_service.dart.
+///
 struct ListeningStats: Codable {
     let totalListeningSeconds: Int
     let episodesCompleted: Int
@@ -79,6 +79,15 @@ struct ListeningStatsService {
             let podUrl = first.podcast
             
             let podcast = subscriptions.first { $0.url == podUrl }
+            
+            // Skip actions from podcasts the user is not subscribed to.
+            // gPodder sync stores actions for ALL podcasts (including those
+            // unsubscribed or from other devices). Without this guard, they
+            // appear as "Unknown Podcast" in the stats view.
+            if podcast == nil && !subscriptions.isEmpty {
+                continue
+            }
+            
             let title = podcast?.title ?? "Unknown Podcast"
             let logo = podcast?.logoUrl
             

@@ -39,4 +39,14 @@ enum URLSanitizer {
     // without TLS. We default bare URLs to HTTPS via sanitize(), and the UI shows a
     // warning when HTTP is used, but we do NOT reject HTTP connections.
     // Do NOT add HTTPS enforcement or make GPodderClient.init throwing for this reason.
+    
+    /// Returns the HTTPS equivalent of an HTTP URL, or `nil` if the URL
+    /// is already HTTPS or has no explicit HTTP scheme.
+    /// Used by the UI to offer a one-tap "Switch to HTTPS" suggestion.
+    static func suggestedHTTPSURL(_ url: String) -> String? {
+        let lower = url.lowercased()
+        guard lower.hasPrefix("http://") else { return nil }
+        // Replace the scheme prefix (case-insensitive) with https://
+        return "https://" + url.dropFirst("http://".count)
+    }
 }

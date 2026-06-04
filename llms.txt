@@ -1,6 +1,6 @@
 # YourPods
 
-> YourPods is a gPodder-compatible, privacy-first, self-hosted podcast player for iOS, macOS, watchOS, and Apple Watch — built natively in Swift and SwiftUI. Sync your subscriptions and listening progress across all your devices using your own Nextcloud server. Version 2.0.
+> YourPods is a gPodder-compatible, privacy-first, self-hosted podcast player for iOS, macOS, watchOS, and Apple Watch — built natively in Swift and SwiftUI. Sync your subscriptions and listening progress across all your devices using your own Nextcloud server. Version 2.0.4.
 
 ## Project Info
 
@@ -12,14 +12,19 @@
 
 - **Native Apple App**: Built in Swift 5.9 and SwiftUI, targeting iOS 17+, macOS 14+, watchOS 10+, and with native CarPlay integrations.
 - **Privacy**: No tracking, analytics, or ads. Fully self-hosted sync via Nextcloud/gPodder.
-- **Multi-Profile**: Switch between different servers or user accounts instantly. Local-only accounts supported.
+- **P3 (Privacy Preserving Playback)**: Blocks 30+ tracking and ad-insertion domains from episode URLs before playback. Enable globally or per-podcast. Green shield icon on Now Playing when active.
+- **New Episode Notifications**: Local push notifications when background refresh discovers new episodes. Per-podcast controls. 100% local — no push servers.
+- **Hidden Episodes**: Hide episodes to declutter feeds without affecting listening stats. Batch-hide old episodes. Hidden state syncs across devices.
+- **Podcast Groups**: Organize subscriptions into named folders. Bulk-move shows. Browse groups in CarPlay.
+- **Multi-Profile**: Switch between different servers or user accounts instantly. Local-only accounts (Vault Mode) supported.
 - **Sync Conflict Management**: Smart conflict resolution with options to keep local state or overwrite from server.
 - **Last Synced Timestamp**: Displays the last sync time in settings for transparency.
 - **Cross-Device Queue Sync**: Queue syncs across devices via your gPodder server automatically.
-- **OPML Import & Export**: Migrate subscriptions to or from other apps, or back up your library.
+- **OPML Import & Export**: Migrate subscriptions to or from other apps, or back up your library. Enriched export preserves Podcast Groups and Listening Profiles.
 - **Password-Protected Feeds**: Subscribe to private RSS feeds (Patreon, premium podcasts). Credentials stored securely on-device.
-- **Local Accounts**: Use YourPods without a sync server for fully offline, on-device podcast management.
-- **Flutter Migration**: Automatic one-shot migration of subscriptions, queue, profiles, settings, and playback positions from the Flutter-based v1.x.
+- **Local Accounts (Vault Mode)**: Use YourPods without a sync server for fully offline, on-device podcast management.
+- **Custom gpodder.net Server Address**: Point at your own gpodder.net-compatible instance for self-hosted sync.
+
 
 ## Player & Audio
 
@@ -31,6 +36,9 @@
 - **Skip Intro/Outro**: Configurable per-second precision (0–120s).
 - **Mini Player**: Persistent playback controls across the app (NowPlayingBar).
 - **Listening Stats**: Local listening history tracking.
+- **Episode Activity**: Chronological played-episode list with progress, timestamp, and device. Sort by Recent or By Podcast.
+- **Clear Queue**: One-tap clear from Up Next overflow menu with keep-current or stop-all options.
+- **App Icon Badge**: Show unplayed episode count on the app icon.
 - **Trim Silence**: Skip silent passages during playback.
 
 ## Discovery
@@ -43,9 +51,10 @@
 ## Platform Integrations
 
 - **CarPlay**: Full queue management, Recently Updated episodes tab, Now Playing with chapter navigation, playback speed and trim-silence controls. Artwork with placeholder loading.
-- **Apple Watch**: Standalone playback, offline episode transfer, configurable podcast sync limit, and complications showing playback status.
+- **Apple Watch**: Standalone playback, offline episode transfer, configurable podcast sync limit, complications showing playback status, true background audio with auto-advance, Recently Updated home screen, and watch-specific Wi-Fi-only download toggle.
 - **Dynamic Island**: Real-time playback status via Live Activities on supported iPhones.
 - **Siri & App Intents**: 10 native voice commands — play, pause, stop, resume, skip forward/backward, next episode, play latest, play specific podcast, set playback speed. All available as Shortcuts.
+- **VoiceOver**: Comprehensive accessibility support — custom rotor actions, adjustable seek bars, descriptive labels on every control.
 - **Widgets & Complications**: Lock screen and watch face widgets showing current playback.
 
 ## Technical
@@ -64,7 +73,7 @@
 - `YourPods/YourPods/Audio/` — Audio playback engine (AudioManager: AVAudioEngine-based)
 - `YourPods/YourPods/Models/` — SwiftData models (Podcast, Episode, ServerProfile, Chapter, EpisodeAction, PodcastSettings)
 - `YourPods/YourPods/Networking/` — gPodder API client (GPodderClient), RSS feed parser (RSSService), URL resolver
-- `YourPods/YourPods/Services/` — CarPlay, Siri (AppIntents), Live Activities, Chapters, Transcripts, Watch connectivity, Downloads, Background Refresh, Listening Stats, OPML import/export, Flutter data migration
+- `YourPods/YourPods/Services/` — CarPlay, Siri (AppIntents), Live Activities, Chapters, Transcripts, Watch connectivity, Downloads, Background Refresh, Listening Stats, OPML import/export
 - `YourPods/YourPods/State/` — Observable state managers: PlayerManager, PodcastManager, SettingsManager, NavigationState, SleepTimerManager
 - `YourPods/YourPods/Views/` — SwiftUI views: Home, Library, Player, Queue, Settings, Search, History, Profile Selection, Downloads, Import, Episode Detail, Podcast Detail, and reusable Components (NowPlayingBar, ChapterListSheet, TranscriptListSheet, SleepTimerSheet, PodcastSettingsSheet)
 - `YourPods/YourPods/Utils/` — Utility extensions (String+HTML)

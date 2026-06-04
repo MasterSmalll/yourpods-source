@@ -3,7 +3,7 @@ import SwiftData
 
 @Model
 final class Episode {
-    @Attribute(.unique) var guid: String
+    var guid: String
     var title: String
     var episodeDescription: String?
     var audioUrl: String?
@@ -40,6 +40,11 @@ final class Episode {
     /// Whether the user has interacted with this episode (played or queued).
     /// Used to remove episodes from "Recently Updated" immediately on action.
     var isInteracted: Bool = false
+    
+    /// Whether this episode is no longer present in the podcast's RSS feed.
+    /// Stale episodes are excluded from episode counts and the default episode list,
+    /// but retained if the user has downloads or playback progress.
+    var isStale: Bool = false
     
     /// Relationship to parent podcast
     var podcast: Podcast?

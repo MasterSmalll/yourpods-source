@@ -41,13 +41,16 @@ struct TranscriptListSheet: View {
             }
             .navigationTitle("Transcript")
             #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
+            .inlineNavigationBarTitle()
             #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { dismiss() }
                 }
             }
+            #if os(macOS)
+            .frame(minWidth: 450, minHeight: 400)
+            #endif
         }
     }
     

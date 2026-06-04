@@ -18,9 +18,9 @@
 ---
 
 > [!IMPORTANT]
-> **YourPods 2.0.2 — Complete Swift Rewrite**
+> **YourPods 2.0.4 — Latest Release**
 >
-> YourPods has been completely rewritten in native **Swift and SwiftUI** for version 2.0. The original Flutter/Dart codebase (v1.3.1 and earlier) has been archived on the [`flutter-v1`](https://github.com/asecretcompany/yourpods-source/tree/flutter-v1) branch and is no longer maintained.
+> YourPods is built natively in **Swift and SwiftUI**.
 
 YourPods is a gPodder-compatible [Nextcloud-gpodder](https://github.com/thrillfall/nextcloud-gpodder) or [Nextcloud-Nextpod](https://github.com/pbek/nextcloud-nextpod), privacy-first, and self-hosted podcast player. Sync your subscriptions and listening progress across all your devices using your own Nextcloud server, manage multiple profiles, and keep your data 100% yours. Check out [Repod](https://git.crystalyx.net/Xefir/repod/) for podcast listening via your Nextcloud install.
 
@@ -35,7 +35,7 @@ YourPods is a gPodder-compatible [Nextcloud-gpodder](https://github.com/thrillfa
 
 ## Installation
 
-The current codebase corresponds to the 2.0.2 release in the [Apple App Store](https://apps.apple.com/us/app/yourpods/id6757721236).
+The current codebase corresponds to the 2.0.4 release in the [Apple App Store](https://apps.apple.com/us/app/yourpods/id6757721236).
 
 - **App Store**: Get automatic updates and hassle-free installation. Purchasing the App Store version directly funds YourPods development! 🙏
 - **TestFlight**: Join the [TestFlight Beta](https://testflight.apple.com/join/jF18YknW) to test new features for free.
@@ -47,12 +47,61 @@ For the most up-to-date features, check our [website](https://yourpods.app).
 
 YourPods seamlessly integrates with gPodder-compatible servers (such as Nextcloud & NextPod) to keep your library in sync without relying on third-party clouds.
 
+### What's New in 2.0.4
+
+#### 🛡️ P3 Privacy Mode
+- **Privacy Preserving Playback** — blocks 30+ tracking and ad-insertion domains from episode URLs before playback. Enable globally or per-podcast. Green shield icon on Now Playing when active.
+
+#### 🔔 New Episode Notifications
+- **Local push notifications** when background refresh discovers new episodes. Per-podcast controls. Stale episode delivery ensures you never miss an update. 100% local — no push servers.
+
+#### 🙈 Hidden Episodes & Clear Queue
+- **Hidden Episodes** — declutter your feed without affecting listening stats. Batch-hide old episodes. Hidden state syncs across devices.
+- **Clear Queue** — one-tap clear from the Up Next overflow menu.
+
+#### ⚡ Performance & Reliability
+- **6× faster feed refresh** with concurrent fetching and real-time progress display.
+- **95% reduction in disk I/O** during playback — progress, action map, and queue persistence all throttled and batched.
+- **Incremental sync** — only fetches changes since your last sync, not the entire history.
+- **Background sync fixed** — the toggle, interval, and re-scheduling all work reliably now.
+- Eliminated audio engine data races with compile-time MainActor isolation.
+- 50+ additional sync, stability, and crash fixes.
+
+#### 🆕 Also New in 2.0.4
+- **Episode Activity** — chronological played-episode list with progress, timestamp, and device.
+- **App Icon Badge** — unplayed episode count on the app icon.
+- **Custom gpodder.net server address** — point at your own gpodder.net-compatible instance.
+- **Download from any context menu** — long-press episodes anywhere to download.
+- **watchOS: Recently Updated** — 10 most recent unplayed episodes on your wrist.
+
+---
+
+### What's New in 2.0.3
+
+#### 📁 Podcast Groups
+- **Named folders** — organize your library into groups like "Tech" or "Comedy". Bulk-move shows and browse groups in CarPlay.
+
+#### ♿ VoiceOver Excellence
+- Comprehensive VoiceOver support across the entire app — custom rotor actions, adjustable seek bars, and descriptive labels on every control.
+
+#### ⌚ Watch Background Audio
+- True background playback on Apple Watch — navigate freely while listening, with automatic episode auto-advance on your wrist.
+
+#### 🆕 Also New in 2.0.3
+- **Enriched OPML export** preserves custom groups and Listening Profiles.
+- **Smarter chapters** — expanded timestamp format recognition from show notes.
+- **Redesigned Now Playing card** with larger artwork and clearer chapter display.
+- **Download network setting** — Wi-Fi Only, Cellular Only, or both.
+- **Vault to Sync upgrade** — migrate a local Vault Mode library to a gPodder server without losing subscriptions.
+- **Streamlined onboarding** — new welcome flow for Vault Mode and gPodder Sync.
+
+---
+
 ### What's New in 2.0
 
 #### 🚀 Complete Native Rewrite
-- **100% Swift and SwiftUI** — fully native app replacing the Flutter-based v1.x. Faster launch times, smoother animations, and reduced memory usage.
-- **SwiftData** for local storage — replacing Hive/SQLite for a modern, Apple-native persistence layer.
-- **Automatic Flutter migration** — existing users seamlessly migrate their subscriptions, queue, playback positions, profiles, and settings on first launch. No data loss.
+- **100% Swift and SwiftUI** — fully native app with fast launch times, smooth animations, and low memory usage.
+- **SwiftData** for local storage — Modern, Apple-native persistence layer.
 
 ---
 
@@ -104,6 +153,10 @@ YourPods seamlessly integrates with gPodder-compatible servers (such as Nextclou
 - **Local Accounts** — no server required
 - **Live Transcripts** — interactive, searchable, auto-scrolling
 - **Smart Chapters** — RSS and ID3 tag support
+- **P3 Privacy Mode** — tracker stripping before playback
+- **Podcast Groups** — named folders with CarPlay browsing
+- **Hidden Episodes** — declutter feeds without affecting stats
+- **New Episode Notifications** — local push alerts
 - **Dynamic Island & Live Activities** on supported iPhones
 - **Listening Stats** dashboard
 - **Background Refresh** with configurable intervals
@@ -138,16 +191,14 @@ YourPods seamlessly integrates with gPodder-compatible servers (such as Nextclou
 - `YourPods/YourPods/Audio/` — Audio playback engine (AVAudioEngine-based)
 - `YourPods/YourPods/Models/` — SwiftData models (Podcast, Episode, ServerProfile, etc.)
 - `YourPods/YourPods/Networking/` — gPodder API client, RSS parser, URL resolver
-- `YourPods/YourPods/Services/` — CarPlay, Siri, Live Activities, Chapters, Transcripts, Watch, Downloads, Background Refresh, Listening Stats, OPML, Flutter migration
+- `YourPods/YourPods/Services/` — CarPlay, Siri, Live Activities, Chapters, Transcripts, Watch, Downloads, Background Refresh, Listening Stats, OPML
 - `YourPods/YourPods/State/` — State managers (Player, Podcast, Settings, Navigation, Sleep Timer)
 - `YourPods/YourPods/Views/` — SwiftUI views and reusable components
 - `YourPodsWatch/` — watchOS app with standalone playback
 - `YourPodsWidgets/` — Live Activities and widget extensions
 - `YourPodsComplication/` — watchOS complications
 
-## Legacy Flutter Codebase
 
-The original Flutter/Dart codebase (v1.0–v1.3.1) is preserved on the [`flutter-v1`](https://github.com/asecretcompany/yourpods-source/tree/flutter-v1) branch for reference. It is no longer maintained.
 
 ## License
 

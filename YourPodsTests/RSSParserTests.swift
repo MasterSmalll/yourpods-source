@@ -167,6 +167,87 @@ final class RSSParserTests: XCTestCase {
         XCTAssertEqual(episodes[0].transcriptUrl, "https://example.com/transcript.txt",
                        "Should parse text/plain transcript URL from RSS feed")
     }
+    
+    // MARK: - Acast podaccess:item namespace isolation
+    
+    /// Regression: Acast feeds wrap premium/paywalled episodes in <podaccess:item> instead of
+    /// <item>. Because XMLParser resolves qualified names to local names ("item") when
+    /// shouldProcessNamespaces=true, the parser was treating <podaccess:item> as a valid RSS
+    /// episode — producing spurious no-audio entries that show in the UI but cannot play.
+    /// Fix: Only enter item-parsing mode for <item> elements in the null namespace (core RSS 2.0).
+    func test_acast_podaccessItem_notParsedAsEpisode() throws {
+        let xml = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0"
+             xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"
+             xmlns:podaccess="https://access.acast.com/schema/1.0/"
+             xmlns:acast="https://schema.acast.com/1.0/">
+          <channel>
+            <title>The Ancients</title>
+            <podaccess:item locked="true" tier="abc123" ads="false" spons="false" premium="true">
+              <itunes:title>After Ancients: Ben Kane (Premium)</itunes:title>
+              <pubDate>Fri, 13 Mar 2026 03:00:00 GMT</pubDate>
+              <itunes:duration>19:40</itunes:duration>
+              <guid isPermaLink="false">69b2c1075668adfee6162e06</guid>
+              <itunes:explicit>false</itunes:explicit>
+              <itunes:episodeType>full</itunes:episodeType>
+              <itunes:episode>642</itunes:episode>
+            </podaccess:item>
+          </channel>
+        </rss>
+        """
+        // Guard: podaccess:item must NOT produce any parsed episodes.
+        // Before the fix, this produced 1 spurious episode with no audioUrl
+        // and a UUID-based guid — visible in the UI but unplayable.
+        let (_, episodes) = try RSSService.parseFeedData(Data(xml.utf8))
+        XCTAssertEqual(episodes.count, 0,
+                       "podaccess:item (Acast paywall wrapper) must not be parsed as an RSS episode")
+    }
+    
+    /// Verifies that real <item> siblings are still parsed correctly when <podaccess:item>
+    /// elements are also present in the same feed (the normal Acast mixed feed case).
+    func test_acast_regularItemsStillParsed_whenPodaccessItemsPresent() throws {
+        let xml = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0"
+             xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"
+             xmlns:podaccess="https://access.acast.com/schema/1.0/">
+          <channel>
+            <title>The Ancients</title>
+            <item>
+              <title>The Delian League: Ancient NATO?</title>
+              <guid isPermaLink="false">free-episode-guid</guid>
+              <enclosure url="https://sphinx.acast.com/p/acast/s/the-ancients/e/abc/media.mp3?tk=TOKEN&amp;sig=SIG" length="95207029" type="audio/mpeg"/>
+              <itunes:duration>1:05:58</itunes:duration>
+              <itunes:episodeType>full</itunes:episodeType>
+              <itunes:episode>646</itunes:episode>
+            </item>
+            <podaccess:item locked="true" tier="abc123" ads="false" spons="false" premium="true">
+              <itunes:title>After Ancients: Ben Kane (Premium)</itunes:title>
+              <pubDate>Fri, 13 Mar 2026 03:00:00 GMT</pubDate>
+              <itunes:duration>19:40</itunes:duration>
+              <guid isPermaLink="false">premium-episode-guid</guid>
+              <itunes:episodeType>full</itunes:episodeType>
+              <itunes:episode>642</itunes:episode>
+            </podaccess:item>
+          </channel>
+        </rss>
+        """
+        let (podcast, episodes) = try RSSService.parseFeedData(Data(xml.utf8))
+        
+        XCTAssertEqual(podcast.title, "The Ancients", "Podcast title should parse correctly")
+        // Only the real <item> should appear — the podaccess:item must be silently ignored
+        XCTAssertEqual(episodes.count, 1,
+                       "Only real <item> elements should be parsed; podaccess:item must be ignored")
+        XCTAssertEqual(episodes[0].guid, "free-episode-guid",
+                       "The parsed episode should be the actual free RSS item, not the podaccess:item")
+        XCTAssertEqual(episodes[0].title, "The Delian League: Ancient NATO?")
+        XCTAssertEqual(episodes[0].audioUrl,
+                       "https://sphinx.acast.com/p/acast/s/the-ancients/e/abc/media.mp3?tk=TOKEN&sig=SIG",
+                       "Acast enclosure URL with &amp; should decode correctly")
+        XCTAssertEqual(episodes[0].durationSeconds, 3958,
+                       "Duration '1:05:58' should parse to 3958 seconds")
+    }
 }
 
 // MARK: - HTML Stripping Tests
@@ -712,5 +793,96 @@ final class DescriptionChapterParserTests: XCTestCase {
     func test_parseInlineChaptersJSON_returnsEmpty_forInvalidJSON() {
         XCTAssertTrue(ChapterService.parseInlineChaptersJSON("not json").isEmpty)
         XCTAssertTrue(ChapterService.parseInlineChaptersJSON("").isEmpty)
+    }
+    
+    // MARK: - EDGE: Podlove chapter with empty start attribute (crash regression)
+    
+    func test_EDGE_podloveChapter_emptyStartAttribute_doesNotCrash() throws {
+        // Regression: parsePodloveTimestamp crashes with "Index out of range"
+        // when start="" is provided in a psc:chapter element
+        let xml = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0"
+             xmlns:psc="http://podlove.org/simple-chapters">
+          <channel>
+            <title>Test Podcast</title>
+            <item>
+              <title>Episode with bad chapter</title>
+              <guid>ep-bad-chapter</guid>
+              <enclosure url="https://example.com/ep.mp3" type="audio/mpeg" />
+              <psc:chapters>
+                <psc:chapter start="" title="Empty Start" />
+                <psc:chapter start="00:05:00" title="Valid Chapter" />
+              </psc:chapters>
+            </item>
+          </channel>
+        </rss>
+        """
+        let data = Data(xml.utf8)
+        // This must not crash — previously caused "Index out of range" in parsePodloveTimestamp
+        let (_, episodes) = try RSSService.parseFeedData(data)
+        
+        XCTAssertEqual(episodes.count, 1)
+        // The empty-start chapter should either be skipped or default to 0.0
+        let chapters = episodes[0].inlineChapters
+        XCTAssertNotNil(chapters)
+        // At minimum the valid chapter must be present
+        XCTAssertTrue(chapters!.contains(where: { $0.title == "Valid Chapter" && $0.startTime == 300.0 }))
+    }
+    
+    func test_EDGE_podloveChapter_whitespaceStartAttribute_doesNotCrash() throws {
+        // Edge case: start attribute is whitespace-only
+        let xml = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0"
+             xmlns:psc="http://podlove.org/simple-chapters">
+          <channel>
+            <title>Test Podcast</title>
+            <item>
+              <title>Episode</title>
+              <guid>ep1</guid>
+              <enclosure url="https://example.com/ep.mp3" type="audio/mpeg" />
+              <psc:chapters>
+                <psc:chapter start="   " title="Whitespace Start" />
+                <psc:chapter start="00:01:00" title="Good Chapter" />
+              </psc:chapters>
+            </item>
+          </channel>
+        </rss>
+        """
+        let data = Data(xml.utf8)
+        let (_, episodes) = try RSSService.parseFeedData(data)
+        
+        XCTAssertEqual(episodes.count, 1)
+        let chapters = episodes[0].inlineChapters
+        XCTAssertNotNil(chapters)
+        XCTAssertTrue(chapters!.contains(where: { $0.title == "Good Chapter" && $0.startTime == 60.0 }))
+    }
+    
+    func test_EDGE_podloveChapter_allMalformedStartAttributes_doesNotCrash() throws {
+        // Edge case: all chapters have malformed/empty start attributes
+        let xml = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0"
+             xmlns:psc="http://podlove.org/simple-chapters">
+          <channel>
+            <title>Test Podcast</title>
+            <item>
+              <title>Episode</title>
+              <guid>ep1</guid>
+              <enclosure url="https://example.com/ep.mp3" type="audio/mpeg" />
+              <psc:chapters>
+                <psc:chapter start="" title="Bad 1" />
+                <psc:chapter start="   " title="Bad 2" />
+                <psc:chapter start="not-a-time" title="Bad 3" />
+              </psc:chapters>
+            </item>
+          </channel>
+        </rss>
+        """
+        let data = Data(xml.utf8)
+        // Must not crash regardless of how malformed the timestamps are
+        let (_, episodes) = try RSSService.parseFeedData(data)
+        XCTAssertEqual(episodes.count, 1)
     }
 }

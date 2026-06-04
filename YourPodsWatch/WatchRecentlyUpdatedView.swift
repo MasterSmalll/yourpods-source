@@ -1,0 +1,138 @@
+import SwiftUI
+
+/// Shows the 10 most recently published unplayed episodes across all subscriptions.
+/// Mirrors the iOS HomeView's "Recently Updated" section but optimized for the
+/// smaller watch screen — simple list layout, limited to 10 items.
+struct WatchRecentlyUpdatedView: View {
+    @EnvironmentObject var sessionManager: WatchSessionManager
+    @EnvironmentObject var audioManager: WatchAudioManager
+    
+    var body: some View {
+        List {
+            if sessionManager.recentEpisodes.isEmpty {
+                VStack(alignment: .center, spacing: 8) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.largeTitle)
+                        .foregroundColor(.green)
+                    Text("All caught up!")
+                        .font(.headline)
+                    Text("No new episodes from your subscriptions.")
+                        .font(.caption2)
+                        .foregroundColor(.gray)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 20)
+            } else {
+                ForEach(sessionManager.recentEpisodes) { episode in
+                    NavigationLink(destination: PlayerView(episode: episode)) {
+                        HStack(spacing: 10) {
+                            // Podcast artwork (prefer podcast art for cross-podcast context)
+                            AsyncImage(url: URL(string: episode.podcastArtUri ?? episode.artUri ?? "")) { phase in
+                                switch phase {
+                                case .success(let image):
+                                    image
+                                        .resizable()
+                                        .aspectRatio(contentMode: .fill)
+                                        .frame(width: 36, height: 36)
+                                        .cornerRadius(6)
+                                case .failure(_), .empty:
+                                    ZStack {
+                                        RoundedRectangle(cornerRadius: 6)
+                                            .fill(Color.gray.opacity(0.3))
+                                        Image(systemName: "waveform")
+                                            .foregroundColor(.gray)
+                                            .font(.caption2)
+                                    }
+                                    .frame(width: 36, height: 36)
+                                @unknown default:
+                                    EmptyView()
+                                }
+                            }
+                            
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(episode.title)
+                                    .font(.headline)
+                                    .lineLimit(2)
+                                
+                                HStack(spacing: 4) {
+                                    if let podcastTitle = episode.podcastTitle {
+                                        Text(podcastTitle)
+                                            .font(.caption2)
+                                            .foregroundColor(.gray)
+                                            .lineLimit(1)
+                                    }
+                                    
+                                    if let pubDate = episode.pubDate {
+                                        Text("·")
+                                            .font(.caption2)
+                                            .foregroundColor(.gray)
+                                        Text(relativeDate(pubDate))
+                                            .font(.caption2)
+                                            .foregroundColor(.gray)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .swipeActions(edge: .trailing) {
+                        Button {
+                            // Play this episode on the watch
+                            audioManager.play(episode: episode)
+                        } label: {
+                            Label("Play", systemImage: "play.fill")
+                        }
+                        .tint(.green)
+                    }
+                    // MARK: VoiceOver
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(accessibilityLabel(for: episode))
+                    .accessibilityAction(named: "Play") {
+                        audioManager.play(episode: episode)
+                    }
+                }
+            }
+        }
+        .navigationTitle("Recent")
+        .onAppear {
+            sessionManager.requestRecentEpisodes()
+        }
+    }
+    
+    // MARK: - Helpers
+    
+    /// Format a date as a short relative string (e.g. "2h ago", "3d ago").
+    private func relativeDate(_ date: Date) -> String {
+        let interval = Date().timeIntervalSince(date)
+        
+        if interval < 3600 {
+            let mins = max(1, Int(interval / 60))
+            return "\(mins)m ago"
+        } else if interval < 86400 {
+            let hours = Int(interval / 3600)
+            return "\(hours)h ago"
+        } else if interval < 604800 {
+            let days = Int(interval / 86400)
+            return "\(days)d ago"
+        } else {
+            let weeks = Int(interval / 604800)
+            return "\(weeks)w ago"
+        }
+    }
+    
+    /// Build a VoiceOver label for an episode row.
+    private func accessibilityLabel(for episode: WatchEpisode) -> String {
+        var label = episode.title
+        if let podcastTitle = episode.podcastTitle {
+            label += ", from \(podcastTitle)"
+        }
+        if let pubDate = episode.pubDate {
+            label += ", \(relativeDate(pubDate))"
+        }
+        if episode.duration > 0 {
+            let mins = episode.duration / 60
+            label += ", \(mins) minutes"
+        }
+        return label
+    }
+}

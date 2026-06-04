@@ -8,25 +8,32 @@ struct NowPlayingBar: View {
     @Environment(PodcastManager.self) private var podcastManager
     @Environment(SettingsManager.self) private var settings
     @Environment(SleepTimerManager.self) private var sleepTimer
+    @Environment(DownloadManager.self) private var downloadManager
+    @Environment(NavigationState.self) private var navigationState
+    @Environment(\.modelContext) private var modelContext
     @State private var showFullPlayer = false
-    @State private var selectedEpisodeForDetail: Episode?
+    @State private var episodeSheetItem: EpisodeSheetItem?
     @State private var showSpeedPicker = false
     @State private var showSleepTimer = false
     @State private var showChapters = false
+    @State private var showTranscript = false
 
     @State private var isDraggingSeekBar = false
     @State private var dragProgress: Double = 0
     @State private var chapters: [Chapter] = []
+    @State private var transcript: Transcript?
     
     /// Resolve the current Episode model from the QueueItem GUID.
+    /// Searches subscriptions first, then falls back to creating a transient
+    /// Episode from the QueueItem's data so the full detail sheet can be shown
+    /// even for episodes added from search without subscribing to the podcast.
     private var currentEpisode: Episode? {
         guard let guid = playerManager.currentEpisodeGuid else { return nil }
-        for podcast in podcastManager.subscriptions {
-            if let ep = podcast.episodes.first(where: { $0.guid == guid }) {
-                return ep
-            }
-        }
-        return nil
+        return EpisodeDetailSheetHelper.resolveEpisodeForDisplay(
+            guid: guid,
+            subscriptions: podcastManager.subscriptions,
+            fallbackQueueItem: playerManager.audioManager.currentItem
+        )
     }
     
     /// Current chapter based on playback position.
@@ -41,9 +48,10 @@ struct NowPlayingBar: View {
             VStack(spacing: 0) {
                 // Interactive seek bar
                 GeometryReader { geo in
-                    let currentProgress = playerManager.currentDuration > 0
-                        ? playerManager.currentPosition / playerManager.currentDuration
-                        : 0
+                    let currentProgress = PlayerManager.playbackProgress(
+                        position: playerManager.currentPosition,
+                        duration: playerManager.currentDuration
+                    )
                     let displayProgress = isDraggingSeekBar ? dragProgress : currentProgress
                     
                     ZStack(alignment: .leading) {
@@ -72,6 +80,24 @@ struct NowPlayingBar: View {
                 }
                 .frame(height: isDraggingSeekBar ? 6 : 3)
                 .animation(.easeInOut(duration: 0.15), value: isDraggingSeekBar)
+                .accessibilityElement()
+                .accessibilityLabel("Playback progress")
+                .accessibilityValue({
+                    let pos = Int(playerManager.currentPosition)
+                    let dur = Int(playerManager.currentDuration)
+                    guard dur > 0 else { return "" }
+                    return "\(EpisodeAccessibility.spokenDuration(pos)) of \(EpisodeAccessibility.spokenDuration(dur))"
+                }())
+                .accessibilityAdjustableAction { direction in
+                    switch direction {
+                    case .increment:
+                        playerManager.seekRelative(seconds: 15)
+                    case .decrement:
+                        playerManager.seekRelative(seconds: -15)
+                    @unknown default:
+                        break
+                    }
+                }
                 
                 // Time labels (always visible)
                 HStack {
@@ -101,7 +127,7 @@ struct NowPlayingBar: View {
                 // Main row: artwork + title + controls + overflow menu
                 HStack(spacing: 10) {
                     // Artwork (tapping opens episode details)
-                    AsyncImage(url: URL(string: item.artworkUrl ?? "")) { image in
+                    CachedAsyncImage(url: URL(string: item.artworkUrl ?? "")) { image in
                         image.resizable().aspectRatio(contentMode: .fill)
                     } placeholder: {
                         RoundedRectangle(cornerRadius: 6).fill(.quaternary)
@@ -110,9 +136,18 @@ struct NowPlayingBar: View {
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                     .onTapGesture {
                         if let ep = currentEpisode {
-                            selectedEpisodeForDetail = ep
+                            episodeSheetItem = EpisodeSheetItem(episode: ep)
                         } else {
                             showFullPlayer = true
+                        }
+                    }
+                    .contextMenu {
+                        if let ep = currentEpisode {
+                            Button {
+                                episodeSheetItem = EpisodeSheetItem(episode: ep)
+                            } label: {
+                                Label("Details", systemImage: "info.circle")
+                            }
                         }
                     }
                     
@@ -142,11 +177,18 @@ struct NowPlayingBar: View {
                     }
                     .onTapGesture {
                         if let ep = currentEpisode {
-                            selectedEpisodeForDetail = ep
+                            episodeSheetItem = EpisodeSheetItem(episode: ep)
                         } else {
                             showFullPlayer = true
                         }
                     }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(EpisodeAccessibility.nowPlayingLabel(
+                        title: item.title,
+                        podcastTitle: item.podcastTitle,
+                        isPlaying: playerManager.isPlaying
+                    ))
+                    .accessibilityHint("Double tap, to show episode details")
                     
                     Spacer()
                     
@@ -159,16 +201,38 @@ struct NowPlayingBar: View {
                             Image(systemName: "gobackward.\(settings.skipBackwardSeconds)")
                                 .font(.body)
                         }
+                        .accessibilityLabel("Skip back \(settings.skipBackwardSeconds) seconds")
                         
-                        // Play/Pause
-                        Button { playerManager.togglePlayPause() } label: {
-                            if playerManager.isBuffering {
-                                ProgressView()
-                                    .controlSize(.small)
-                            } else {
-                                Image(systemName: playerManager.isPlaying ? "pause.fill" : "play.fill")
+                        // Play/Pause (or Retry on error)
+                        if let errorMsg = playerManager.errorMessage, !errorMsg.isEmpty {
+                            Button {
+                                // Retry: re-run playEpisode from scratch with fresh URL
+                                if let item = playerManager.audioManager.currentItem {
+                                    Task {
+                                        await playerManager.audioManager.playEpisode(
+                                            item,
+                                            initialPosition: playerManager.currentPosition > 0 ? playerManager.currentPosition : nil
+                                        )
+                                    }
+                                }
+                            } label: {
+                                Image(systemName: "arrow.clockwise.circle.fill")
                                     .font(.title2)
+                                    .foregroundStyle(.orange)
+                                    .symbolEffect(.pulse)
                             }
+                            .accessibilityLabel("Retry playback")
+                        } else {
+                            Button { playerManager.togglePlayPause() } label: {
+                                if playerManager.isBuffering {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                } else {
+                                    Image(systemName: playerManager.isPlaying ? "pause.fill" : "play.fill")
+                                        .font(.title2)
+                                }
+                            }
+                            .accessibilityLabel(playerManager.isBuffering ? "Loading" : (playerManager.isPlaying ? "Pause" : "Play"))
                         }
                         
                         // Skip forward
@@ -178,6 +242,7 @@ struct NowPlayingBar: View {
                             Image(systemName: "goforward.\(settings.skipForwardSeconds)")
                                 .font(.body)
                         }
+                        .accessibilityLabel("Skip forward \(settings.skipForwardSeconds) seconds")
                     }
                     .foregroundStyle(.primary)
                     
@@ -186,28 +251,81 @@ struct NowPlayingBar: View {
                 }
                 .padding(.leading, 12)
                 .padding(.trailing, 16)
-                .padding(.vertical, 8)
+                .padding(.top, 8)
+                .padding(.bottom, (!chapters.isEmpty || hasTranscript) ? 4 : 8)
+                
+                // Chapters & Transcript quick-access row
+                if !chapters.isEmpty || hasTranscript {
+                    HStack(spacing: 8) {
+                        if !chapters.isEmpty {
+                            Button {
+                                showChapters = true
+                            } label: {
+                                Label("Chapters (\(chapters.count))", systemImage: "list.bullet.indent")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 4)
+                                    .background(.ultraThinMaterial)
+                                    .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.primary)
+                        }
+                        
+                        if hasTranscript {
+                            Button {
+                                showTranscript = true
+                            } label: {
+                                Label("Transcript", systemImage: "text.quote")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 4)
+                                    .background(.ultraThinMaterial)
+                                    .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.primary)
+                        }
+                        
+                        Spacer()
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 6)
+                }
             }
             .background(.ultraThinMaterial)
             // Episode detail sheet (mini player tap)
-            .sheet(item: $selectedEpisodeForDetail) { episode in
-                EpisodeDetailSheet(episode: episode)
+            .sheet(item: $episodeSheetItem) { item in
+                EpisodeDetailSheet(episode: item.episode)
+                    .environment(playerManager)
+                    .environment(podcastManager)
+                    .environment(downloadManager)
+                    .environment(settings)
+                    .environment(navigationState)
+                    .modelContext(modelContext)
             }
             #if os(iOS)
             .fullScreenCover(isPresented: $showFullPlayer) {
                 PlayerView()
+                    .environment(playerManager)
+                    .environment(settings)
             }
             #else
             .sheet(isPresented: $showFullPlayer) {
                 PlayerView()
+                    .environment(playerManager)
+                    .environment(settings)
             }
             #endif
             .sheet(isPresented: $showSpeedPicker) {
                 SpeedPickerSheet()
+                    .environment(settings)
+                    .environment(playerManager)
                     .presentationDetents([.height(200)])
             }
             .sheet(isPresented: $showSleepTimer) {
                 SleepTimerSheet()
+                    .environment(sleepTimer)
                     .presentationDetents([.medium])
             }
             .sheet(isPresented: $showChapters) {
@@ -215,11 +333,27 @@ struct NowPlayingBar: View {
                     playerManager.seek(to: chapter.startTime)
                     showChapters = false
                 }
+                #if os(iOS)
                 .presentationDetents([.medium, .large])
+                #endif
             }
-
+            .sheet(isPresented: $showTranscript) {
+                if let transcript {
+                    TranscriptListSheet(
+                        transcript: transcript,
+                        currentPosition: playerManager.currentPosition
+                    ) { item in
+                        playerManager.seek(to: item.start)
+                        showTranscript = false
+                    }
+                    #if os(iOS)
+                    .presentationDetents([.medium, .large])
+                    #endif
+                }
+            }
             .task(id: playerManager.currentEpisodeGuid) {
                 await loadChapters()
+                await loadTranscript()
             }
         }
     }
@@ -251,7 +385,7 @@ struct NowPlayingBar: View {
                 showSleepTimer = true
             } label: {
                 if sleepTimer.stopAfterCurrentEpisode {
-                    Label("Sleep: End of Episode", systemImage: "moon.zzz.fill")
+                    Label("Sleep: DriftOff Mode", systemImage: "moon.zzz.fill")
                 } else if sleepTimer.isActive {
                     Label("Sleep: \(sleepTimer.formattedRemaining)", systemImage: "moon.zzz.fill")
                 } else {
@@ -273,7 +407,7 @@ struct NowPlayingBar: View {
             // Episode Details
             if let ep = currentEpisode {
                 Button {
-                    selectedEpisodeForDetail = ep
+                    episodeSheetItem = EpisodeSheetItem(episode: ep)
                 } label: {
                     Label("Episode Details", systemImage: "info.circle")
                 }
@@ -336,6 +470,11 @@ struct NowPlayingBar: View {
         }
     }
     
+    /// Whether the current episode has a transcript available.
+    private var hasTranscript: Bool {
+        transcript != nil && !(transcript?.items.isEmpty ?? true)
+    }
+    
     // MARK: - Chapter Loading
     
     private func loadChapters() async {
@@ -346,6 +485,16 @@ struct NowPlayingBar: View {
             chaptersJSON: item.chaptersJSON,
             description: item.episodeDescription
         )
+    }
+    
+    // MARK: - Transcript Loading
+    
+    private func loadTranscript() async {
+        transcript = nil
+        guard let item = playerManager.audioManager.currentItem,
+              let transcriptUrl = item.transcriptUrl,
+              !transcriptUrl.isEmpty else { return }
+        transcript = await TranscriptService.shared.fetchTranscript(url: transcriptUrl)
     }
 }
 

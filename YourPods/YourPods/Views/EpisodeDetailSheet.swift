@@ -6,6 +6,7 @@ struct EpisodeDetailSheet: View {
     @Environment(PodcastManager.self) private var podcastManager
     @Environment(DownloadManager.self) private var downloadManager
     @Environment(SettingsManager.self) private var settings
+    @Environment(NavigationState.self) private var navigationState
     @Environment(\.dismiss) private var dismiss
     
     let episode: Episode
@@ -17,19 +18,11 @@ struct EpisodeDetailSheet: View {
     @State private var showShareOptions = false
     @State private var chapters: [Chapter]
     @State private var transcript: Transcript?
+    @State private var formattedDescription: AttributedString?
     
     init(episode: Episode) {
         self.episode = episode
-        // Pre-populate chapters synchronously: Podlove inline JSON → description parsing
-        // (URL-based chapters are fetched async in .task)
-        if let json = episode.chaptersJSON, !json.isEmpty, (episode.chaptersUrl ?? "").isEmpty {
-            let inline = ChapterService.parseInlineChaptersJSON(json)
-            _chapters = State(initialValue: inline)
-        } else if let desc = episode.episodeDescription, (episode.chaptersUrl ?? "").isEmpty {
-            _chapters = State(initialValue: ChapterService.parseChaptersFromDescription(desc))
-        } else {
-            _chapters = State(initialValue: [])
-        }
+        _chapters = State(initialValue: [])
     }
     
     private var isCurrentlyPlaying: Bool {
@@ -87,13 +80,28 @@ struct EpisodeDetailSheet: View {
                         chapters = inline
                     }
                 }
+                // Fallback: parse chapters from episode description
+                if chapters.isEmpty, let desc = episode.episodeDescription {
+                    let parsed = ChapterService.parseChaptersFromDescription(desc)
+                    if !parsed.isEmpty {
+                        chapters = parsed
+                    }
+                }
                 if let transcriptUrl = episode.transcriptUrl, !transcriptUrl.isEmpty {
                     transcript = await TranscriptService.shared.fetchTranscript(url: transcriptUrl)
+                }
+                // Pre-compute the HTML attributed string for the description.
+                // This MUST happen in .task (not in the view body) because
+                // NSAttributedString(data:options:.html) internally uses WebKit,
+                // which crashes with an assertion failure when invoked during
+                // iOS snapshot callbacks (FBSSceneSnapshotAction).
+                if let desc = episode.episodeDescription {
+                    formattedDescription = desc.htmlAttributedString()
                 }
             }
             .navigationTitle("Episode Details")
             #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
+            .inlineNavigationBarTitle()
             #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -123,6 +131,9 @@ struct EpisodeDetailSheet: View {
                 }
             }
 
+            #if os(macOS)
+            .frame(minWidth: 500, minHeight: 500)
+            #endif
         }
     }
     
@@ -135,8 +146,10 @@ struct EpisodeDetailSheet: View {
                 value: Binding(
                     get: {
                         if isDragging { return dragValue }
-                        guard playerManager.currentDuration > 0 else { return 0 }
-                        return playerManager.currentPosition / playerManager.currentDuration
+                        return PlayerManager.playbackProgress(
+                            position: playerManager.currentPosition,
+                            duration: playerManager.currentDuration
+                        )
                     },
                     set: { newValue in
                         isDragging = true
@@ -224,19 +237,16 @@ struct EpisodeDetailSheet: View {
     
     private var artworkSection: some View {
         let imageUrl = episode.imageUrl ?? episode.podcast?.logoUrl
-        return AsyncImage(url: URL(string: imageUrl ?? "")) { phase in
-            switch phase {
-            case .success(let image):
-                image.resizable().aspectRatio(contentMode: .fill)
-            default:
-                RoundedRectangle(cornerRadius: 16)
-                    .fill(.ultraThinMaterial)
-                    .overlay {
-                        Image(systemName: "waveform")
-                            .font(.system(size: 60))
-                            .foregroundStyle(.secondary)
-                    }
-            }
+        return CachedAsyncImage(url: URL(string: imageUrl ?? "")) { image in
+            image.resizable().aspectRatio(contentMode: .fill)
+        } placeholder: {
+            RoundedRectangle(cornerRadius: 16)
+                .fill(.ultraThinMaterial)
+                .overlay {
+                    Image(systemName: "waveform")
+                        .font(.system(size: 60))
+                        .foregroundStyle(.secondary)
+                }
         }
         .frame(maxWidth: 280, maxHeight: 280)
         .clipShape(RoundedRectangle(cornerRadius: 16))
@@ -252,9 +262,34 @@ struct EpisodeDetailSheet: View {
                 .multilineTextAlignment(.center)
             
             if let podcastTitle = episode.podcastTitle {
-                Text(podcastTitle)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                let subscribedPodcast = EpisodeDetailSheetHelper.findSubscribedPodcast(
+                    podcastUrl: episode.podcastUrl,
+                    subscriptions: podcastManager.subscriptions
+                )
+                if let subscribedPodcast {
+                    Button {
+                        dismiss()
+                        // Small delay to let the sheet dismiss before navigating
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                            navigationState.navigateToLibrary(podcast: subscribedPodcast)
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text(podcastTitle)
+                                .font(.subheadline)
+                                .foregroundStyle(Color.accentColor)
+                            Image(systemName: "chevron.right")
+                                .font(.caption2)
+                                .foregroundStyle(Color.accentColor.opacity(0.7))
+                        }
+                    }
+                    .accessibilityLabel("Go to \(podcastTitle)")
+                    .accessibilityHint("Opens this podcast in your library")
+                } else {
+                    Text(podcastTitle)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
             }
             
             // Season / Episode / Type badges
@@ -391,20 +426,50 @@ struct EpisodeDetailSheet: View {
                                 ? KeychainHelper.shared.buildBasicAuthHeader(forPodcastUrl: episode.podcast!.url)
                                     .map { ["Authorization": $0] }
                                 : nil
-                            downloadManager.downloadEpisode(guid: episode.guid, audioUrl: audioUrl, authHeaders: authHeaders)
+                            let privacyMode = episode.podcast?.effectiveSettings.privacyMode ?? settings.p3Enabled
+                            downloadManager.downloadEpisode(guid: episode.guid, audioUrl: audioUrl, authHeaders: authHeaders, privacyMode: privacyMode)
                         }
                     }
                 }
                 
                 ActionButton(title: "Played", icon: "checkmark") {
-                    let resolvedUrl = EpisodeDetailSheetHelper.resolvePodcastUrl(
-                        episodePodcastUrl: episode.podcastUrl,
-                        currentItemPodcastUrl: playerManager.audioManager.currentItem?.podcastUrl,
+                    if EpisodeDetailSheetHelper.shouldUsePlayerManager(
                         episodeGuid: episode.guid,
-                        subscriptions: podcastManager.subscriptions
-                    )
-                    if let resolvedUrl {
-                        podcastManager.markEpisodeAsPlayed(podcastUrl: resolvedUrl, episodeGuid: episode.guid)
+                        currentEpisodeGuid: playerManager.currentEpisodeGuid
+                    ) {
+                        // Currently-playing episode: stop playback + advance queue
+                        playerManager.markCurrentEpisodeAsPlayed()
+                    } else {
+                        // Non-playing episode: data-layer update only
+                        let resolvedUrl = EpisodeDetailSheetHelper.resolvePodcastUrl(
+                            episodePodcastUrl: episode.podcastUrl,
+                            currentItemPodcastUrl: playerManager.audioManager.currentItem?.podcastUrl,
+                            episodeGuid: episode.guid,
+                            subscriptions: podcastManager.subscriptions
+                        )
+                        if let resolvedUrl {
+                            podcastManager.markEpisodeAsPlayed(podcastUrl: resolvedUrl, episodeGuid: episode.guid)
+                        }
+                    }
+                    dismiss()
+                }
+                
+                let isHidden = podcastManager.episodeActionSync.isHidden(guid: episode.guid)
+                ActionButton(
+                    title: isHidden ? "Unhide" : "Hide",
+                    icon: isHidden ? "eye" : "eye.slash"
+                ) {
+                    podcastManager.episodeActionSync.setHidden(guid: episode.guid, hidden: !isHidden)
+                    podcastManager.episodeActionSync.persistHiddenGuids()
+                    Task {
+                        guard let podcastUrl = episode.podcastUrl, let audioUrl = episode.audioUrl else { return }
+                        if let client = podcastManager.currentSyncClient {
+                            if !isHidden {
+                                try? await client.hideEpisodes([ProHideEpisodeRequest(episodeUrl: audioUrl, podcastUrl: podcastUrl)])
+                            } else {
+                                try? await client.unhideEpisode(episodeUrl: audioUrl)
+                            }
+                        }
                     }
                     dismiss()
                 }
@@ -453,7 +518,7 @@ struct EpisodeDetailSheet: View {
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
-                    .background(Color(.systemGray5))
+                    .background(.quaternary)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
                 }
             }
@@ -485,9 +550,17 @@ struct EpisodeDetailSheet: View {
                 .font(.headline)
             
             if let description = episode.episodeDescription {
-                Text(description.htmlAttributedString())
-                    .font(.body)
-                    .foregroundStyle(.secondary)
+                if let formattedDescription {
+                    // Rich HTML rendering (pre-computed in .task)
+                    Text(formattedDescription)
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                } else {
+                    // Lightweight fallback until .task completes
+                    Text(description.strippingHTML())
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                }
             } else {
                 Text("No description available.")
                     .font(.body)

@@ -19,7 +19,17 @@ final class NavigationState {
     /// Message to show in the post-migration alert.
     var migrationAlertMessage: String?
     
+    /// Podcast to navigate to in the Library tab (set by EpisodeDetailSheet podcast link).
+    var podcastToNavigate: Podcast?
+    
     func switchToAddPodcasts() {
         selectedTab = 3
+    }
+    
+    /// Navigate to a podcast's detail page in the Library tab.
+    /// Dismisses any sheet, switches to Library, and queues the push.
+    func navigateToLibrary(podcast: Podcast) {
+        podcastToNavigate = podcast
+        selectedTab = 1
     }
 }

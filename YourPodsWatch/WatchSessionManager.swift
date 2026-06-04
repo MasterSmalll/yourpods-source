@@ -24,6 +24,49 @@ struct WatchEpisode: Identifiable, Codable {
     let isAvailableOnPhone: Bool // If true, can be manually downloaded
     let chapters: [WatchChapter]? // Episode chapters (if available)
     var position: Int // Playback position in seconds (synced from iOS)
+    let pubDate: Date? // Episode publish date (for Recently Updated sorting)
+    let podcastTitle: String? // Podcast name (for cross-podcast display)
+    let podcastArtUri: String? // Podcast artwork URL (for Recently Updated)
+    
+    /// Backward-compatible decoder — new optional fields default to nil
+    /// when decoding payloads from older iOS app versions or persisted data.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        title = try container.decode(String.self, forKey: .title)
+        album = try container.decode(String.self, forKey: .album)
+        artist = try container.decode(String.self, forKey: .artist)
+        duration = try container.decode(Int.self, forKey: .duration)
+        localPath = try container.decodeIfPresent(String.self, forKey: .localPath)
+        streamUrl = try container.decodeIfPresent(String.self, forKey: .streamUrl)
+        artUri = try container.decodeIfPresent(String.self, forKey: .artUri)
+        isAvailableOnPhone = try container.decode(Bool.self, forKey: .isAvailableOnPhone)
+        chapters = try container.decodeIfPresent([WatchChapter].self, forKey: .chapters)
+        position = try container.decode(Int.self, forKey: .position)
+        pubDate = try container.decodeIfPresent(Date.self, forKey: .pubDate)
+        podcastTitle = try container.decodeIfPresent(String.self, forKey: .podcastTitle)
+        podcastArtUri = try container.decodeIfPresent(String.self, forKey: .podcastArtUri)
+    }
+    
+    init(id: String, title: String, album: String, artist: String, duration: Int,
+         localPath: String?, streamUrl: String?, artUri: String?,
+         isAvailableOnPhone: Bool, chapters: [WatchChapter]?, position: Int,
+         pubDate: Date? = nil, podcastTitle: String? = nil, podcastArtUri: String? = nil) {
+        self.id = id
+        self.title = title
+        self.album = album
+        self.artist = artist
+        self.duration = duration
+        self.localPath = localPath
+        self.streamUrl = streamUrl
+        self.artUri = artUri
+        self.isAvailableOnPhone = isAvailableOnPhone
+        self.chapters = chapters
+        self.position = position
+        self.pubDate = pubDate
+        self.podcastTitle = podcastTitle
+        self.podcastArtUri = podcastArtUri
+    }
 }
 
 struct WatchPodcast: Identifiable, Codable {
@@ -53,6 +96,10 @@ class WatchDownloadManager: NSObject, ObservableObject, URLSessionDownloadDelega
     
     private let logger = Logger(subsystem: "com.yourpods", category: "WatchDownload")
     
+    /// Observers for background/foreground lifecycle notifications.
+    private var backgroundObserver: Any?
+    private var foregroundObserver: Any?
+    
     /// Whether to restrict downloads to Wi-Fi only (blocks watch cellular radio).
     private var currentWifiOnly: Bool = true
     
@@ -64,7 +111,76 @@ class WatchDownloadManager: NSObject, ObservableObject, URLSessionDownloadDelega
         return URLSession(configuration: config, delegate: self, delegateQueue: .main)
     }()
     
+    override init() {
+        super.init()
+        setupLifecycleObservers()
+    }
+    
+    /// CAROUSEL FIX: Observe background/foreground transitions to manage stall timers.
+    ///
+    /// Problem: When the app is suspended, time passes but no download bytes arrive.
+    /// On resume, `lastBytesReceived` timestamps are stale, so every active download
+    /// appears "stalled" and gets falsely cancelled.
+    ///
+    /// Fix: Invalidate timers on background entry, reset timestamps on foreground resume.
+    private func setupLifecycleObservers() {
+        backgroundObserver = NotificationCenter.default.addObserver(
+            forName: WKApplication.willResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.logger.debug("Background entry — invalidating stall timers")
+            self?.invalidateAllStallTimers()
+        }
+        
+        foregroundObserver = NotificationCenter.default.addObserver(
+            forName: WKApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            // Reset timestamps so active downloads don't appear stalled
+            let now = Date()
+            for key in self.lastBytesReceived.keys {
+                self.lastBytesReceived[key] = now
+            }
+            // Restart stall timers for any active downloads
+            for episodeId in self.downloadTasks.keys {
+                self.startStallTimer(for: episodeId)
+            }
+            if !self.downloadTasks.isEmpty {
+                self.logger.debug("Foreground resume — reset stall timers for \(self.downloadTasks.count) downloads")
+            }
+        }
+    }
+    
     var onDownloadComplete: ((String, String) -> Void)? // (episodeId, localPath)
+    
+    /// Force the background URLSession to connect so the system can deliver
+    /// pending download completion events. Must be called during background
+    /// launch for `.backgroundTask(.urlSession(...))` to work.
+    ///
+    /// Without this, the lazy `session` property is never initialized during
+    /// background wakes, so `urlSessionDidFinishEvents` is never called and
+    /// the CAROUSEL watchdog kills the app after 45 seconds.
+    /// See: Crash 55435E1D — watchOS background URLSession watchdog transgression.
+    func reconnectBackgroundSession() {
+        // CAROUSEL FIX: Invalidate all stall timers from a previous foreground
+        // session. Stale repeating timers accumulate across suspend/wake cycles,
+        // adding main-thread work every 60s until the watchdog kills the app.
+        invalidateAllStallTimers()
+        _ = session  // Force lazy initialization — connects to the system's background session
+        logger.debug("Background session reconnected for pending event delivery")
+    }
+    
+    /// Invalidate all active stall detection timers.
+    /// Called on background reconnect to prevent stale timers from accumulating.
+    func invalidateAllStallTimers() {
+        for (_, timer) in stallTimers {
+            timer.invalidate()
+        }
+        stallTimers.removeAll()
+    }
     
     /// Check if battery is too low for downloads (< 10%)
     private var isBatteryTooLow: Bool {
@@ -249,6 +365,12 @@ class WatchDownloadManager: NSObject, ObservableObject, URLSessionDownloadDelega
 }
 
 class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
+    // MARK: - Singleton
+    /// Singleton — survives SwiftUI App struct recreation during background wakes.
+    /// Without this, watchOS creates a new WatchSessionManager on background wake
+    /// but WCSession.default.delegate still points to the old instance → the new
+    /// UI never receives data and appears frozen.
+    static let shared = WatchSessionManager()
     @Published var episodes: [WatchEpisode] = []
     @Published var playbackSpeed: Double = 1.0
     @Published var positionSyncInterval: Double = 30.0
@@ -263,6 +385,11 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     @Published var library: [WatchPodcast] = []
     @Published var libraryEpisodes: [String: [WatchEpisode]] = [:] // feedUrl -> episodes
     
+    // Recently Updated (cross-podcast, newest unplayed episodes)
+    @Published var recentEpisodes: [WatchEpisode] = []
+    /// Maximum number of recently updated episodes to display on watch.
+    static let recentEpisodesLimit = 10
+    
     // Track pending downloads (from iPhone) to show UI state if needed
     @Published var pendingDownloads: Set<String> = []
     
@@ -271,28 +398,112 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     
     private let logger = Logger(subsystem: "com.yourpods", category: "WatchSession")
     
+    /// Serial queue for UserDefaults persistence — keeps saves off the main thread.
+    /// watchOS has an extremely aggressive 2-second main thread watchdog;
+    /// synchronous JSON encode + UserDefaults write can take 200-500ms
+    /// with large queues, accumulating into watchdog kills.
+    private let persistenceQueue = DispatchQueue(label: "com.yourpods.watch.persistence", qos: .utility)
+    
+    /// Debounce work items for each persistence key — rapid queue updates
+    /// from iPhone are coalesced into a single write.
+    private var saveEpisodesWorkItem: DispatchWorkItem?
+    private var saveLibraryWorkItem: DispatchWorkItem?
+    private var saveRecentWorkItem: DispatchWorkItem?
+    
     /// The currently-playing episode (looked up from episodes list)
     var currentEpisode: WatchEpisode? {
         guard let id = remoteEpisodeId else { return nil }
         return episodes.first(where: { $0.id == id })
     }
     
+    /// Whether WCSession has already been activated in this process lifetime.
+    /// Guards against duplicate activation when SwiftUI recreates the App struct.
+    private var sessionActivated = false
+    
+    /// Whether activate() has been called from onAppear.
+    /// Guards against @Published mutations before SwiftUI's observation is ready.
+    /// See: Intermittent crash in YourPodsWatch_Watch_AppApp.$main()
+    private var hasBeenActivated = false
+    
     override init() {
         super.init()
-        setupSession()
-        loadEpisodes()
-        loadLibrary()
-        loadPositionSyncInterval()
+        // CRASH FIX: Do NOT call setupSession() or setupBackgroundRefreshHandler()
+        // here. When this singleton is created as `private let ... = .shared` in the
+        // App struct, init() runs BEFORE SwiftUI evaluates body and wires observation.
+        // WCSession.activate() can deliver pending applicationContext immediately,
+        // mutating @Published properties on an un-observed ObservableObject
+        // → double-free / use-after-free in Combine → intermittent crash at $main().
+        //
+        // These are now called from activate(), invoked by onAppear.
+        
+        // CAROUSEL FIX: Do NOT load UserDefaults data here.
+        // Synchronous JSON decoding of large queues during init() blocks
+        // the main thread and can exceed the watchOS launch watchdog.
+        // Data is loaded lazily via loadPersistedData() from onAppear.
         setupDownloadHandler()
+    }
+    
+    /// Activate WCSession and register observers. Must be called from onAppear,
+    /// AFTER SwiftUI's observation infrastructure is ready.
+    ///
+    /// **NOT from init()** — see crash fix for intermittent $main() crash.
+    /// WCSession.activate() can deliver pending applicationContext immediately,
+    /// and NotificationCenter observers can fire before SwiftUI is ready.
+    /// Both mutate @Published properties, which causes a double-free in Combine
+    /// if the ObservableObjectPublisher hasn't been wired to any subscriber.
+    func activate() {
+        guard !hasBeenActivated else {
+            logger.debug("Already activated — skipping")
+            return
+        }
+        hasBeenActivated = true
+        setupSession()
         setupBackgroundRefreshHandler()
+        logger.info("WatchSessionManager activated from onAppear")
+    }
+    
+    /// Load persisted data from UserDefaults. Called from onAppear (not init)
+    /// to avoid blocking the main thread during app launch.
+    ///
+    /// CAROUSEL FIX: Decodes JSON on the background persistence queue and
+    /// hops back to main. Large queues (20+ episodes with chapters) can take
+    /// 200-500ms to decode — dangerously close to the 2s watchOS main-thread
+    /// watchdog when combined with other init() work.
+    func loadPersistedData() {
+        persistenceQueue.async { [weak self] in
+            let episodes = Self.decodeFromDefaults([WatchEpisode].self, key: "saved_episodes")
+            let library = Self.decodeFromDefaults([WatchPodcast].self, key: "saved_library")
+            let recent = Self.decodeFromDefaults([WatchEpisode].self, key: "saved_recent_episodes")
+            let interval = UserDefaults.standard.object(forKey: "positionSyncInterval") as? Double
+            
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let episodes { self.episodes = episodes }
+                if let library { self.library = library }
+                if let recent { self.recentEpisodes = recent }
+                if let interval { self.positionSyncInterval = max(interval, 10.0) }
+            }
+        }
     }
     
     func setupSession() {
-        if WCSession.isSupported() {
-            let session = WCSession.default
-            session.delegate = self
-            session.activate()
+        // Guard: WCSession must be supported on this device
+        guard WCSession.isSupported() else {
+            logger.info("WCSession not supported on this device — skipping setup")
+            return
         }
+        // CAROUSEL FIX: Guard against duplicate activation. When watchOS
+        // recreates the App struct during background wakes, init() is called
+        // again. Re-activating WCSession causes undefined behavior.
+        guard !sessionActivated else {
+            logger.debug("WCSession already activated — skipping")
+            return
+        }
+        sessionActivated = true
+        let session = WCSession.default
+        session.delegate = self
+        session.activate()
+        logger.debug("WCSession activation requested")
     }
     
     private func setupDownloadHandler() {
@@ -314,6 +525,59 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             }
         }
     }
+
+    /// Re-read the latest `receivedApplicationContext` and process it.
+    ///
+    /// **Why this is needed:** `WCSession.didReceiveApplicationContext` fires
+    /// exactly once — when the system delivers the context. If the app is
+    /// suspended at delivery time, the data sits in `receivedApplicationContext`
+    /// but the `@Published` properties are never updated. The UI shows stale
+    /// data and appears "frozen."
+    ///
+    /// Call this from `scenePhase` `.active` transitions to catch up on any
+    /// context that arrived during suspension.
+    func refreshFromApplicationContext() {
+        guard WCSession.default.activationState == .activated else {
+            logger.debug("WCSession not activated — skipping context refresh")
+            return
+        }
+        
+        let context = WCSession.default.receivedApplicationContext
+        guard !context.isEmpty else {
+            logger.debug("No application context to refresh from")
+            return
+        }
+        
+        logger.info("Refreshing from receivedApplicationContext on foreground resume")
+        
+        // Re-process using the same delegate path
+        // This is safe to call redundantly — the handlers are idempotent
+        // (they replace state rather than append)
+        if let queue = context["queue"] as? [[String: Any]] {
+            self.handleQueueUpdate(queue)
+        }
+        
+        if let speed = context["speed"] as? Double {
+            self.playbackSpeed = speed
+        }
+        
+        if let info = context["playback_info"] as? [String: Any] {
+            self.remoteTitle = info["title"] as? String ?? "Not Playing"
+            self.remoteArtist = info["artist"] as? String ?? ""
+            self.remoteIsPlaying = info["isPlaying"] as? Bool ?? false
+            self.remoteEpisodeId = info["episodeId"] as? String
+        }
+        
+        if let interval = context["positionSyncInterval"] as? Int {
+            self.positionSyncInterval = Double(max(interval, 10))
+            self.savePositionSyncInterval()
+        }
+        
+        if let wifiOnly = context["wifiOnly"] as? Bool {
+            self.downloadManager.updateNetworkPolicy(wifiOnly: wifiOnly)
+        }
+    }
+
 
     
     /// Request fresh queue data from the iPhone.
@@ -424,6 +688,11 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     }
     
     // MARK: - Persistence
+    //
+    // CAROUSEL FIX: All save methods now dispatch to a background queue
+    // with 0.5s debouncing. Rapid queue updates from iPhone are coalesced
+    // into a single write, keeping the main thread free for UI.
+    
     private func loadEpisodes() {
         if let data = UserDefaults.standard.data(forKey: "saved_episodes"),
            let saved = try? JSONDecoder().decode([WatchEpisode].self, from: data) {
@@ -432,9 +701,34 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     }
     
     private func saveEpisodes() {
-        if let data = try? JSONEncoder().encode(episodes) {
-            UserDefaults.standard.set(data, forKey: "saved_episodes")
+        saveEpisodesWorkItem?.cancel()
+        let snapshot = episodes  // Capture current value on main thread
+        let workItem = DispatchWorkItem {
+            if let data = try? JSONEncoder().encode(snapshot) {
+                UserDefaults.standard.set(data, forKey: "saved_episodes")
+            }
         }
+        saveEpisodesWorkItem = workItem
+        persistenceQueue.asyncAfter(deadline: .now() + 0.5, execute: workItem)
+    }
+    
+    private func loadRecentEpisodes() {
+        if let data = UserDefaults.standard.data(forKey: "saved_recent_episodes"),
+           let saved = try? JSONDecoder().decode([WatchEpisode].self, from: data) {
+            self.recentEpisodes = saved
+        }
+    }
+    
+    private func saveRecentEpisodes() {
+        saveRecentWorkItem?.cancel()
+        let snapshot = recentEpisodes
+        let workItem = DispatchWorkItem {
+            if let data = try? JSONEncoder().encode(snapshot) {
+                UserDefaults.standard.set(data, forKey: "saved_recent_episodes")
+            }
+        }
+        saveRecentWorkItem = workItem
+        persistenceQueue.asyncAfter(deadline: .now() + 0.5, execute: workItem)
     }
     
     private func getDocumentsDirectory() -> URL {
@@ -445,6 +739,13 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         if let saved = UserDefaults.standard.object(forKey: "positionSyncInterval") as? Double {
             self.positionSyncInterval = max(saved, 10.0)
         }
+    }
+    
+    /// Decode a Codable type from UserDefaults on any thread.
+    /// Used by loadPersistedData() to decode off-main-thread.
+    private static func decodeFromDefaults<T: Decodable>(_ type: T.Type, key: String) -> T? {
+        guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
+        return try? JSONDecoder().decode(type, from: data)
     }
     
     private func savePositionSyncInterval() {
@@ -504,6 +805,11 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                let feedUrl = episodesData["feedUrl"] as? String,
                let episodes = episodesData["episodes"] as? [[String: Any]] {
                 self.handleEpisodesForFeed(feedUrl: feedUrl, episodesData: episodes)
+            }
+            
+            // Handle Recently Updated episodes
+            if let recentData = message["recent_episodes"] as? [[String: Any]] {
+                self.handleRecentEpisodes(recentData)
             }
         }
     }
@@ -744,6 +1050,63 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         )
     }
     
+    // MARK: - Recently Updated
+    
+    func requestRecentEpisodes() {
+        guard WCSession.default.isReachable else {
+            logger.debug("iPhone not reachable for recent episodes request")
+            return
+        }
+        WCSession.default.sendMessage(
+            ["command": "request_recent_episodes"],
+            replyHandler: nil,
+            errorHandler: { [self] error in
+                logger.error("Recent episodes request failed: \(error.localizedDescription)")
+            }
+        )
+    }
+    
+    private func handleRecentEpisodes(_ episodesData: [[String: Any]]) {
+        var episodes: [WatchEpisode] = []
+        let dateFormatter = ISO8601DateFormatter()
+        
+        for item in episodesData {
+            guard let id = item["id"] as? String else { continue }
+            
+            var pubDate: Date? = nil
+            if let dateStr = item["pubDate"] as? String {
+                pubDate = dateFormatter.date(from: dateStr)
+            }
+            
+            let episode = WatchEpisode(
+                id: id,
+                title: item["title"] as? String ?? "Unknown",
+                album: item["podcastTitle"] as? String ?? "",
+                artist: item["podcastTitle"] as? String ?? "",
+                duration: item["duration"] as? Int ?? 0,
+                localPath: nil,
+                streamUrl: item["audioUrl"] as? String,
+                artUri: item["imageUrl"] as? String,
+                isAvailableOnPhone: true,
+                chapters: nil,
+                position: 0,
+                pubDate: pubDate,
+                podcastTitle: item["podcastTitle"] as? String,
+                podcastArtUri: item["podcastArtUri"] as? String
+            )
+            episodes.append(episode)
+        }
+        
+        // Enforce limit and sort by pubDate descending
+        self.recentEpisodes = Array(
+            episodes
+                .sorted { ($0.pubDate ?? .distantPast) > ($1.pubDate ?? .distantPast) }
+                .prefix(Self.recentEpisodesLimit)
+        )
+        self.saveRecentEpisodes()
+        logger.info("Recently updated: \(self.recentEpisodes.count) episodes")
+    }
+    
     private func loadLibrary() {
         if let data = UserDefaults.standard.data(forKey: "saved_library"),
            let saved = try? JSONDecoder().decode([WatchPodcast].self, from: data) {
@@ -752,9 +1115,15 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     }
     
     private func saveLibrary() {
-        if let data = try? JSONEncoder().encode(library) {
-            UserDefaults.standard.set(data, forKey: "saved_library")
+        saveLibraryWorkItem?.cancel()
+        let snapshot = library
+        let workItem = DispatchWorkItem {
+            if let data = try? JSONEncoder().encode(snapshot) {
+                UserDefaults.standard.set(data, forKey: "saved_library")
+            }
         }
+        saveLibraryWorkItem = workItem
+        persistenceQueue.asyncAfter(deadline: .now() + 0.5, execute: workItem)
     }
     
     // Handle File Transfer

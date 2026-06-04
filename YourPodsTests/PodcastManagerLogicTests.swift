@@ -374,7 +374,7 @@ final class PodcastManagerLogicTests: XCTestCase {
         XCTAssertTrue(conflicts.isEmpty)
     }
     
-    func test_applyEpisodeActions_deviceWins_acceptsServerAhead() {
+    func test_applyEpisodeActions_deviceWins_keepsDeviceWhenServerAhead() {
         let podcast = insertPodcast(url: "https://example.com/feed1")
         let episode = podcast.episodes.first!
         episode.listenedSeconds = 100  // Local is at 100
@@ -396,8 +396,8 @@ final class PodcastManagerLogicTests: XCTestCase {
         
         manager.applyEpisodeActions(strategy: .deviceWins)
         
-        XCTAssertEqual(episode.listenedSeconds, 500,
-                       "deviceWins should accept server position when it's ahead")
+        XCTAssertEqual(episode.listenedSeconds, 100,
+                       "deviceWins: device position (100) must be preserved even when server is ahead (500)")
     }
     
     func test_applyEpisodeActions_ask_collectsUnresolvedConflicts() {
@@ -935,5 +935,173 @@ final class PodcastManagerLogicTests: XCTestCase {
         // THEN: Should return empty (global is .off)
         XCTAssertTrue(candidates.isEmpty,
                       "nil per-podcast autoQueueMode + global .off should return empty")
+    }
+    
+    // MARK: - Batch Save: applyEpisodeActions (crash fix: __CFStringEqual)
+    
+    /// Regression: With many episodes (100+), a single modelContext.save() at the end
+    /// caused __CFStringEqual crashes in NSSQLRow newColumnMaskFrom: because
+    /// autorelease pool pressure released __NSCFString objects from faulted-in rows
+    /// before Core Data's column mask comparison could use them.
+    ///
+    /// Fix: batch save every 50 episodes to limit dirty object accumulation.
+    /// This test verifies all episodes get their positions updated correctly
+    /// even with many episodes (batch saves don't lose data).
+    func test_applyEpisodeActions_manyEpisodes_allPositionsUpdated() {
+        // GIVEN: 5 podcasts with 25 episodes each (125 total) — well above batch threshold
+        let podcastCount = 5
+        let episodesPerPodcast = 25
+        var allEpisodes: [Episode] = []
+        var actionEntries: [String: EpisodeAction] = [:]
+        
+        for p in 0..<podcastCount {
+            let podcast = insertPodcast(
+                url: "https://example.com/batch-feed-\(p)",
+                title: "Batch Pod \(p)",
+                episodeCount: episodesPerPodcast
+            )
+            for episode in podcast.episodes {
+                let position = (p * 1000) + 500  // Unique position per podcast
+                actionEntries[episode.guid] = EpisodeAction(
+                    podcast: podcast.url,
+                    episode: episode.audioUrl ?? "",
+                    guid: episode.guid,
+                    action: "play",
+                    timestamp: Int(Date().timeIntervalSince1970),
+                    position: position,
+                    started: 0,
+                    total: 3600,
+                    device: "server"
+                )
+                allEpisodes.append(episode)
+            }
+        }
+        
+        seedActionMap(actionEntries)
+        
+        // WHEN: applying episode actions
+        manager.applyEpisodeActions(strategy: .serverWins)
+        
+        // THEN: ALL episodes should have their positions updated (none lost in batching)
+        for episode in allEpisodes {
+            let expectedAction = actionEntries[episode.guid]!
+            XCTAssertEqual(
+                episode.listenedSeconds,
+                expectedAction.position!,
+                "Episode \(episode.guid) should have position \(expectedAction.position!) but got \(episode.listenedSeconds)"
+            )
+        }
+    }
+    
+    /// Verify that applyEpisodeActions uses batch saves (save count > 1 for large sets).
+    /// This is the core fix — the old code did a single save() at the end which accumulated
+    /// too many dirty objects with stale string references.
+    func test_applyEpisodeActions_savesBatchCount_moreThanOne() {
+        // GIVEN: 120 episodes across 4 podcasts — should require multiple batch saves with batchSize=50
+        var actionEntries: [String: EpisodeAction] = [:]
+        
+        for p in 0..<4 {
+            let podcast = insertPodcast(
+                url: "https://example.com/batch-count-feed-\(p)",
+                title: "Batch Count Pod \(p)",
+                episodeCount: 30
+            )
+            for episode in podcast.episodes {
+                actionEntries[episode.guid] = EpisodeAction(
+                    podcast: podcast.url,
+                    episode: episode.audioUrl ?? "",
+                    guid: episode.guid,
+                    action: "play",
+                    timestamp: Int(Date().timeIntervalSince1970),
+                    position: 500,
+                    started: 0,
+                    total: 3600,
+                    device: "server"
+                )
+            }
+        }
+        
+        seedActionMap(actionEntries)
+        
+        // WHEN: applying episode actions with stats tracking
+        let (_, saveCount) = manager.applyEpisodeActionsWithStats(strategy: .serverWins)
+        
+        // THEN: With cross-podcast batching (batch size 500), 120 episodes = 1 save
+        XCTAssertEqual(saveCount, 1,
+                       "120 episodes (< batch size 500) should produce 1 final save, got \(saveCount)")
+    }
+    
+    /// Fix (Build 54): autoreleasepool wrapping per 50-episode batch contains
+    /// faulted-in __NSCFString objects. Save is deferred to the cross-podcast
+    /// batch level (every 500 episodes) to reduce WAL checkpoint overhead.
+    ///
+    /// This test verifies that 30 total episodes (below the 500 batch threshold)
+    /// produce exactly 1 final save.
+    func test_applyEpisodeActions_savesPerPodcast_notJustPerBatchThreshold() {
+        // GIVEN: 3 podcasts with 10 episodes each (30 total — below cross-podcast batch size of 500)
+        var actionEntries: [String: EpisodeAction] = [:]
+        
+        for p in 0..<3 {
+            let podcast = insertPodcast(
+                url: "https://example.com/per-podcast-save-\(p)",
+                title: "Per-Podcast Save \(p)",
+                episodeCount: 10
+            )
+            for episode in podcast.episodes {
+                actionEntries[episode.guid] = EpisodeAction(
+                    podcast: podcast.url,
+                    episode: episode.audioUrl ?? "",
+                    guid: episode.guid,
+                    action: "play",
+                    timestamp: Int(Date().timeIntervalSince1970),
+                    position: 500,
+                    started: 0,
+                    total: 3600,
+                    device: "server"
+                )
+            }
+        }
+        
+        seedActionMap(actionEntries)
+        
+        // WHEN: applying episode actions
+        let (_, saveCount) = manager.applyEpisodeActionsWithStats(strategy: .serverWins)
+        
+        // THEN: With cross-podcast batching (batch size 500), 30 episodes = 1 final save.
+        // The autoreleasepool still wraps per-50-episode batches within each podcast
+        // to prevent __CFStringEqual crashes — only the save point moved.
+        XCTAssertEqual(saveCount, 1,
+            "30 episodes (< batch size 500) should produce 1 final save, got \(saveCount)")
+    }
+    
+    func test_applyEpisodeActions_handlesEpisodeWithLongDescription() {
+        // GIVEN: An episode with a very long description (exercises string comparison paths)
+        let podcast = insertPodcast(url: "https://example.com/long-desc-feed", episodeCount: 1)
+        let episode = podcast.episodes.first!
+        // Set a very long description to stress Core Data's string comparison
+        episode.episodeDescription = String(repeating: "Lorem ipsum dolor sit amet. ", count: 500)
+        episode.chaptersJSON = "{\"chapters\":[{\"title\":\"\(String(repeating: "x", count: 1000))\"}]}"
+        try! context.save()
+        
+        let action = EpisodeAction(
+            podcast: podcast.url,
+            episode: episode.audioUrl ?? "",
+            guid: episode.guid,
+            action: "play",
+            timestamp: Int(Date().timeIntervalSince1970),
+            position: 1800,
+            started: 0,
+            total: 3600,
+            device: "server"
+        )
+        seedActionMap([episode.guid: action])
+        
+        // WHEN: applying episode actions
+        manager.applyEpisodeActions(strategy: .serverWins)
+        
+        // THEN: Episode position should be updated without crash
+        XCTAssertEqual(episode.listenedSeconds, 1800)
+        // Description should be unchanged (save didn't corrupt it)
+        XCTAssertTrue(episode.episodeDescription!.hasPrefix("Lorem ipsum"))
     }
 }

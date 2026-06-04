@@ -20,7 +20,7 @@ struct SleepTimerSheet: View {
             .padding()
             .navigationTitle("Sleep Timer")
             #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
+            .inlineNavigationBarTitle()
             #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -39,8 +39,8 @@ struct SleepTimerSheet: View {
                 .foregroundStyle(.indigo)
             
             if sleepTimer.stopAfterCurrentEpisode {
-                // End of Episode mode
-                Text("End of Episode")
+                // DriftOff Mode
+                Text("DriftOff Mode")
                     .font(.system(size: 28, weight: .bold))
                     .foregroundStyle(.primary)
                 
@@ -114,7 +114,7 @@ struct SleepTimerSheet: View {
             
             // Preset buttons
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
-                // "End of Episode" option
+                // "DriftOff Mode" option
                 Button {
                     sleepTimer.startEndOfEpisode()
                     dismiss()
@@ -122,7 +122,7 @@ struct SleepTimerSheet: View {
                     VStack(spacing: 4) {
                         Image(systemName: "stop.circle")
                             .font(.title3)
-                        Text("End of\nEpisode")
+                        Text("DriftOff\nMode")
                             .font(.subheadline.bold())
                             .multilineTextAlignment(.center)
                     }

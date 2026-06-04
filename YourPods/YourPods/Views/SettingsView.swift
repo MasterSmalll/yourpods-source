@@ -8,13 +8,14 @@ struct SettingsView: View {
     @Environment(PlayerManager.self) private var playerManager
     
     @State private var showProfileSelection = false
-    @State private var showGPodderInfo = false
+
     @State private var isExportingOPML = false
     @State private var isImportingOPML = false
     @State private var showOPMLExport = false
     @State private var opmlExportURL: URL?
     @State private var isPushing = false
     @State private var isPulling = false
+    @State private var showNotificationModePrompt = false
     
     var body: some View {
         NavigationStack {
@@ -56,12 +57,9 @@ struct SettingsView: View {
                     Button {
                         Task {
                             isPushing = true
-                            // Force Push: upload local actions, then sync with .deviceWins
-                            // so local positions are preserved on the device
-                            let conflicts = try? await podcastManager.syncEpisodeActions(
-                                strategy: .deviceWins
-                            )
-                            if let conflicts, !conflicts.isEmpty {
+                            // Force Push: push subscriptions AND episode actions to server
+                            let conflicts = await podcastManager.forcePushToServer()
+                            if !conflicts.isEmpty {
                                 playerManager.pendingConflicts = conflicts
                             }
                             isPushing = false
@@ -80,10 +78,9 @@ struct SettingsView: View {
                     Button {
                         Task {
                             isPulling = true
-                            // Force Pull: sync using the user's configured strategy
-                            // so conflicts surface when strategy is .ask
+                            // Force Pull: reset timestamps and sync subscriptions + episode actions
                             let strategy = settings.syncConflictStrategy
-                            let conflicts = try? await podcastManager.syncEpisodeActions(
+                            let conflicts = try? await podcastManager.forcePullFromServer(
                                 strategy: strategy
                             )
                             if let conflicts, !conflicts.isEmpty, strategy == .ask {
@@ -108,10 +105,10 @@ struct SettingsView: View {
                         Label("Episode Activity", systemImage: "waveform")
                     }
                     
-                    Button {
-                        showGPodderInfo = true
+                    NavigationLink {
+                        AboutSyncView()
                     } label: {
-                        Label("About gPodder Sync", systemImage: "info.circle")
+                        Label("About Account Types", systemImage: "info.circle")
                     }
                     
                     NavigationLink {
@@ -134,6 +131,7 @@ struct SettingsView: View {
                         Text("Dark").tag(AppAppearance.dark)
                     }
                     
+                    #if os(iOS)
                     Picker("Tab Bar Style", selection: Binding(
                         get: { settings.tabBarDisplayMode },
                         set: { settings.tabBarDisplayMode = $0 }
@@ -142,6 +140,7 @@ struct SettingsView: View {
                         Text("Icon Only").tag(TabBarDisplayMode.iconOnly)
                         Text("Text & Icon").tag(TabBarDisplayMode.textAndIcon)
                     }
+                    #endif
                     
                     Picker("Start Page", selection: Binding(
                         get: { settings.defaultStartPage },
@@ -195,13 +194,19 @@ struct SettingsView: View {
                             value: Binding(
                                 get: { settings.skipIntroSeconds },
                                 set: { settings.skipIntroSeconds = $0 }
-                            ), in: 0...120, step: 5)
+                            ), in: 0...999, step: 5)
                     
                     Stepper("Skip Outro: \(settings.skipOutroSeconds)s",
                             value: Binding(
                                 get: { settings.skipOutroSeconds },
                                 set: { settings.skipOutroSeconds = $0 }
-                            ), in: 0...120, step: 5)
+                            ), in: 0...999, step: 5)
+                    
+                    NavigationLink {
+                        P3SettingsView()
+                    } label: {
+                        Label("P3", systemImage: "shield.checkered")
+                    }
                 } header: {
                     Label("Playback", systemImage: "play.circle")
                 }
@@ -261,7 +266,7 @@ struct SettingsView: View {
                 
                 // MARK: - New Podcast Defaults
                 Section {
-                    Picker("Auto-Queue Mode", selection: Binding(
+                    Picker("AutoPilot Mode", selection: Binding(
                         get: { settings.defaultAutoQueueMode },
                         set: { settings.defaultAutoQueueMode = $0 }
                     )) {
@@ -275,6 +280,14 @@ struct SettingsView: View {
                         set: { settings.defaultAutoDownload = $0 }
                     ))
                     
+                    Picker("Download Network", selection: Binding(
+                        get: { settings.autoDownloadNetworkPolicy },
+                        set: { settings.autoDownloadNetworkPolicy = $0 }
+                    )) {
+                        ForEach(AutoDownloadNetworkPolicy.allCases, id: \.self) { policy in
+                            Text(policy.displayName).tag(policy)
+                        }
+                    }
                     Picker("Download Cleanup", selection: Binding(
                         get: { settings.defaultDownloadCleanupPolicy },
                         set: { settings.defaultDownloadCleanupPolicy = $0 }
@@ -328,7 +341,7 @@ struct SettingsView: View {
                         #endif
                         .autocorrectionDisabled()
                         
-                        SecureField("API Secret", text: Binding(
+                        RevealableSecureField(label: "API Secret", text: Binding(
                             get: { settings.podcastIndexApiSecret ?? "" },
                             set: { settings.podcastIndexApiSecret = $0.isEmpty ? nil : $0 }
                         ))
@@ -341,6 +354,7 @@ struct SettingsView: View {
                     Label("Search Provider", systemImage: "magnifyingglass")
                 }
                 
+                #if os(iOS)
                 // MARK: - Apple Watch
                 Section {
                     Toggle("Sync to Apple Watch", isOn: Binding(
@@ -365,11 +379,20 @@ struct SettingsView: View {
                             Text("1 minute").tag(60)
                             Text("2 minutes").tag(120)
                         }
+                        
+                        Toggle("Wi-Fi Only Downloads", isOn: Binding(
+                            get: { settings.watchDownloadWiFiOnly },
+                            set: { settings.watchDownloadWiFiOnly = $0 }
+                        ))
                     }
                 } header: {
                     Label("Apple Watch", systemImage: "applewatch")
+                } footer: {
+                    Text("Wi-Fi Only Downloads saves watch battery by avoiding cellular radio for episode downloads.")
                 }
+                #endif
                 
+                #if os(iOS)
                 // MARK: - Background Refresh
                 Section {
                     Toggle("Background Refresh", isOn: Binding(
@@ -388,10 +411,82 @@ struct SettingsView: View {
                             Text("2 hours").tag(120)
                             Text("4 hours").tag(240)
                         }
+                        
+                        Toggle("New Episode Notifications", isOn: Binding(
+                            get: { settings.newEpisodeNotificationsEnabled },
+                            set: { newValue in
+                                if newValue {
+                                    // Temporarily enable so toggle stays "on" while dialog shows.
+                                    // Revert on Cancel.
+                                    settings.newEpisodeNotificationsEnabled = true
+                                    showNotificationModePrompt = true
+                                } else {
+                                    settings.newEpisodeNotificationsEnabled = false
+                                }
+                            }
+                        ))
+                        .accessibilityLabel("New Episode Notifications")
+                        .accessibilityHint("Get notified when new episodes are found during background refresh")
+                        
+                        Toggle("App Badge", isOn: Binding(
+                            get: { settings.appBadgeEnabled },
+                            set: { newValue in
+                                settings.appBadgeEnabled = newValue
+                                if newValue {
+                                    // Badge API requires notification authorization
+                                    Task {
+                                        _ = await NewEpisodeNotificationService.shared.requestPermissionIfNeeded()
+                                        await BadgeService.shared.updateBadgeCount()
+                                    }
+                                } else {
+                                    // Clear badge immediately when disabled
+                                    Task {
+                                        await BadgeService.shared.updateBadgeCount()
+                                    }
+                                }
+                            }
+                        ))
+                        .accessibilityLabel("App Badge")
+                        .accessibilityHint("Show unplayed episode count on the app icon")
                     }
                 } header: {
                     Label("Background Refresh", systemImage: "arrow.clockwise")
+                } footer: {
+                    if settings.backgroundRefreshEnabled {
+                        if settings.newEpisodeNotificationsEnabled && settings.appBadgeEnabled {
+                            Text("Notifications and badges are 100% local — nothing is sent to any server. Enable notifications per podcast in Library → Podcast → Listening Profile → Notifications.")
+                        } else if settings.newEpisodeNotificationsEnabled {
+                            Text("Notifications are 100% local — nothing is sent to any server. Enable per podcast in Library → Podcast → Listening Profile → Notifications.")
+                        } else if settings.appBadgeEnabled {
+                            Text("The app icon shows the number of unplayed episodes across all your subscriptions.")
+                        }
+                    }
                 }
+                .confirmationDialog(
+                    "How would you like to receive notifications?",
+                    isPresented: $showNotificationModePrompt,
+                    titleVisibility: .visible
+                ) {
+                    Button("All Podcasts") {
+                        podcastManager.enableNotificationsForAllPodcasts()
+                        Task {
+                            await NewEpisodeNotificationService.shared.requestPermissionIfNeeded()
+                        }
+                    }
+                    Button("Let Me Choose") {
+                        // Toggle stays on; podcasts stay at default (silent).
+                        Task {
+                            await NewEpisodeNotificationService.shared.requestPermissionIfNeeded()
+                        }
+                    }
+                    Button("Cancel", role: .cancel) {
+                        // Revert — user changed their mind
+                        settings.newEpisodeNotificationsEnabled = false
+                    }
+                } message: {
+                    Text("\"All Podcasts\" enables notifications for every podcast you're subscribed to. \"Let Me Choose\" keeps them off — turn on per podcast in Library → Podcast → Listening Profile.")
+                }
+                #endif
                 
                 // MARK: - Data
                 Section {
@@ -409,6 +504,10 @@ struct SettingsView: View {
                     }
                 } header: {
                     Label("Data", systemImage: "externaldrive")
+                } footer: {
+                    if let profileName = settings.activeProfile?.name {
+                        Text("Exporting and importing for profile: \(profileName)")
+                    }
                 }
 
                 
@@ -507,15 +606,14 @@ struct SettingsView: View {
                     Label("About", systemImage: "info.circle")
                 }
             }
+            .formStyle(.grouped)
             .navigationTitle("Settings")
             .sheet(isPresented: $showProfileSelection) {
                 ProfileSelectionView()
+                    .environment(settings)
+                    .environment(podcastManager)
             }
-            .alert("About gPodder Sync", isPresented: $showGPodderInfo) {
-                Button("OK") { }
-            } message: {
-                Text("YourPods is designed to work best with a gPodder-compatible sync server (like Nextcloud). You can sync your subscriptions, listening progress, and queue between devices.\n\nYou can also use the app in local-only mode without any server.")
-            }
+
             .sheet(isPresented: $showOPMLExport) {
                 if let url = opmlExportURL {
                     ShareSheet(url: url)
@@ -533,7 +631,13 @@ struct SettingsView: View {
     
     private func exportOPML() {
         isExportingOPML = true
-        let xml = OPMLService.export(podcasts: podcastManager.subscriptions)
+        let profileId = settings.activeProfileId ?? "global"
+        let groups = PodcastGroup.loadGroups(forProfileId: profileId)
+        let xml = OPMLService.export(
+            podcasts: podcastManager.subscriptions,
+            groups: groups,
+            profileName: settings.activeProfile?.name
+        )
         
         let tempDir = FileManager.default.temporaryDirectory
         let fileURL = tempDir.appendingPathComponent("yourpods_subscriptions.opml")
@@ -556,16 +660,78 @@ struct SettingsView: View {
             defer { url.stopAccessingSecurityScopedResource() }
             
             if let data = try? Data(contentsOf: url) {
-                let feedUrls = OPMLService.parseURLs(from: data)
-                for feedUrl in feedUrls {
+                let importResult = OPMLService.parseWithGroups(from: data)
+                let profileId = settings.activeProfileId ?? "global"
+                
+                // Import groups if present
+                if !importResult.groups.isEmpty {
+                    var existingGroups = PodcastGroup.loadGroups(forProfileId: profileId)
+                    for importedGroup in importResult.groups {
+                        if !existingGroups.contains(where: { $0.name == importedGroup.name }) {
+                            existingGroups.append(importedGroup)
+                        }
+                    }
+                    PodcastGroup.saveGroups(existingGroups, forProfileId: profileId)
+                }
+                
+                // Collect all feed URLs (grouped + ungrouped)
+                let allGroupedUrls = importResult.groupedUrls  // [groupName: [url]]
+                let allUngroupedUrls = importResult.ungroupedUrls
+                
+                // Subscribe to grouped podcasts and assign group + settings
+                for (groupName, feedUrls) in allGroupedUrls {
+                    for feedUrl in feedUrls {
+                        Task {
+                            try? await podcastManager.addSubscription(url: feedUrl)
+                            applyImportSettings(
+                                url: feedUrl, groupName: groupName,
+                                podcastSettings: importResult.podcastSettings,
+                                profileId: profileId
+                            )
+                        }
+                    }
+                }
+                
+                // Subscribe to ungrouped podcasts and apply settings only
+                for feedUrl in allUngroupedUrls {
                     Task {
                         try? await podcastManager.addSubscription(url: feedUrl)
+                        applyImportSettings(
+                            url: feedUrl, groupName: nil,
+                            podcastSettings: importResult.podcastSettings,
+                            profileId: profileId
+                        )
                     }
                 }
             }
         case .failure:
             break
         }
+    }
+    
+    /// Apply per-podcast settings and group assignment from an OPML import.
+    private func applyImportSettings(
+        url: String,
+        groupName: String?,
+        podcastSettings: [String: PodcastSettings],
+        profileId: String
+    ) {
+        guard let podcast = podcastManager.subscriptions.first(where: { $0.url == url }) else { return }
+        
+        // Apply per-podcast settings
+        if let importedSettings = podcastSettings[url] {
+            podcast.settings = importedSettings
+        }
+        
+        // Assign to group
+        if let groupName {
+            let groups = PodcastGroup.loadGroups(forProfileId: profileId)
+            if let group = groups.first(where: { $0.name == groupName }) {
+                podcast.groupId = group.id
+            }
+        }
+        
+        try? podcastManager.saveContext()
     }
 }
 

@@ -1,34 +1,55 @@
 import SwiftUI
 
-/// Episode list for a specific podcast. Port of episode_list_screen.dart.
+/// Episode list for a specific podcast.
 struct PodcastDetailView: View {
     @Environment(PodcastManager.self) private var podcastManager
     @Environment(PlayerManager.self) private var playerManager
     @Environment(DownloadManager.self) private var downloadManager
     @Environment(SettingsManager.self) private var settingsManager
+    @Environment(NavigationState.self) private var navigationState
+    @Environment(\.modelContext) private var modelContext
     let podcast: Podcast
     
     @State private var showSettings = false
     @State private var isRefreshing = false
-    @State private var selectedEpisode: Episode?
+    @State private var episodeSheetItem: EpisodeSheetItem?
     @State private var showMarkAllConfirmation = false
+    @State private var showHideOlderConfirmation = false
     @State private var episodeToDeleteDownload: Episode?
     @State private var isDescriptionExpanded = false
     @AppStorage("skipDeleteDownloadConfirmation") private var skipDeleteConfirmation = false
+    @AppStorage("showHiddenEpisodes") private var showHidden = false
     
     private var allEpisodes: [Episode] {
-        podcast.episodes.sorted { ($0.pubDate ?? .distantPast) > ($1.pubDate ?? .distantPast) }
+        podcast.episodes
+            .filter { !$0.isStale }
+            .sorted { ($0.pubDate ?? .distantPast) > ($1.pubDate ?? .distantPast) }
     }
     
     private var visibleEpisodes: [Episode] {
+        var eps = allEpisodes
         if settingsManager.hidePlayedEpisodes {
-            return allEpisodes.filter { !$0.isPlayed }
+            // When Hide Played is on, show unplayed episodes.
+            // If Show Hidden is also on, additionally include hidden episodes.
+            if showHidden {
+                eps = eps.filter { !$0.isPlayed || podcastManager.episodeActionSync.isHidden(guid: $0.guid) }
+            } else {
+                eps = eps.filter { !$0.isPlayed }
+            }
+        } else if !showHidden {
+            // When Hide Played is off, filter out hidden episodes (they appear played)
+            // unless Show Hidden is on
+            eps = eps.filter { !podcastManager.episodeActionSync.isHidden(guid: $0.guid) || !$0.isPlayed }
         }
-        return allEpisodes
+        return eps
     }
     
     private var playedCount: Int {
         allEpisodes.filter { $0.isPlayed }.count
+    }
+    
+    private var hiddenCount: Int {
+        podcastManager.episodeActionSync.hiddenGuids(for: podcast).count
     }
     
     private var unplayedCount: Int {
@@ -41,7 +62,7 @@ struct PodcastDetailView: View {
             Section {
                 HStack(spacing: 16) {
                     ZStack(alignment: .bottomTrailing) {
-                        AsyncImage(url: URL(string: podcast.logoUrl ?? "")) { image in
+                        CachedAsyncImage(url: URL(string: podcast.logoUrl ?? "")) { image in
                             image.resizable().aspectRatio(contentMode: .fill)
                         } placeholder: {
                             RoundedRectangle(cornerRadius: 12).fill(.quaternary)
@@ -146,6 +167,20 @@ struct PodcastDetailView: View {
                     Label("Hide Played", systemImage: "eye.slash")
                 }
                 
+                if hiddenCount > 0 {
+                    Toggle(isOn: $showHidden) {
+                        Label("Show Hidden (\(hiddenCount))", systemImage: "eye")
+                    }
+                }
+                
+                if unplayedCount > 0 {
+                    Button(role: .destructive) {
+                        showHideOlderConfirmation = true
+                    } label: {
+                        Label("Hide Older Episodes (\(unplayedCount))", systemImage: "eye.slash.fill")
+                    }
+                }
+                
                 if unplayedCount > 0 {
                     Button(role: .destructive) {
                         showMarkAllConfirmation = true
@@ -164,15 +199,18 @@ struct PodcastDetailView: View {
             // Episodes
             Section("\(visibleEpisodes.count) Episodes") {
                 ForEach(visibleEpisodes) { episode in
+                    let isHidden = podcastManager.episodeActionSync.isHidden(guid: episode.guid)
                     EpisodeRow(
                         episode: episode,
                         isPlaying: episode.guid == playerManager.currentEpisodeGuid,
                         isDownloaded: downloadManager.isDownloaded(episode.guid),
                         isDownloading: downloadManager.activeDownloads[episode.guid] != nil,
+                        isHidden: isHidden,
                         onDownloadTap: { downloadAction(episode) },
                         onMenuAction: { action in handleMenuAction(action, episode: episode) },
-                        onTap: { selectedEpisode = episode }
+                        onTap: { episodeSheetItem = EpisodeSheetItem(episode: episode) }
                     )
+                    .opacity(isHidden && showHidden ? 0.5 : 1.0)
                     .contextMenu {
                         Button { handleMenuAction(.play, episode: episode) } label: {
                             Label("Play", systemImage: "play.fill")
@@ -186,14 +224,21 @@ struct PodcastDetailView: View {
                         Divider()
                         Button { handleMenuAction(.download, episode: episode) } label: {
                             Label(
-                                downloadManager.isDownloaded(episode.guid) ? "Remove Download" : "Download",
-                                systemImage: downloadManager.isDownloaded(episode.guid) ? "trash" : "arrow.down.circle"
+                                EpisodeDownloadHelper.downloadLabel(isDownloaded: downloadManager.isDownloaded(episode.guid)),
+                                systemImage: EpisodeDownloadHelper.downloadIcon(isDownloaded: downloadManager.isDownloaded(episode.guid))
                             )
                         }
                         Button { handleMenuAction(.markPlayed, episode: episode) } label: {
                             Label(
                                 episode.isPlayed ? "Mark as Unplayed" : "Mark as Played",
                                 systemImage: episode.isPlayed ? "circle" : "checkmark.circle"
+                            )
+                        }
+                        Divider()
+                        Button { handleMenuAction(.hide, episode: episode) } label: {
+                            Label(
+                                isHidden ? "Unhide" : "Hide",
+                                systemImage: isHidden ? "eye" : "eye.slash"
                             )
                         }
                         Divider()
@@ -206,7 +251,7 @@ struct PodcastDetailView: View {
         }
         .navigationTitle(podcast.title)
         #if os(iOS)
-        .navigationBarTitleDisplayMode(.inline)
+        .inlineNavigationBarTitle()
         #endif
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -216,13 +261,28 @@ struct PodcastDetailView: View {
             }
         }
         .refreshable {
-            _ = try? await podcastManager.refreshFeed(for: podcast)
+            let strategy = settingsManager.syncConflictStrategy
+            let conflicts = await podcastManager.refreshAndSync(
+                playerManager: playerManager,
+                downloadManager: downloadManager,
+                settingsManager: settingsManager,
+                strategy: strategy
+            )
+            if !conflicts.isEmpty && strategy == .ask {
+                playerManager.pendingConflicts = conflicts
+            }
         }
         .sheet(isPresented: $showSettings) {
             PodcastSettingsSheet(podcast: podcast)
         }
-        .sheet(item: $selectedEpisode) { episode in
-            EpisodeDetailSheet(episode: episode)
+        .sheet(item: $episodeSheetItem) { item in
+            EpisodeDetailSheet(episode: item.episode)
+                .environment(playerManager)
+                .environment(podcastManager)
+                .environment(downloadManager)
+                .environment(settingsManager)
+                .environment(navigationState)
+                .modelContext(modelContext)
         }
         .confirmationDialog(
             "Mark All as Played",
@@ -261,6 +321,32 @@ struct PodcastDetailView: View {
         } message: {
             Text("This will remove the downloaded episode from your device.")
         }
+        .confirmationDialog(
+            "Hide Older Episodes",
+            isPresented: $showHideOlderConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Hide \(unplayedCount) Unplayed Episodes", role: .destructive) {
+                let unplayed = allEpisodes.filter { !$0.isPlayed }
+                var requests: [ProHideEpisodeRequest] = []
+                for ep in unplayed {
+                    podcastManager.episodeActionSync.setHidden(guid: ep.guid, hidden: true)
+                    if let podcastUrl = ep.podcastUrl, let audioUrl = ep.audioUrl {
+                        requests.append(ProHideEpisodeRequest(episodeUrl: audioUrl, podcastUrl: podcastUrl))
+                    }
+                }
+                podcastManager.episodeActionSync.persistHiddenGuids()
+                // Sync batch to server
+                Task {
+                    if let client = podcastManager.currentSyncClient, !requests.isEmpty {
+                        try? await client.hideEpisodes(requests)
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("This will hide all \(unplayedCount) unplayed episodes from this podcast. They won't appear in your feed but can be shown again with the Show Hidden toggle.")
+        }
     }
     
     private func downloadAction(_ episode: Episode) {
@@ -276,7 +362,8 @@ struct PodcastDetailView: View {
                 ? KeychainHelper.shared.buildBasicAuthHeader(forPodcastUrl: episode.podcast!.url)
                     .map { ["Authorization": $0] }
                 : nil
-            downloadManager.downloadEpisode(guid: episode.guid, audioUrl: audioUrl, authHeaders: authHeaders)
+            let privacyMode = episode.podcast?.effectiveSettings.privacyMode ?? settingsManager.p3Enabled
+            downloadManager.downloadEpisode(guid: episode.guid, audioUrl: audioUrl, authHeaders: authHeaders, privacyMode: privacyMode)
         }
     }
     
@@ -298,8 +385,23 @@ struct PodcastDetailView: View {
                     podcastManager.markEpisodeAsPlayed(podcastUrl: podcastUrl, episodeGuid: episode.guid)
                 }
             }
+        case .hide:
+            let isHidden = podcastManager.episodeActionSync.isHidden(guid: episode.guid)
+            podcastManager.episodeActionSync.setHidden(guid: episode.guid, hidden: !isHidden)
+            podcastManager.episodeActionSync.persistHiddenGuids()
+            // Sync to server
+            Task {
+                guard let podcastUrl = episode.podcastUrl, let audioUrl = episode.audioUrl else { return }
+                if let client = podcastManager.currentSyncClient {
+                    if !isHidden {
+                        try? await client.hideEpisodes([ProHideEpisodeRequest(episodeUrl: audioUrl, podcastUrl: podcastUrl)])
+                    } else {
+                        try? await client.unhideEpisode(episodeUrl: audioUrl)
+                    }
+                }
+            }
         case .details:
-            selectedEpisode = episode
+            episodeSheetItem = EpisodeSheetItem(episode: episode)
         }
     }
 }
@@ -447,7 +549,7 @@ extension PodcastDetailView {
 // MARK: - Episode Menu Action
 
 enum EpisodeMenuAction {
-    case play, playNext, addToQueue, download, markPlayed, details
+    case play, playNext, addToQueue, download, markPlayed, hide, details
 }
 
 // MARK: - Episode Row
@@ -457,6 +559,7 @@ struct EpisodeRow: View {
     let isPlaying: Bool
     let isDownloaded: Bool
     var isDownloading: Bool = false
+    var isHidden: Bool = false
     var onDownloadTap: () -> Void = {}
     var onMenuAction: (EpisodeMenuAction) -> Void = { _ in }
     var onTap: () -> Void = {}
@@ -467,18 +570,15 @@ struct EpisodeRow: View {
                 // Episode-specific artwork
                 let imageUrl = episode.imageUrl ?? episode.podcast?.logoUrl
                 ZStack(alignment: .bottomTrailing) {
-                    AsyncImage(url: URL(string: imageUrl ?? "")) { phase in
-                        switch phase {
-                        case .success(let image):
-                            image.resizable().aspectRatio(contentMode: .fill)
-                        default:
-                            RoundedRectangle(cornerRadius: 8).fill(.quaternary)
-                                .overlay {
-                                    Image(systemName: "waveform")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                        }
+                    CachedAsyncImage(url: URL(string: imageUrl ?? "")) { image in
+                        image.resizable().aspectRatio(contentMode: .fill)
+                    } placeholder: {
+                        RoundedRectangle(cornerRadius: 8).fill(.quaternary)
+                            .overlay {
+                                Image(systemName: "waveform")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                     }
                     .frame(width: 48, height: 48)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -637,5 +737,26 @@ struct EpisodeRow: View {
         }
         .buttonStyle(.plain)
         .padding(.vertical, 4)
+        // MARK: VoiceOver Accessibility
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(EpisodeAccessibility.episodeLabel(
+            title: episode.title,
+            podcastTitle: episode.podcastTitle,
+            pubDate: episode.pubDate,
+            durationSeconds: episode.durationSeconds,
+            listenedSeconds: episode.listenedSeconds,
+            isPlayed: episode.isPlayed,
+            isPlaying: isPlaying,
+            isDownloaded: isDownloaded,
+            isHidden: isHidden
+        ))
+        .accessibilityHint(EpisodeAccessibility.episodeHint())
+        .accessibilityAddTraits(isPlaying ? [.isSelected, .startsMediaSession] : .startsMediaSession)
+        .accessibilityAction(named: "Play") { onMenuAction(.play) }
+        .accessibilityAction(named: "Play Next") { onMenuAction(.playNext) }
+        .accessibilityAction(named: "Add to Queue") { onMenuAction(.addToQueue) }
+        .accessibilityAction(named: isDownloaded ? "Remove Download" : "Download") { onMenuAction(.download) }
+        .accessibilityAction(named: episode.isPlayed ? "Mark as Unplayed" : "Mark as Played") { onMenuAction(.markPlayed) }
+        .accessibilityAction(named: isHidden ? "Unhide" : "Hide") { onMenuAction(.hide) }
     }
 }

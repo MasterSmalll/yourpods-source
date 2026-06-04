@@ -69,17 +69,17 @@ final class SleepTimerManager {
         logger.info("Sleep timer extended by \(minutes) minutes, \(self.remainingSeconds)s remaining")
     }
     
-    /// Activate "End of Episode" mode — playback stops when the current episode finishes.
+    /// Activate "DriftOff Mode" — playback stops when the current episode finishes.
     func startEndOfEpisode() {
         stop() // Cancel any running countdown timer
         stopAfterCurrentEpisode = true
-        logger.info("Sleep timer: end-of-episode mode activated")
+        logger.info("Sleep timer: DriftOff Mode activated")
     }
     
-    /// Cancel "End of Episode" mode.
+    /// Cancel "DriftOff Mode".
     func cancelEndOfEpisode() {
         stopAfterCurrentEpisode = false
-        logger.info("Sleep timer: end-of-episode mode cancelled")
+        logger.info("Sleep timer: DriftOff Mode cancelled")
     }
     
     /// Formatted remaining time string (e.g. "14:32").

@@ -4,8 +4,7 @@ import SwiftData
 /// Root content view with tab navigation and persistent mini-player.
 ///
 /// The TabView **always** renders immediately to prevent any black screen.
-/// Migration runs inline on first appear, and a fullScreenCover dialog
-/// is shown afterwards if Flutter data was detected.
+/// First-launch onboarding shows a profile setup sheet for new installs.
 struct ContentView: View {
     @Environment(PlayerManager.self) private var playerManager
     @Environment(PodcastManager.self) private var podcastManager
@@ -13,15 +12,7 @@ struct ContentView: View {
     @Environment(NavigationState.self) private var navigationState
     @Environment(\.modelContext) private var modelContext
     
-    /// Show the migration success dialog (fullScreenCover).
-    @State private var showMigrationDialog = false
-    /// True when the migrated profile is a server profile (needs password re-entry).
-    @State private var migratedServerProfile = false
-    /// Show profile edit sheet after the user taps "Continue" in migration dialog.
-    @State private var showProfileSheet = false
-    /// Prevent migration from running more than once per app session.
-    @State private var migrationChecked = false
-    /// Show onboarding profile setup for fresh installs (no migration data).
+    /// Show onboarding profile setup for fresh installs.
     @State private var showOnboarding = false
     
     var body: some View {
@@ -61,81 +52,53 @@ struct ContentView: View {
                     .tag(4)
             }
             .id(settingsManager.tabBarDisplayMode)
+            #if os(iOS)
             .onAppear { applyTabBarTitlePosition() }
             .onChange(of: settingsManager.tabBarDisplayMode) { applyTabBarTitlePosition() }
+            #endif
             .padding(.bottom, playerManager.currentEpisodeGuid != nil ? 90 : 0)
             
             // Persistent mini-player
             if playerManager.currentEpisodeGuid != nil {
                 NowPlayingBar()
                     .transition(.move(edge: .bottom))
+                    .accessibilityElement(children: .contain)
+                    .accessibilityLabel("Mini player")
             }
         }
-        // ── Migration / Onboarding: runs once, shows dialog if needed ──
+        // ── Onboarding: show profile setup on fresh installs ──
         .task {
-            guard !migrationChecked else { return }
-            migrationChecked = true
-            
-            // Give the UI a moment to render the first frame (the TabView).
-            // This prevents a black screen on launch if the synchronous 
-            // migration takes several seconds on the main thread.
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
-            
-            if FlutterDataMigrator.needsMigration {
-                let hasServerProfile = FlutterDataMigrator.migrateIfNeeded(
-                    podcastManager: podcastManager,
-                    settingsManager: settingsManager,
-                    modelContext: modelContext
-                )
-                
-                podcastManager.loadSubscriptions()
-                
-                // Migration creates profiles — mark onboarding as done
-                settingsManager.hasCompletedOnboarding = true
-                
-                migratedServerProfile = hasServerProfile
-                showMigrationDialog = true
-            } else if !settingsManager.hasCompletedOnboarding {
-                // Fresh install with no migration data — show onboarding
+            if !settingsManager.hasCompletedOnboarding {
                 showOnboarding = true
             }
         }
-        // ── Migration success dialog ──
-        .fullScreenCover(isPresented: $showMigrationDialog) {
-            MigrationWelcomeView(hasServerProfile: migratedServerProfile) {
-                showMigrationDialog = false
-                if migratedServerProfile {
-                    // Give the cover a moment to dismiss, then open profile sheet
-                    Task {
-                        try? await Task.sleep(nanoseconds: 400_000_000)
-                        navigationState.selectedTab = 4
-                        showProfileSheet = true
-                    }
-                }
-            }
-        }
-        // ── Profile sheet (for post-migration password re-entry) ──
-        .sheet(isPresented: $showProfileSheet) {
-            NavigationStack {
-                ProfileSelectionView()
-                    .toolbar {
-                        ToolbarItem(placement: .cancellationAction) {
-                            Button("Done") { showProfileSheet = false }
-                        }
-                    }
-            }
-        }
-        // ── First-launch onboarding: require profile before use ──
+        // ── First-launch onboarding: multi-page flow ──
+        #if os(iOS)
         .fullScreenCover(isPresented: $showOnboarding) {
-            ProfileSelectionView(isOnboarding: true)
+            OnboardingView()
+                .environment(settingsManager)
+                .environment(podcastManager)
+                .environment(navigationState)
                 .interactiveDismissDisabled()
         }
+        #else
+        .sheet(isPresented: $showOnboarding) {
+            OnboardingView()
+                .environment(settingsManager)
+                .environment(podcastManager)
+                .environment(navigationState)
+                .interactiveDismissDisabled()
+                .frame(minWidth: 500, minHeight: 600)
+        }
+        #endif
         // ── Sync conflict resolution (shown when strategy = .ask) ──
         .sheet(isPresented: Binding(
             get: { !playerManager.pendingConflicts.isEmpty || !playerManager.pendingUrlRewrites.isEmpty },
             set: { if !$0 { playerManager.pendingConflicts.removeAll(); playerManager.pendingUrlRewrites.removeAll() } }
         )) {
             SyncConflictSheet()
+                .environment(podcastManager)
+                .environment(playerManager)
         }
     }
     
@@ -154,6 +117,7 @@ struct ContentView: View {
     }
     
     /// Adjust tab bar title position — center text vertically when in text-only mode.
+    #if os(iOS)
     private func applyTabBarTitlePosition() {
         let appearance = UITabBarItem.appearance()
         if settingsManager.tabBarDisplayMode == .textOnly {
@@ -162,4 +126,5 @@ struct ContentView: View {
             appearance.titlePositionAdjustment = .zero
         }
     }
+    #endif
 }

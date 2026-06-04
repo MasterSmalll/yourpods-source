@@ -73,20 +73,29 @@ Real-time playback status on your Lock Screen and Dynamic Island — always visi
 
 ---
 
-## What's New in 2.0.2
+## What's New in 2.0.4
 
-The latest release includes stability and reliability improvements built on the 2.0 foundation:
+The latest release brings P3 privacy mode, new episode notifications, and 50+ reliability fixes:
 
-- **SQLite corruption recovery** — Automatic detection and recovery from store corruption, including crash-sentinel protection for signal-level failures
-- **Sleep timer: end of episode** — Stop playback automatically at the end of the current episode
-- **Podlove chapter sync** — Chapters now refresh correctly for episodes synced before chapter support was added
-- **Watch playback resolution** — Prioritizes local downloads for on-watch playback with streaming fallback
-- **Battery optimizations** — Configurable watch sync intervals and reduced background timer overhead on iPhone
-- **Improved download cleanup** — Time-based policies (1 week / 1 month) with per-podcast overrides
+- **P3 (Privacy Preserving Playback)** — Blocks 30+ tracking domains from episode URLs before playback. Enable globally or per-podcast. Green shield on Now Playing when active.
+- **New episode notifications** — Local push alerts when new episodes arrive. Per-podcast controls. 100% local — no push servers.
+- **Hidden episodes** — Declutter your feed without affecting listening stats. Batch-hide old episodes. Hidden state syncs across devices.
+- **Clear Queue** — One-tap clear from the Up Next overflow menu.
+- **Episode Activity** — Chronological played-episode list with progress, timestamp, and device.
+- **Background sync fixed** — The toggle, interval, and re-scheduling all work reliably now.
+- **6× faster feed refresh** with concurrent fetching and real-time progress display.
+- **95% reduction in disk I/O** during playback.
+- **Custom gpodder.net server address** — Point at your own gpodder.net-compatible instance.
+- **watchOS: Recently Updated** — 10 most recent unplayed episodes on your wrist.
+- 50+ additional sync, stability, and crash fixes.
+
+### 2.0.3 — Podcast Groups, VoiceOver & Watch Background Audio
+
+Organize your library into **Podcast Groups** (named folders with CarPlay browsing), enjoy comprehensive **VoiceOver** support, and use **true background audio on Apple Watch** with automatic auto-advance. Plus enriched OPML export, smarter chapters, and streamlined onboarding.
 
 ### 2.0 — Complete Native Rewrite
 
-YourPods 2.0 was a ground-up rewrite from Flutter/Dart to **100% native Swift and SwiftUI**. Faster launch times, smoother animations, reduced memory, and automatic migration from v1.x — no data loss.
+YourPods 2.0 was a ground-up rewrite — **100% native Swift and SwiftUI**. Faster launch times, smoother animations, reduced memory, and automatic migration from v1.x — no data loss.
 
 ---
 
@@ -120,7 +129,7 @@ YourPods 2.0 was a ground-up rewrite from Flutter/Dart to **100% native Swift an
 | `YourPods/Audio/` | AVAudioEngine-based playback engine |
 | `YourPods/Models/` | SwiftData models — Podcast, Episode, ServerProfile, Chapter, EpisodeAction |
 | `YourPods/Networking/` | gPodder API client, RSS parser, URL resolver |
-| `YourPods/Services/` | CarPlay, Siri, Live Activities, Chapters, Transcripts, Watch, Downloads, Background Refresh, Listening Stats, OPML, Flutter migration |
+| `YourPods/Services/` | CarPlay, Siri, Live Activities, Chapters, Transcripts, Watch, Downloads, Background Refresh, Listening Stats, OPML |
 | `YourPods/State/` | Observable state managers — Player, Podcast, Settings, Navigation, Sleep Timer |
 | `YourPods/Views/` | SwiftUI views and reusable components |
 | `YourPodsWatch/` | watchOS app with standalone playback |

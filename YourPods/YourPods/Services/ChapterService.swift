@@ -3,7 +3,7 @@ import os
 import CryptoKit
 
 /// Fetches and caches Podcasting 2.0 chapters from external JSON URLs.
-/// Port of chapter_service.dart.
+///
 actor ChapterService {
     static let shared = ChapterService()
     private let logger = Logger(subsystem: "com.yourpods", category: "ChapterService")
@@ -122,11 +122,30 @@ actor ChapterService {
     // MARK: - Description-based Chapter Parsing
     
     /// Extract chapters from timestamp patterns embedded in an episode description.
-    /// Supports formats like:
-    ///   (00:00:00) Title
-    ///   (05:48) Title
-    ///   00:00 - Title
-    ///   1:02:24 Title
+    ///
+    /// Supports a wide range of formats podcasters use in show notes:
+    ///
+    /// **Delimiter styles:**
+    ///   - `(00:00) Title`        — parenthesized
+    ///   - `[00:00] Title`        — bracketed (Tim Ferriss Show)
+    ///   - `00:00 Title`          — bare timestamp
+    ///
+    /// **Separator styles:**
+    ///   - `00:00 - Title`        — dash
+    ///   - `00:00 — Title`        — em-dash
+    ///   - `00:00: Title`         — colon
+    ///   - `00:00 | Title`        — pipe
+    ///
+    /// **List-prefix styles:**
+    ///   - `• 00:00 Title`        — bullet
+    ///   - `- 00:00 Title`        — dash list marker
+    ///   - `* 00:00 Title`        — asterisk list marker
+    ///   - `1. 00:00 Title`       — numbered list
+    ///
+    /// **Combinations:**
+    ///   - `• [00:00] - Title`    — prefix + delimiter + separator
+    ///   - `1. (1:02:30) Title`   — numbered + paren + HH:MM:SS
+    ///
     /// Returns an empty array if fewer than 2 timestamps are found (a single timestamp isn't useful as chapters).
     static func parseChaptersFromDescription(_ description: String) -> [Chapter] {
         // Strip HTML tags — convert block elements to newlines first, then remove remaining tags
@@ -144,9 +163,12 @@ actor ChapterService {
             .replacingOccurrences(of: "&nbsp;", with: " ")
         
         // Match timestamps in various formats:
-        // Group 1: timestamp (HH:MM:SS or MM:SS)
-        // Group 2: title text (rest of line after separator)
-        let pattern = #"(?:^|\n)\s*\(?(\d{1,2}:\d{2}:\d{2}|\d{1,2}:\d{2})\)?\s*[-–—]?\s*(.+?)(?:\n|$)"#
+        //   Optional list prefix: bullet (•·), dash, asterisk, or numbered (1. / 2))
+        //   Optional delimiters:  ( ) or [ ]
+        //   Timestamp:            HH:MM:SS or MM:SS
+        //   Optional separator:   - – — : |
+        //   Title:                rest of the line
+        let pattern = #"(?:^|\n)\s*(?:[-•·*]\s+|\d+[.)]\s+)?[\[\(]?(\d{1,2}:\d{2}:\d{2}|\d{1,2}:\d{2})[\]\)]?\s*[-–—:|]?\s*(.+?)(?:\n|$)"#
         
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.anchorsMatchLines]) else {
             return []

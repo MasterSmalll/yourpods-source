@@ -10,23 +10,46 @@ struct HomeView: View {
     @Environment(DownloadManager.self) private var downloadManager
     @Environment(SettingsManager.self) private var settingsManager
     @Environment(NavigationState.self) private var navigationState
+    @Environment(\.modelContext) private var modelContext
     
-    @State private var selectedEpisode: Episode?
+    @State private var episodeSheetItem: EpisodeSheetItem?
     
     /// Collect the newest unplayed, non-interacted episodes across all subscriptions.
+    /// Limited to episodes from the last 2 months to ensure podcast diversity.
     private var recentEpisodes: [Episode] {
-        podcastManager.subscriptions
-            .flatMap { $0.episodes }
-            .filter { !$0.isPlayed && !$0.isInteracted }
-            .sorted { ($0.pubDate ?? .distantPast) > ($1.pubDate ?? .distantPast) }
-            .prefix(Self.recentEpisodesLimit)
-            .map { $0 }
+        RecentlyUpdatedFilter.filter(
+            episodes: podcastManager.subscriptions.flatMap { $0.episodes },
+            limit: Self.recentEpisodesLimit
+        )
     }
     
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
+                    // Connectivity banner
+                    OfflineBanner {
+                        Task {
+                            let strategy = settingsManager.syncConflictStrategy
+                            let conflicts = await podcastManager.refreshAndSync(
+                                playerManager: playerManager,
+                                downloadManager: downloadManager,
+                                settingsManager: settingsManager,
+                                strategy: strategy
+                            )
+                            if !conflicts.isEmpty && strategy == .ask {
+                                playerManager.pendingConflicts = conflicts
+                            }
+                        }
+                    }
+                    
+                    // Pro sync auth-error banner (403 / 401)
+                    if let syncError = podcastManager.lastSyncError {
+                        SyncErrorBanner(message: syncError) {
+                            podcastManager.lastSyncError = nil
+                        }
+                    }
+                    
                     // Recently Updated Episodes
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Recently Updated")
@@ -52,6 +75,18 @@ struct HomeView: View {
                         }
                     }
                     
+                    // Now Playing (if active)
+                    if let item = playerManager.audioManager.currentItem {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Now Playing")
+                                .font(.title2.bold())
+                                .padding(.horizontal)
+                            
+                            NowPlayingCard(item: item)
+                                .padding(.horizontal)
+                        }
+                    }
+                    
                     // Quick Actions
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Quick Actions")
@@ -62,7 +97,7 @@ struct HomeView: View {
                             QuickActionButton(
                                 title: "Refresh & Sync",
                                 icon: "arrow.triangle.2.circlepath",
-                                isLoading: podcastManager.isRefreshing
+                                isLoading: podcastManager.isRefreshing || podcastManager.isSyncing
                             ) {
                                 let pm = podcastManager
                                 let plm = playerManager
@@ -91,23 +126,12 @@ struct HomeView: View {
                         }
                         .padding(.horizontal)
                     }
-                    
-                    // Now Playing (if active)
-                    if let item = playerManager.audioManager.currentItem {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("Now Playing")
-                                .font(.title2.bold())
-                                .padding(.horizontal)
-                            
-                            NowPlayingCard(item: item)
-                                .padding(.horizontal)
-                        }
-                    }
                 }
-                .padding(.vertical)
+                .padding(.top)
+                .padding(.bottom, playerManager.currentEpisodeGuid != nil ? 100 : 16)
             }
             .navigationTitle("YourPods")
-            .navigationBarTitleDisplayMode(.inline)
+            .inlineNavigationBarTitle()
             .toolbar {
                 ToolbarItem(placement: .principal) {
                     HStack(spacing: 6) {
@@ -124,8 +148,14 @@ struct HomeView: View {
             .navigationDestination(for: Podcast.self) { podcast in
                 PodcastDetailView(podcast: podcast)
             }
-            .sheet(item: $selectedEpisode) { episode in
-                EpisodeDetailSheet(episode: episode)
+            .sheet(item: $episodeSheetItem) { item in
+                EpisodeDetailSheet(episode: item.episode)
+                    .environment(playerManager)
+                    .environment(podcastManager)
+                    .environment(downloadManager)
+                    .environment(settingsManager)
+                    .environment(navigationState)
+                    .modelContext(modelContext)
             }
         }
     }
@@ -133,10 +163,14 @@ struct HomeView: View {
     /// Determines if an episode is "new" based on the podcast's markedPlayedBefore date.
     private func isNewEpisode(_ episode: Episode) -> Bool {
         guard let podcast = episode.podcast else { return false }
+        // Guard: podcast may be mid-deletion (deleted from context but SwiftUI hasn't
+        // refreshed its @Query yet). effectiveSettings is safe to call here now.
+        guard !podcast.isDeleted else { return false }
         guard let markedBefore = podcast.effectiveSettings.markedPlayedBefore else { return true }
         guard let pubDate = episode.pubDate else { return false }
         return pubDate > markedBefore
     }
+
     
     // MARK: - Recently Updated Layout
     
@@ -191,7 +225,7 @@ struct HomeView: View {
     @ViewBuilder
     private func recentEpisodeButton(for episode: Episode) -> some View {
         Button {
-            selectedEpisode = episode
+            episodeSheetItem = EpisodeSheetItem(episode: episode)
         } label: {
             RecentEpisodeCard(
                 episode: episode,
@@ -218,6 +252,14 @@ struct HomeView: View {
             }
             Divider()
             Button {
+                downloadAction(episode)
+            } label: {
+                Label(
+                    EpisodeDownloadHelper.downloadLabel(isDownloaded: downloadManager.isDownloaded(episode.guid)),
+                    systemImage: EpisodeDownloadHelper.downloadIcon(isDownloaded: downloadManager.isDownloaded(episode.guid))
+                )
+            }
+            Button {
                 podcastManager.markEpisodeAsPlayed(
                     podcastUrl: episode.podcastUrl ?? "",
                     episodeGuid: episode.guid
@@ -225,7 +267,99 @@ struct HomeView: View {
             } label: {
                 Label("Mark as Played", systemImage: "checkmark.circle")
             }
+            Divider()
+            Button {
+                episodeSheetItem = EpisodeSheetItem(episode: episode)
+            } label: {
+                Label("Details", systemImage: "info.circle")
+            }
         }
+        // MARK: VoiceOver - Recent Episodes
+        .accessibilityAction(named: "Play") {
+            playerManager.playEpisode(episode)
+        }
+        .accessibilityAction(named: "Play Next") {
+            playerManager.addToQueue(episode, playNext: true)
+        }
+        .accessibilityAction(named: "Add to Queue") {
+            playerManager.addToQueue(episode)
+        }
+        .accessibilityAction(named: EpisodeDownloadHelper.accessibilityActionName(isDownloaded: downloadManager.isDownloaded(episode.guid))) {
+            downloadAction(episode)
+        }
+        .accessibilityAction(named: "Mark as Played") {
+            podcastManager.markEpisodeAsPlayed(
+                podcastUrl: episode.podcastUrl ?? "",
+                episodeGuid: episode.guid
+            )
+        }
+        .accessibilityAction(named: "Details") {
+            episodeSheetItem = EpisodeSheetItem(episode: episode)
+        }
+    }
+    
+    // MARK: - Download Action
+    
+    /// Toggle download state for an episode from context menu.
+    private func downloadAction(_ episode: Episode) {
+        if downloadManager.isDownloaded(episode.guid) {
+            downloadManager.deleteDownload(guid: episode.guid)
+        } else if let audioUrl = episode.audioUrl {
+            let authHeaders: [String: String]? = episode.podcast?.requiresAuth == true
+                ? KeychainHelper.shared.buildBasicAuthHeader(forPodcastUrl: episode.podcast!.url)
+                    .map { ["Authorization": $0] }
+                : nil
+            let privacyMode = episode.podcast?.effectiveSettings.privacyMode ?? settingsManager.p3Enabled
+            downloadManager.downloadEpisode(guid: episode.guid, audioUrl: audioUrl, authHeaders: authHeaders, privacyMode: privacyMode)
+        }
+    }
+}
+
+// MARK: - Sync Error Banner
+
+/// Shown when any sync backend (Pro or gPodder) returns an error.
+private struct SyncErrorBanner: View {
+    let message: String
+    let onDismiss: () -> Void
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.white)
+                .font(.body.weight(.semibold))
+            
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Sync Error")
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.white)
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.9))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            
+            Spacer()
+            
+            Button {
+                onDismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.caption.bold())
+                    .foregroundStyle(.white.opacity(0.8))
+                    .padding(6)
+                    .background(.white.opacity(0.15))
+                    .clipShape(Circle())
+            }
+            .accessibilityLabel("Dismiss sync error")
+        }
+        .padding()
+        .background(Color.red.gradient)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .padding(.horizontal)
+        .transition(.move(edge: .top).combined(with: .opacity))
+        .animation(.easeInOut(duration: 0.25), value: message)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Sync error: \(message)")
     }
 }
 
@@ -241,7 +375,7 @@ private struct RecentEpisodeCard: View {
             ZStack(alignment: .topTrailing) {
                 // Episode art, fallback to podcast art
                 let imageUrl = episode.imageUrl ?? podcastArtworkUrl ?? episode.podcast?.logoUrl
-                AsyncImage(url: URL(string: imageUrl ?? "")) { image in
+                CachedAsyncImage(url: URL(string: imageUrl ?? "")) { image in
                     image.resizable().aspectRatio(contentMode: .fill)
                 } placeholder: {
                     RoundedRectangle(cornerRadius: 10)
@@ -283,6 +417,16 @@ private struct RecentEpisodeCard: View {
             }
         }
         .frame(width: 110)
+        // MARK: VoiceOver
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel({
+            var label = episode.title
+            if let podcastTitle = episode.podcastTitle {
+                label += ", \(podcastTitle)"
+            }
+            if isNew { label += ", New episode" }
+            return label
+        }())
     }
 }
 
@@ -311,6 +455,7 @@ private struct QuickActionButton: View {
             .clipShape(RoundedRectangle(cornerRadius: 12))
         }
         .disabled(isLoading)
+        .accessibilityLabel(isLoading ? "\(title), loading" : title)
     }
 }
 
@@ -319,40 +464,119 @@ private struct QuickActionButton: View {
 private struct NowPlayingCard: View {
     let item: QueueItem
     @Environment(PlayerManager.self) private var playerManager
-    @State private var selectedEpisode: Episode?
+    @Environment(PodcastManager.self) private var podcastManager
+    @State private var chapters: [Chapter] = []
+    @State private var showChapters = false
+    
+    /// Artwork size — 15% smaller than the original 60pt.
+    private static let artworkSize: CGFloat = 51
+    
+    /// Current chapter based on playback position.
+    private var currentChapter: Chapter? {
+        guard !chapters.isEmpty else { return nil }
+        let pos = playerManager.currentPosition
+        return chapters.last(where: { $0.startTime <= pos })
+    }
     
     var body: some View {
         Button {
             playerManager.togglePlayPause()
         } label: {
-            HStack(spacing: 16) {
-                AsyncImage(url: URL(string: item.artworkUrl ?? "")) { image in
+            VStack(spacing: 0) {
+                // Album art
+                CachedAsyncImage(url: URL(string: item.artworkUrl ?? "")) { image in
                     image.resizable().aspectRatio(contentMode: .fill)
                 } placeholder: {
                     RoundedRectangle(cornerRadius: 8).fill(.quaternary)
                 }
-                .frame(width: 60, height: 60)
+                .frame(width: Self.artworkSize, height: Self.artworkSize)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
+                .padding(.top, 10)
+                .padding(.bottom, 6)
                 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(item.title)
-                        .font(.subheadline.bold())
-                        .lineLimit(2)
-                    Text(item.podcastTitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                // Thin info strip below artwork
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        // Title
+                        Text(item.title)
+                            .font(.caption.bold())
+                            .lineLimit(1)
+                        
+                        // Condensed metadata: podcast · date · duration/progress
+                        HStack(spacing: 4) {
+                            Text(item.podcastTitle)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                            
+                            let meta = NowPlayingCardHelper.condensedMetadata(
+                                pubDate: item.pubDate,
+                                durationSeconds: item.durationSeconds,
+                                position: playerManager.currentPosition,
+                                totalDuration: playerManager.currentDuration
+                            )
+                            if !meta.isEmpty {
+                                Text("·")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                                Text(meta)
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(1)
+                            }
+                        }
+                        
+                        // Chapter indicator
+                        if let chapter = currentChapter {
+                            Text(chapter.title)
+                                .font(.system(size: 9))
+                                .foregroundStyle(Color.accentColor)
+                                .lineLimit(1)
+                        }
+                    }
+                    
+                    Spacer(minLength: 4)
+                    
+                    Image(systemName: playerManager.isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                        .font(.title2)
+                        .foregroundStyle(.tint)
                 }
-                
-                Spacer()
-                
-                Image(systemName: playerManager.isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                    .font(.title)
-                    .foregroundStyle(.tint)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 8)
             }
-            .padding()
             .background(.ultraThinMaterial)
             .clipShape(RoundedRectangle(cornerRadius: 12))
         }
         .buttonStyle(.plain)
+        .sheet(isPresented: $showChapters) {
+            ChapterListSheet(chapters: chapters, currentPosition: playerManager.currentPosition) { chapter in
+                playerManager.seek(to: chapter.startTime)
+                showChapters = false
+            }
+            .presentationDetents([.medium, .large])
+        }
+        .simultaneousGesture(
+            // Long-press opens chapters if available
+            LongPressGesture().onEnded { _ in
+                if !chapters.isEmpty {
+                    showChapters = true
+                }
+            }
+        )
+        .task(id: playerManager.currentEpisodeGuid) {
+            chapters = []
+            chapters = await ChapterService.shared.fetchAllChapters(
+                chaptersUrl: item.chaptersUrl,
+                chaptersJSON: item.chaptersJSON,
+                description: item.episodeDescription
+            )
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(EpisodeAccessibility.nowPlayingLabel(
+            title: item.title,
+            podcastTitle: item.podcastTitle,
+            isPlaying: playerManager.isPlaying
+        ))
+        .accessibilityHint(playerManager.isPlaying ? "Double tap to pause" : "Double tap to play")
     }
 }

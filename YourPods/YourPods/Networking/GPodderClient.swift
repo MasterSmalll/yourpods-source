@@ -1,26 +1,40 @@
 import Foundation
 import os
 
-/// gPodder-compatible REST API client for Nextcloud gPodder Sync.
+/// gPodder-compatible REST API client for Nextcloud gPodder Sync and gpodder.net.
 /// Handles subscription management and episode action sync.
 actor GPodderClient {
     private let logger = Logger(subsystem: "com.yourpods", category: "GPodderClient")
     
+    /// Distinguishes API path construction between Nextcloud and gpodder.net.
+    enum ServerFlavor: String {
+        /// Nextcloud gPodder Sync app — uses `/index.php/apps/gpoddersync/...` paths.
+        case nextcloud
+        /// gpodder.net — uses `/api/2/...` paths for subscriptions and episode actions.
+        case gpodderNet
+    }
+    
     let baseUrl: String
-    private let username: String
+    let username: String
     private let password: String
     private let authHeader: String
     private let session: URLSession
+    let flavor: ServerFlavor
     
     /// Session cookie from `POST /api/2/auth/{user}/login.json` (nil if not authenticated or server doesn't support it).
     private var sessionCookie: String?
     /// Whether session auth has been attempted and failed (avoids retrying on NC gPodder).
     private var sessionAuthFailed = false
+    /// Whether ensureAuthenticated() has completed successfully (login + device registration for gpodder.net).
+    private var isSessionReady = false
+    /// The deviceId to register during ensureAuthenticated(). Set on first API call.
+    private var registeredDeviceId: String?
     
-    init(baseUrl: String, username: String, password: String, session: URLSession = .shared) {
+    init(baseUrl: String, username: String, password: String, flavor: ServerFlavor = .nextcloud, session: URLSession = .shared) {
         self.baseUrl = URLSanitizer.sanitize(baseUrl)
         self.username = username
         self.password = password
+        self.flavor = flavor
         self.session = session
         
         let credentials = "\(username):\(password)"
@@ -30,11 +44,35 @@ actor GPodderClient {
     
     // MARK: - Session Auth (gpodder.net API v2)
     
+    /// Ensures the client is ready to make API requests.
+    /// For gpodder.net: calls login() for session auth, then registerDevice() to
+    /// prevent 404 errors on subscription endpoints.
+    /// For Nextcloud: no-op (Basic auth + no device registration needed).
+    /// Runs once per client lifetime.
+    func ensureAuthenticated(deviceId: String? = nil) async throws {
+        guard flavor == .gpodderNet, !isSessionReady else { return }
+        
+        // Step 1: Establish session auth
+        try await login()
+        
+        // Step 2: Register the device so subscription endpoints don't 404
+        let effectiveDeviceId = deviceId ?? registeredDeviceId ?? "yourpods-ios"
+        registeredDeviceId = effectiveDeviceId
+        try await registerDevice(
+            deviceId: effectiveDeviceId,
+            caption: "YourPods",
+            type: "mobile"
+        )
+        
+        isSessionReady = true
+    }
+    
     /// Attempt session-based auth. Falls back to Basic auth if the server doesn't support it (e.g. NC gPodder).
     func login() async throws {
         guard !sessionAuthFailed else { return } // Don't retry if we already know it fails
         
-        let url = "\(baseUrl)/api/2/auth/\(username)/login.json"
+        let encodedUsername = username.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? username
+        let url = "\(baseUrl)/api/2/auth/\(encodedUsername)/login.json"
         do {
             let (_, response) = try await performPOSTRaw(url: url, body: ["username": username, "password": password])
             
@@ -62,7 +100,8 @@ actor GPodderClient {
     /// Logout and invalidate session cookie.
     func logout() async {
         guard sessionCookie != nil else { return }
-        let url = "\(baseUrl)/api/2/auth/\(username)/logout.json"
+        let encodedUsername = username.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? username
+        let url = "\(baseUrl)/api/2/auth/\(encodedUsername)/logout.json"
         do {
             _ = try await performPOSTRaw(url: url, body: nil)
         } catch {
@@ -74,7 +113,17 @@ actor GPodderClient {
     // MARK: - Subscriptions
     
     func getSubscriptionChanges(deviceId: String, since: Int) async throws -> SubscriptionDelta {
-        let url = "\(baseUrl)/index.php/apps/gpoddersync/subscriptions?since=\(since)"
+        try await ensureAuthenticated(deviceId: deviceId)
+        
+        let encodedUsername = username.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? username
+        let encodedDeviceId = deviceId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? deviceId
+        let url: String
+        switch flavor {
+        case .nextcloud:
+            url = "\(baseUrl)/index.php/apps/gpoddersync/subscriptions?since=\(since)"
+        case .gpodderNet:
+            url = "\(baseUrl)/api/2/subscriptions/\(encodedUsername)/\(encodedDeviceId).json?since=\(since)"
+        }
         let data = try await performGET(url: url)
         
         // Server may return a dict with add/remove/timestamp or a flat list (full sync)
@@ -95,7 +144,17 @@ actor GPodderClient {
     
     /// Upload subscription changes and parse any `update_urls` from the response.
     func updateSubscriptions(deviceId: String, add: [String] = [], remove: [String] = []) async throws -> [URLRewrite] {
-        let url = "\(baseUrl)/index.php/apps/gpoddersync/subscription_change/create?deviceid=\(deviceId)"
+        try await ensureAuthenticated(deviceId: deviceId)
+        
+        let encodedUsername = username.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? username
+        let encodedDeviceId = deviceId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? deviceId
+        let url: String
+        switch flavor {
+        case .nextcloud:
+            url = "\(baseUrl)/index.php/apps/gpoddersync/subscription_change/create?deviceid=\(encodedDeviceId)"
+        case .gpodderNet:
+            url = "\(baseUrl)/api/2/subscriptions/\(encodedUsername)/\(encodedDeviceId).json"
+        }
         let body: [String: Any] = ["add": add, "remove": remove]
         let responseData = try await performPOST(url: url, body: body)
         return parseUpdateUrls(from: responseData)
@@ -112,7 +171,9 @@ actor GPodderClient {
     
     /// Register or update a device on the server.
     func registerDevice(deviceId: String, caption: String, type: String = "mobile") async throws {
-        let url = "\(baseUrl)/api/2/devices/\(username)/\(deviceId).json"
+        let encodedUsername = username.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? username
+        let encodedDeviceId = deviceId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? deviceId
+        let url = "\(baseUrl)/api/2/devices/\(encodedUsername)/\(encodedDeviceId).json"
         let body: [String: Any] = ["caption": caption, "type": type]
         do {
             _ = try await performPOST(url: url, body: body)
@@ -125,7 +186,8 @@ actor GPodderClient {
     
     /// List devices registered on the server.
     func listDevices() async throws -> [[String: Any]] {
-        let url = "\(baseUrl)/api/2/devices/\(username).json"
+        let encodedUsername = username.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? username
+        let url = "\(baseUrl)/api/2/devices/\(encodedUsername).json"
         do {
             let data = try await performGET(url: url)
             return (try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]) ?? []
@@ -140,7 +202,16 @@ actor GPodderClient {
     /// Upload episode actions and parse any `update_urls` from the response.
     func uploadEpisodeActions(_ actions: [EpisodeAction]) async throws -> [URLRewrite] {
         guard !actions.isEmpty else { return [] }
-        let url = "\(baseUrl)/index.php/apps/gpoddersync/episode_action/create"
+        try await ensureAuthenticated()
+        
+        let encodedUsername = username.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? username
+        let url: String
+        switch flavor {
+        case .nextcloud:
+            url = "\(baseUrl)/index.php/apps/gpoddersync/episode_action/create"
+        case .gpodderNet:
+            url = "\(baseUrl)/api/2/episodes/\(encodedUsername).json"
+        }
         let body = actions.map { $0.toUploadJSON() }
         let jsonData = try JSONSerialization.data(withJSONObject: body)
         let responseData = try await performPOST(url: url, bodyData: jsonData)
@@ -149,8 +220,17 @@ actor GPodderClient {
     
     func getEpisodeActions(since: Int = 0) async throws -> [EpisodeAction] {
         // Don't filter by device — we want actions from ALL devices
-        // (Flutter app, other clients, etc.)
-        let url = "\(baseUrl)/index.php/apps/gpoddersync/episode_action?since=\(since)"
+        // (other clients, web UI, etc.)
+        try await ensureAuthenticated()
+        
+        let encodedUsername = username.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? username
+        let url: String
+        switch flavor {
+        case .nextcloud:
+            url = "\(baseUrl)/index.php/apps/gpoddersync/episode_action?since=\(since)"
+        case .gpodderNet:
+            url = "\(baseUrl)/api/2/episodes/\(encodedUsername).json?since=\(since)"
+        }
         let data = try await performGET(url: url)
         
         let parsed = try JSONSerialization.jsonObject(with: data)
@@ -257,6 +337,34 @@ actor GPodderClient {
             logger.info("Server rewrote URL: \(pair[0]) → \(pair[1])")
             return URLRewrite(oldUrl: pair[0], newUrl: pair[1])
         }
+    }
+}
+
+// MARK: - SyncClient Conformance
+
+extension GPodderClient: SyncClient {
+    
+    var supportsQueueSync: Bool { false }
+    var supportsSettingsSync: Bool { false }
+    
+    func pushSubscriptions(add: [String], remove: [String], deviceId: String) async throws -> [URLRewrite] {
+        try await updateSubscriptions(deviceId: deviceId, add: add, remove: remove)
+    }
+    
+    func pullSubscriptionChanges(deviceId: String, since: Int) async throws -> SubscriptionDelta {
+        try await getSubscriptionChanges(deviceId: deviceId, since: since)
+    }
+    
+    func syncQueue(items: [QueueSyncItem]) async throws -> QueueSyncResult {
+        // Guard: gPodder does not support queue sync
+        logger.debug("syncQueue called on GPodderClient — gPodder does not support queue sync, ignoring.")
+        return QueueSyncResult(items: [], droppedItems: [])
+    }
+    
+    func getQueue() async throws -> [QueueSyncItem] {
+        // Guard: gPodder does not support queue sync
+        logger.debug("getQueue called on GPodderClient — gPodder does not support queue sync, returning empty.")
+        return []
     }
 }
 

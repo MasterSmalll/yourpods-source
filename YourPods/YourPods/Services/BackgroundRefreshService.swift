@@ -17,6 +17,124 @@ final class BackgroundRefreshService {
     var podcastManager: PodcastManager?
     var audioManager: AudioManager?
     var settingsManager: SettingsManager?
+    var downloadManager: DownloadManager?
+    var networkMonitor: NetworkMonitoring?
+    var playerManager: PlayerManager?
+    
+    /// Tracks the last time a foreground sync ran, for debounce logic.
+    var lastForegroundSyncDate: Date?
+    
+    /// Minimum interval between foreground syncs (5 minutes).
+    private static let foregroundSyncInterval: TimeInterval = 5 * 60
+    
+    /// Whether a foreground sync should run based on the debounce interval.
+    func shouldPerformForegroundSync() -> Bool {
+        guard let lastSync = lastForegroundSyncDate else {
+            // Never synced before — should sync
+            return true
+        }
+        return Date().timeIntervalSince(lastSync) >= Self.foregroundSyncInterval
+    }
+    
+    /// Compute the refresh interval in seconds from the user's setting.
+    /// Returns the `backgroundRefreshInterval` (in minutes) converted to seconds.
+    /// Falls back to 60 minutes if `settingsManager` is nil.
+    func computeRefreshInterval() -> TimeInterval {
+        let intervalMinutes = settingsManager?.backgroundRefreshInterval ?? 60
+        return TimeInterval(intervalMinutes) * 60
+    }
+    
+    /// Whether the background task should run a sync.
+    /// Checks the user's `backgroundRefreshEnabled` setting.
+    /// Returns `false` when `settingsManager` is nil (safety guard).
+    func shouldPerformBackgroundSync() -> Bool {
+        guard let settingsManager else {
+            logger.warning("shouldPerformBackgroundSync: settingsManager not available")
+            return false
+        }
+        return settingsManager.backgroundRefreshEnabled
+    }
+    
+    /// Perform a foreground sync cycle.
+    /// Always runs regardless of `backgroundRefreshEnabled` — the user explicitly
+    /// opened the app, so they expect fresh data.
+    func performForegroundSync() async {
+        guard let podcastManager else {
+            logger.warning("performForegroundSync: podcastManager not available")
+            return
+        }
+        guard let playerManager else {
+            logger.warning("performForegroundSync: playerManager not available")
+            return
+        }
+        guard let downloadManager else {
+            logger.warning("performForegroundSync: downloadManager not available")
+            return
+        }
+        guard let settingsManager else {
+            logger.warning("performForegroundSync: settingsManager not available")
+            return
+        }
+        
+        logger.info("performForegroundSync: starting foreground sync cycle")
+        
+        let userStrategy = settingsManager.syncConflictStrategy
+        _ = await podcastManager.refreshAndSync(
+            playerManager: playerManager,
+            downloadManager: downloadManager,
+            settingsManager: settingsManager,
+            strategy: userStrategy
+        )
+        
+        lastForegroundSyncDate = Date()
+        logger.info("performForegroundSync: complete")
+    }
+    
+    /// Perform a background sync cycle (subscription sync + feed refresh + episode actions).
+    /// Only runs if the user has background refresh enabled.
+    /// Called by `handleRefresh()` (the `BGAppRefreshTask` handler).
+    func performSync() async {
+        // Gate: respect the user's background refresh toggle
+        guard shouldPerformBackgroundSync() else {
+            logger.info("performSync: skipped — backgroundRefreshEnabled is false")
+            return
+        }
+        
+        guard let podcastManager else {
+            logger.warning("performSync: podcastManager not available")
+            return
+        }
+        guard let playerManager else {
+            logger.warning("performSync: playerManager not available")
+            return
+        }
+        guard let downloadManager else {
+            logger.warning("performSync: downloadManager not available")
+            return
+        }
+        guard let settingsManager else {
+            logger.warning("performSync: settingsManager not available")
+            return
+        }
+        
+        logger.info("performSync: starting background sync cycle")
+        
+        // Honor the user's conflict strategy preference.
+        // In background context, .ask can't show UI — fall back to .deviceWins
+        // (preserves local positions; conflicts surface on next foreground sync).
+        let userStrategy = settingsManager.syncConflictStrategy
+        let backgroundSafeStrategy: SyncStrategy = (userStrategy == .ask) ? .deviceWins : userStrategy
+        
+        _ = await podcastManager.refreshAndSync(
+            playerManager: playerManager,
+            downloadManager: downloadManager,
+            settingsManager: settingsManager,
+            strategy: backgroundSafeStrategy
+        )
+        
+        lastForegroundSyncDate = Date()
+        logger.info("performSync: background sync cycle complete")
+    }
     
     func registerTasks() {
         #if os(iOS)
@@ -31,85 +149,58 @@ final class BackgroundRefreshService {
     
     func scheduleRefresh() {
         #if os(iOS)
+        // Don't schedule if the user has disabled background refresh
+        guard shouldPerformBackgroundSync() else {
+            logger.info("scheduleRefresh: skipped — backgroundRefreshEnabled is false")
+            return
+        }
+        
+        let interval = computeRefreshInterval()
         let request = BGAppRefreshTaskRequest(identifier: Self.refreshTaskId)
-        request.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60) // 15 minutes
+        request.earliestBeginDate = Date(timeIntervalSinceNow: interval)
         
         do {
             try BGTaskScheduler.shared.submit(request)
-            logger.info("Background refresh scheduled")
+            logger.info("Background refresh scheduled with interval: \(Int(interval / 60)) minutes")
         } catch {
             logger.error("Failed to schedule refresh: \(error.localizedDescription)")
         }
         #endif
     }
     
+    /// Cancel all pending background refresh tasks.
+    /// Called when the user disables background refresh.
+    func cancelScheduledRefresh() {
+        #if os(iOS)
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.refreshTaskId)
+        logger.info("Background refresh cancelled")
+        #endif
+    }
+    
     #if os(iOS)
     private func handleRefresh(task: BGAppRefreshTask) {
-        // Schedule the next refresh
+        // Check if the user has disabled background refresh
+        guard shouldPerformBackgroundSync() else {
+            logger.info("Background refresh: skipped — user has disabled background refresh")
+            task.setTaskCompleted(success: true)
+            // Don't schedule the next refresh — it's disabled
+            return
+        }
+        
+        // Schedule the next refresh (uses the user's configured interval)
         scheduleRefresh()
         
         let refreshTask = Task {
-            guard let podcastManager else {
+            guard podcastManager != nil else {
+                logger.warning("Background refresh: podcastManager not available")
                 task.setTaskCompleted(success: false)
                 return
             }
             
-            do {
-                let newEpisodes = await podcastManager.refreshAllFeeds()
-                
-                // Auto-queue new episodes directly into the active AVQueuePlayer
-                // This is the KEY advantage over Flutter: same memory space!
-                if let audioManager, !newEpisodes.isEmpty {
-                    let globalDefault = self.settingsManager?.defaultAutoQueueMode ?? .off
-                    let autoQueueItems = newEpisodes.compactMap { episode -> QueueItem? in
-                        guard let podcast = episode.podcast else { return nil }
-                        // Skip already-played or interacted episodes
-                        guard !episode.isPlayed, !episode.isInteracted else { return nil }
-                        // Must have audio
-                        guard episode.audioUrl != nil else { return nil }
-                        let effectiveMode = podcast.effectiveSettings.autoQueueMode ?? globalDefault
-                        guard effectiveMode != .off else { return nil }
-                        return QueueItem.from(episode: episode)
-                    }
-                    
-                    if !autoQueueItems.isEmpty {
-                        logger.info("Background: auto-queueing \(autoQueueItems.count) new episodes")
-                        audioManager.appendToQueue(autoQueueItems)
-                    }
-                }
-                
-                // Also auto-queue the most recent unplayed episode for each subscription.
-                // Only the latest episode — future new episodes come via refreshAllFeeds().
-                if let audioManager {
-                    let globalDefault = self.settingsManager?.defaultAutoQueueMode ?? .off
-                    let existingItems: [QueueItem] = await MainActor.run {
-                        var items: [QueueItem] = []
-                        for podcast in podcastManager.subscriptions {
-                            let candidates = podcastManager.getAutoQueueCandidates(for: podcast, globalDefault: globalDefault)
-                            // Only take the most recent (candidates are sorted newest-first)
-                            if let mostRecent = candidates.first,
-                               let item = QueueItem.from(episode: mostRecent) {
-                                items.append(item)
-                            }
-                        }
-                        return items
-                    }
-                    if !existingItems.isEmpty {
-                        logger.info("Background: auto-queueing \(existingItems.count) latest episodes")
-                        audioManager.appendToQueue(existingItems)
-                    }
-                }
-                
-                // P1: gPodder background sync — push local actions and pull server state
-                do {
-                    let _ = try await podcastManager.syncEpisodeActions()
-                    logger.info("Background: gPodder sync complete")
-                } catch {
-                    logger.warning("Background: gPodder sync failed: \(error.localizedDescription)")
-                }
-                
-                task.setTaskCompleted(success: true)
-            }
+            // Perform a full sync cycle (feeds + subscriptions + episode actions + queue)
+            await performSync()
+            
+            task.setTaskCompleted(success: true)
         }
         
         task.expirationHandler = {

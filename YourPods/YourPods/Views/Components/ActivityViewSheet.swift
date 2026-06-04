@@ -57,3 +57,29 @@ enum SharePresenter {
     }
 }
 #endif
+
+#if os(macOS)
+import AppKit
+
+/// macOS equivalent of SharePresenter using NSSharingServicePicker.
+enum SharePresenter {
+    
+    /// Present the system share picker with the given items.
+    static func present(items: [Any]) {
+        guard !items.isEmpty else { return }
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            guard let window = NSApplication.shared.keyWindow,
+                  let contentView = window.contentView else { return }
+            
+            let picker = NSSharingServicePicker(items: items)
+            let rect = CGRect(
+                x: contentView.bounds.midX,
+                y: contentView.bounds.midY,
+                width: 0, height: 0
+            )
+            picker.show(relativeTo: rect, of: contentView, preferredEdge: .minY)
+        }
+    }
+}
+#endif

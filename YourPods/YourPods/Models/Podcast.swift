@@ -61,13 +61,25 @@ final class Podcast {
     var settings: PodcastSettings?
     
     /// Safe accessor that returns settings or defaults.
+    /// Guards against accessing a deleted SwiftData object — SwiftUI may still
+    /// hold a reference to a Podcast that was removed from the model context
+    /// during a sync cycle, and the display link fires before the @Query updates.
     var effectiveSettings: PodcastSettings {
-        get { settings ?? PodcastSettings() }
+        get {
+            // isDeleted is true after modelContext.delete() and before the next
+            // SwiftData save flushes the change. Accessing @Persisted properties
+            // on a deleted model crashes with _assertionFailure in getValue().
+            guard modelContext != nil, !isDeleted else { return PodcastSettings() }
+            return settings ?? PodcastSettings()
+        }
         set { settings = newValue }
     }
     
     /// User-defined sort order in the library
     var sortOrder: Int = 0
+    
+    /// Group/folder assignment. References PodcastGroup.id. Nil = ungrouped.
+    var groupId: String?
     
     init(
         url: String,

@@ -3,6 +3,7 @@ import XCTest
 
 // MARK: - CarPlay Rate Stepping Tests
 
+@MainActor
 final class CarPlayRateTests: XCTestCase {
 
     // MARK: - availableRates sanity
@@ -100,6 +101,7 @@ final class CarPlayRateTests: XCTestCase {
 
 // MARK: - CarPlay Chapter Seek Tests
 
+@MainActor
 final class CarPlayChapterSeekTests: XCTestCase {
 
     /// Mirrors the chapter seek logic from CarPlayService
@@ -174,6 +176,7 @@ final class CarPlayChapterSeekTests: XCTestCase {
 
 // MARK: - Trim Silence Toggle Tests
 
+@MainActor
 final class CarPlayTrimSilenceTests: XCTestCase {
 
     func test_skipSilenceEnabled_defaultIsFalse() {
@@ -220,6 +223,7 @@ final class CarPlayTrimSilenceTests: XCTestCase {
 /// Tests the filtering/sorting logic used by the "Recently Updated" CarPlay tab.
 /// Mirrors the approach in HomeView.recentEpisodes: unplayed, non-interacted,
 /// sorted by pubDate descending, capped at a maximum count.
+@MainActor
 final class CarPlayRecentlyUpdatedTests: XCTestCase {
 
     // MARK: - Helper: mirrors CarPlayService.recentEpisodes logic

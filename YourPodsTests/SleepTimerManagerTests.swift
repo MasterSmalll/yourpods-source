@@ -3,6 +3,7 @@ import XCTest
 
 /// Extended tests for SleepTimerManager — supplements the basic tests in YourPodsTests.swift
 /// with callback behavior, edge cases, and multi-start scenarios.
+@MainActor
 final class SleepTimerExtendedTests: XCTestCase {
     
     // MARK: - Formatted Remaining Edge Cases
@@ -109,3 +110,77 @@ final class SleepTimerExtendedTests: XCTestCase {
         timer.stop()
     }
 }
+
+// MARK: - Extracted from YourPodsTests.swift
+
+// MARK: - Sleep Timer Tests
+
+/// Tests SleepTimerManager logic — start, stop, extend.
+/// Timer callback and countdown are Timer-dependent, so we test state only.
+@MainActor
+final class SleepTimerManagerTests: XCTestCase {
+    
+    func test_start_setsActiveAndRemainingSeconds() {
+        let timer = SleepTimerManager()
+        timer.start(minutes: 15)
+        
+        XCTAssertTrue(timer.isActive, "Timer should be active after start")
+        XCTAssertEqual(timer.remainingSeconds, 900, "15 minutes = 900 seconds")
+        XCTAssertEqual(timer.selectedMinutes, 15)
+        
+        timer.stop()  // cleanup
+    }
+    
+    func test_stop_resetsAllState() {
+        let timer = SleepTimerManager()
+        timer.start(minutes: 30)
+        timer.stop()
+        
+        XCTAssertFalse(timer.isActive, "Timer should be inactive after stop")
+        XCTAssertEqual(timer.remainingSeconds, 0)
+        XCTAssertEqual(timer.selectedMinutes, 0)
+    }
+    
+    func test_extend_addsMinutesToRemaining() {
+        let timer = SleepTimerManager()
+        timer.start(minutes: 10)
+        timer.extend(minutes: 5)
+        
+        XCTAssertEqual(timer.remainingSeconds, 900, "10 + 5 minutes = 900 seconds")
+        XCTAssertEqual(timer.selectedMinutes, 15, "Selected should show total")
+        
+        timer.stop()
+    }
+    
+    func test_extend_whenInactive_doesNothing() {
+        let timer = SleepTimerManager()
+        timer.extend(minutes: 5)
+        
+        XCTAssertFalse(timer.isActive)
+        XCTAssertEqual(timer.remainingSeconds, 0)
+    }
+    
+    func test_formattedRemaining_showsMinutesAndSeconds() {
+        let timer = SleepTimerManager()
+        timer.remainingSeconds = 632  // 10:32
+        
+        XCTAssertEqual(timer.formattedRemaining, "10:32")
+    }
+    
+    func test_presets_containsExpectedValues() {
+        XCTAssertEqual(SleepTimerManager.presets, [5, 15, 30, 60])
+    }
+    
+    func test_start_overridesPreviousTimer() {
+        let timer = SleepTimerManager()
+        timer.start(minutes: 30)
+        timer.start(minutes: 5)
+        
+        XCTAssertEqual(timer.remainingSeconds, 300,
+                       "Starting a new timer should override the previous one")
+        XCTAssertEqual(timer.selectedMinutes, 5)
+        
+        timer.stop()
+    }
+}
+

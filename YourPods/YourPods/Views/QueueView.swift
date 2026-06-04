@@ -5,23 +5,27 @@ struct QueueView: View {
     @Environment(PlayerManager.self) private var playerManager
     @Environment(SettingsManager.self) private var settingsManager
     @Environment(PodcastManager.self) private var podcastManager
+    @Environment(DownloadManager.self) private var downloadManager
+    @Environment(NavigationState.self) private var navigationState
+    @Environment(\.modelContext) private var modelContext
     @AppStorage("hasSeenQueueMessage") private var hasSeenQueueMessage = false
     @State private var showDismissableMessage = true
     @State private var itemToRemove: QueueItem?
     @State private var showRemovalDialog = false
     @State private var rememberChoice = false
     @State private var showSettings = false
-    @State private var selectedEpisode: Episode?
+    @State private var episodeSheetItem: EpisodeSheetItem?
     @State private var showRemoveAllConfirmation = false
     
-    /// Resolve the Episode model from a QueueItem GUID (same pattern as NowPlayingBar).
+    /// Resolve the Episode model from a QueueItem GUID.
+    /// Searches subscriptions first, then falls back to creating a transient
+    /// Episode from the QueueItem's data for full detail sheet display.
     private func resolveEpisode(for item: QueueItem) -> Episode? {
-        for podcast in podcastManager.subscriptions {
-            if let ep = podcast.episodes.first(where: { $0.guid == item.id }) {
-                return ep
-            }
-        }
-        return nil
+        return EpisodeDetailSheetHelper.resolveEpisodeForDisplay(
+            guid: item.id,
+            subscriptions: podcastManager.subscriptions,
+            fallbackQueueItem: item
+        )
     }
     
     var body: some View {
@@ -36,6 +40,9 @@ struct QueueView: View {
                     }
                 }
                 
+                // Connectivity banner (informational — queue is local)
+                OfflineBanner()
+                
                 List {
                     // Now Playing section
                     if let current = playerManager.audioManager.currentItem {
@@ -43,30 +50,59 @@ struct QueueView: View {
                             QueueItemRow(
                                 item: current,
                                 isNowPlaying: true,
-                                progress: playerManager.currentDuration > 0
-                                    ? playerManager.currentPosition / playerManager.currentDuration
-                                    : 0
+                                progress: PlayerManager.playbackProgress(
+                                    position: playerManager.currentPosition,
+                                    duration: playerManager.currentDuration
+                                )
                             )
                             .contentShape(Rectangle())
                             .onTapGesture {
                                 if let ep = resolveEpisode(for: current) {
-                                    selectedEpisode = ep
+                                    episodeSheetItem = EpisodeSheetItem(episode: ep)
                                 }
                             }
                             .contextMenu {
                                 Button {
                                     if let ep = resolveEpisode(for: current) {
-                                        selectedEpisode = ep
+                                        episodeSheetItem = EpisodeSheetItem(episode: ep)
                                     }
                                 } label: {
                                     Label("Details", systemImage: "info.circle")
                                 }
                                 Divider()
                                 Button {
+                                    downloadAction(for: current)
+                                } label: {
+                                    Label(
+                                        EpisodeDownloadHelper.downloadLabel(isDownloaded: downloadManager.isDownloaded(current.id)),
+                                        systemImage: EpisodeDownloadHelper.downloadIcon(isDownloaded: downloadManager.isDownloaded(current.id))
+                                    )
+                                }
+                                Button(role: .destructive) {
+                                    handleRemoveCurrentItem(current)
+                                } label: {
+                                    Label("Remove from Queue", systemImage: "minus.circle")
+                                }
+                                Button {
                                     playerManager.markCurrentEpisodeAsPlayed()
                                 } label: {
                                     Label("Mark as Played", systemImage: "checkmark.circle")
                                 }
+                            }
+                            // MARK: VoiceOver - Now Playing
+                            .accessibilityAction(named: "Details") {
+                                if let ep = resolveEpisode(for: current) {
+                                    episodeSheetItem = EpisodeSheetItem(episode: ep)
+                                }
+                            }
+                            .accessibilityAction(named: EpisodeDownloadHelper.accessibilityActionName(isDownloaded: downloadManager.isDownloaded(current.id))) {
+                                downloadAction(for: current)
+                            }
+                            .accessibilityAction(named: "Remove from Queue") {
+                                handleRemoveCurrentItem(current)
+                            }
+                            .accessibilityAction(named: "Mark as Played") {
+                                playerManager.markCurrentEpisodeAsPlayed()
                             }
                         }
                     }
@@ -82,46 +118,7 @@ struct QueueView: View {
                             )
                         } else {
                             ForEach(upcoming) { item in
-                                QueueItemRow(item: item)
-                                    .contentShape(Rectangle())
-                                    .onTapGesture {
-                                        Task {
-                                            await playerManager.audioManager.playEpisode(
-                                                item,
-                                                initialPosition: TimeInterval(item.positionSeconds),
-                                                preserveCurrent: true
-                                            )
-                                        }
-                                    }
-                                    .contextMenu {
-                                        Button {
-                                            Task {
-                                                await playerManager.audioManager.playEpisode(
-                                                    item,
-                                                    initialPosition: TimeInterval(item.positionSeconds),
-                                                    preserveCurrent: true
-                                                )
-                                            }
-                                        } label: {
-                                            Label("Play", systemImage: "play.fill")
-                                        }
-                                        Button {
-                                            playerManager.audioManager.moveToTop(item)
-                                        } label: {
-                                            Label("Play Next", systemImage: "text.insert")
-                                        }
-                                        Divider()
-                                        Button(role: .destructive) {
-                                            handleRemoveItem(item)
-                                        } label: {
-                                            Label("Remove from Queue", systemImage: "minus.circle")
-                                        }
-                                        Button {
-                                            playerManager.markQueuedEpisodeAsPlayed(item)
-                                        } label: {
-                                            Label("Mark as Played", systemImage: "checkmark.circle")
-                                        }
-                                    }
+                                queueItemView(for: item)
                             }
                             .onDelete { indexSet in
                                 // Convert IndexSet to items and handle removal
@@ -138,21 +135,34 @@ struct QueueView: View {
                 }
                 .listStyle(.plain)
                 .refreshable {
-                    _ = await podcastManager.refreshAllFeeds()
+                    let strategy = settingsManager.syncConflictStrategy
+                    let conflicts = await podcastManager.refreshAndSync(
+                        playerManager: playerManager,
+                        downloadManager: downloadManager,
+                        settingsManager: settingsManager,
+                        strategy: strategy
+                    )
+                    if !conflicts.isEmpty && strategy == .ask {
+                        playerManager.pendingConflicts = conflicts
+                    }
                 }
             }
             .navigationTitle("Up Next")
             .toolbar {
+                #if os(iOS)
                 ToolbarItem(placement: .primaryAction) {
                     EditButton()
                 }
+                #endif
                 ToolbarItem(placement: .secondaryAction) {
-                    if !playerManager.audioManager.queue.isEmpty {
+                    if !playerManager.audioManager.queue.isEmpty || playerManager.audioManager.currentItem != nil {
                         Button(role: .destructive) {
                             showRemoveAllConfirmation = true
                         } label: {
-                            Label("Remove All", systemImage: "trash")
+                            Label("Clear Queue", systemImage: "trash")
                         }
+                        .accessibilityLabel("Clear queue")
+                        .accessibilityHint("Remove episodes from your Up Next queue")
                     }
                 }
                 ToolbarItem(placement: .secondaryAction) {
@@ -166,6 +176,7 @@ struct QueueView: View {
             .sheet(isPresented: $showSettings) {
                 NavigationStack {
                     QueueSettingsSheet()
+                        .environment(settingsManager)
                         .toolbar {
                             ToolbarItem(placement: .cancellationAction) {
                                 Button("Done") { showSettings = false }
@@ -173,8 +184,14 @@ struct QueueView: View {
                         }
                 }
             }
-            .sheet(item: $selectedEpisode) { episode in
-                EpisodeDetailSheet(episode: episode)
+            .sheet(item: $episodeSheetItem) { item in
+                EpisodeDetailSheet(episode: item.episode)
+                    .environment(playerManager)
+                    .environment(podcastManager)
+                    .environment(downloadManager)
+                    .environment(settingsManager)
+                    .environment(navigationState)
+                    .modelContext(modelContext)
             }
             .confirmationDialog(
                 "Remove from Queue",
@@ -183,7 +200,11 @@ struct QueueView: View {
             ) {
                 Button("Remove") {
                     if let item = itemToRemove {
-                        playerManager.audioManager.removeFromQueue(item)
+                        if playerManager.audioManager.currentItem?.id == item.id {
+                            playerManager.removeCurrentEpisodeFromQueue()
+                        } else {
+                            playerManager.audioManager.removeFromQueue(item)
+                        }
                         if rememberChoice {
                             settingsManager.queueRemovalAction = .removeOnly
                             settingsManager.hasChosenQueueRemovalAction = true
@@ -194,11 +215,15 @@ struct QueueView: View {
                 }
                 Button("Remove & Mark as Played") {
                     if let item = itemToRemove {
-                        playerManager.audioManager.removeFromQueue(item)
-                        podcastManager.markEpisodeAsPlayed(
-                            podcastUrl: item.podcastUrl,
-                            episodeGuid: item.id
-                        )
+                        if playerManager.audioManager.currentItem?.id == item.id {
+                            playerManager.markCurrentEpisodeAsPlayed()
+                        } else {
+                            playerManager.audioManager.removeFromQueue(item)
+                            podcastManager.markEpisodeAsPlayed(
+                                podcastUrl: item.podcastUrl,
+                                episodeGuid: item.id
+                            )
+                        }
                         if rememberChoice {
                             settingsManager.queueRemovalAction = .removeAndMarkPlayed
                             settingsManager.hasChosenQueueRemovalAction = true
@@ -219,18 +244,116 @@ struct QueueView: View {
                 }
             }
             .confirmationDialog(
-                "Remove All Episodes",
+                "Clear Queue",
                 isPresented: $showRemoveAllConfirmation,
                 titleVisibility: .visible
             ) {
-                Button("Remove All", role: .destructive) {
+                Button("Clear Up Next", role: .destructive) {
                     playerManager.audioManager.clearQueue()
+                }
+                if playerManager.audioManager.currentItem != nil {
+                    Button("Clear Everything", role: .destructive) {
+                        playerManager.clearAllQueue()
+                    }
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("This will remove all episodes from your Up Next queue. The currently playing episode will not be affected.")
+                if playerManager.audioManager.currentItem != nil {
+                    Text("\"Clear Up Next\" removes upcoming episodes. \"Clear Everything\" also stops playback and removes the current episode.")
+                } else {
+                    Text("This will remove all episodes from your Up Next queue.")
+                }
             }
         }
+    }
+    
+    // MARK: - Queue Item View (extracted to reduce type-checker complexity)
+    
+    @ViewBuilder
+    private func queueItemView(for item: QueueItem) -> some View {
+        QueueItemRow(item: item)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                Task {
+                    await playerManager.audioManager.playEpisode(
+                        item,
+                        initialPosition: TimeInterval(item.positionSeconds),
+                        preserveCurrent: true
+                    )
+                }
+            }
+            .contextMenu {
+                Button {
+                    Task {
+                        await playerManager.audioManager.playEpisode(
+                            item,
+                            initialPosition: TimeInterval(item.positionSeconds),
+                            preserveCurrent: true
+                        )
+                    }
+                } label: {
+                    Label("Play", systemImage: "play.fill")
+                }
+                Button {
+                    playerManager.audioManager.moveToTop(item)
+                } label: {
+                    Label("Play Next", systemImage: "text.insert")
+                }
+                Divider()
+                Button {
+                    downloadAction(for: item)
+                } label: {
+                    Label(
+                        EpisodeDownloadHelper.downloadLabel(isDownloaded: downloadManager.isDownloaded(item.id)),
+                        systemImage: EpisodeDownloadHelper.downloadIcon(isDownloaded: downloadManager.isDownloaded(item.id))
+                    )
+                }
+                Button(role: .destructive) {
+                    handleRemoveItem(item)
+                } label: {
+                    Label("Remove from Queue", systemImage: "minus.circle")
+                }
+                Button {
+                    playerManager.markQueuedEpisodeAsPlayed(item)
+                } label: {
+                    Label("Mark as Played", systemImage: "checkmark.circle")
+                }
+                Divider()
+                Button {
+                    if let ep = resolveEpisode(for: item) {
+                        episodeSheetItem = EpisodeSheetItem(episode: ep)
+                    }
+                } label: {
+                    Label("Details", systemImage: "info.circle")
+                }
+            }
+            // MARK: VoiceOver - Queue Items
+            .accessibilityAction(named: "Play") {
+                Task {
+                    await playerManager.audioManager.playEpisode(
+                        item,
+                        initialPosition: TimeInterval(item.positionSeconds),
+                        preserveCurrent: true
+                    )
+                }
+            }
+            .accessibilityAction(named: "Play Next") {
+                playerManager.audioManager.moveToTop(item)
+            }
+            .accessibilityAction(named: EpisodeDownloadHelper.accessibilityActionName(isDownloaded: downloadManager.isDownloaded(item.id))) {
+                downloadAction(for: item)
+            }
+            .accessibilityAction(named: "Remove from Queue") {
+                handleRemoveItem(item)
+            }
+            .accessibilityAction(named: "Mark as Played") {
+                playerManager.markQueuedEpisodeAsPlayed(item)
+            }
+            .accessibilityAction(named: "Details") {
+                if let ep = resolveEpisode(for: item) {
+                    episodeSheetItem = EpisodeSheetItem(episode: ep)
+                }
+            }
     }
     
     /// Handle removing an item based on the user's queue removal preference.
@@ -247,6 +370,34 @@ struct QueueView: View {
         case .ask:
             itemToRemove = item
             showRemovalDialog = true
+        }
+    }
+    
+    /// Handle removing the currently-playing item based on the user's queue removal preference.
+    /// Unlike `handleRemoveItem`, this stops playback since the item is actively playing.
+    private func handleRemoveCurrentItem(_ item: QueueItem) {
+        switch settingsManager.queueRemovalAction {
+        case .removeOnly:
+            playerManager.removeCurrentEpisodeFromQueue()
+        case .removeAndMarkPlayed:
+            playerManager.markCurrentEpisodeAsPlayed()
+        case .ask:
+            itemToRemove = item
+            showRemovalDialog = true
+        }
+    }
+    
+    /// Handle download/remove download action for a queue item.
+    private func downloadAction(for item: QueueItem) {
+        if downloadManager.isDownloaded(item.id) {
+            downloadManager.deleteDownload(guid: item.id)
+        } else {
+            downloadManager.downloadEpisode(
+                guid: item.id,
+                audioUrl: item.audioUrl,
+                authHeaders: item.authHeaders,
+                privacyMode: item.privacyMode
+            )
         }
     }
 }
@@ -320,7 +471,7 @@ struct QueueItemRow: View {
     var body: some View {
         HStack(spacing: 12) {
             // Artwork
-            AsyncImage(url: URL(string: item.artworkUrl ?? "")) { image in
+            CachedAsyncImage(url: URL(string: item.artworkUrl ?? "")) { image in
                 image.resizable().aspectRatio(contentMode: .fill)
             } placeholder: {
                 RoundedRectangle(cornerRadius: 8).fill(.quaternary)
@@ -377,5 +528,17 @@ struct QueueItemRow: View {
             }
         }
         .padding(.vertical, 4)
+        // MARK: VoiceOver Accessibility
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(EpisodeAccessibility.queueItemLabel(
+            title: item.title,
+            podcastTitle: item.podcastTitle,
+            durationSeconds: item.durationSeconds,
+            positionSeconds: item.positionSeconds,
+            isNowPlaying: isNowPlaying,
+            progress: progress
+        ))
+        .accessibilityHint(isNowPlaying ? "Double tap to show details" : "Double tap to play")
+        .accessibilityAddTraits(isNowPlaying ? .isSelected : [])
     }
 }

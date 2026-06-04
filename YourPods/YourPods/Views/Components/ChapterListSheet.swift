@@ -23,13 +23,16 @@ struct ChapterListSheet: View {
             }
             .navigationTitle("Chapters")
             #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
+            .inlineNavigationBarTitle()
             #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { dismiss() }
                 }
             }
+            #if os(macOS)
+            .frame(minWidth: 450, minHeight: 400)
+            #endif
         }
     }
     
@@ -70,7 +73,7 @@ struct ChapterListSheet: View {
     @ViewBuilder
     private func chapterImage(chapter: Chapter) -> some View {
         if let imgUrl = chapter.img {
-            AsyncImage(url: URL(string: imgUrl)) { image in
+            CachedAsyncImage(url: URL(string: imgUrl)) { image in
                 image.resizable().aspectRatio(contentMode: .fill)
             } placeholder: {
                 RoundedRectangle(cornerRadius: 4)

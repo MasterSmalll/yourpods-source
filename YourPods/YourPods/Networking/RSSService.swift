@@ -1,6 +1,8 @@
 import Foundation
 import os
 
+private let rssLogger = Logger(subsystem: "com.yourpods", category: "RSSService")
+
 /// RSS feed parser and fetcher.
 /// Uses XMLParser to parse RSS feeds with support for iTunes and Podcasting 2.0 namespaces.
 /// Supports auth-required feeds via injected Basic auth headers.
@@ -117,7 +119,7 @@ private final class FeedAuthDelegate: NSObject, URLSessionTaskDelegate {
 
 // MARK: - Parsed Models (intermediate, before SwiftData persistence)
 
-struct ParsedPodcast {
+struct ParsedPodcast: Sendable {
     var title: String = ""
     var description: String?
     var logoUrl: String?
@@ -149,14 +151,14 @@ struct ParsedPodcast {
 }
 
 /// A single Podlove Simple Chapter parsed from inline `<psc:chapter>` XML.
-struct InlineChapter {
+struct InlineChapter: Sendable {
     let startTime: Double
     let title: String
     let href: String?
     let image: String?
 }
 
-struct ParsedEpisode {
+struct ParsedEpisode: Sendable {
     var guid: String = ""
     var title: String = ""
     var description: String?
@@ -199,6 +201,11 @@ private final class RSSXMLParser: NSObject, XMLParserDelegate {
     private var isInPSCChapters = false  // tracking psc:chapters context
     private var currentInlineChapters: [InlineChapter] = []
     
+    /// Depth counter for skipping namespaced elements whose local names collide with
+    /// core RSS 2.0 names (e.g. Acast's <podaccess:item> and <podaccess:channel>).
+    /// When > 0, all element events are ignored until the skip block exits.
+    private var skipDepth = 0
+    
     // Namespace URIs
     private let itunesNS = "http://www.itunes.com/dtds/podcast-1.0.dtd"
     private let podcastNS = "https://podcastindex.org/namespace/1.0"
@@ -228,11 +235,33 @@ private final class RSSXMLParser: NSObject, XMLParserDelegate {
                 attributes: [String: String] = [:]) {
         currentText = ""
         
+        // If we're inside a skipped namespaced block, just count depth so we know
+        // when to exit. Don't process any element events inside the block.
+        if skipDepth > 0 {
+            skipDepth += 1
+            return
+        }
+        
+        // Detect elements whose local name matches a key RSS name but are in a
+        // non-null namespace — these must be skipped to prevent content inside them
+        // (like <itunes:title>) from polluting channel or episode state.
+        // Example: Acast's <podaccess:item> wraps premium episodes and contains an
+        // <itunes:title> that would otherwise overwrite the podcast channel title.
+        let isNamespaced = !(namespaceURI == nil || namespaceURI!.isEmpty)
+        let isNamespacedItemLike = isNamespaced && elementName == "item"
+        if isNamespacedItemLike {
+            skipDepth = 1
+            return
+        }
+        
         switch elementName {
         case "channel":
             isInChannel = true
             
-        case "item":
+        case "item" where (namespaceURI == nil || namespaceURI!.isEmpty) && (qualifiedName == nil || qualifiedName == "item"):
+            // Guard: Only treat core RSS 2.0 <item> as an episode entry point.
+            // Namespaced elements like <podaccess:item> are already handled above
+            // by the skipDepth mechanism before we even reach the switch.
             isInItem = true
             currentEpisode = ParsedEpisode()
             
@@ -347,7 +376,11 @@ private final class RSSXMLParser: NSObject, XMLParserDelegate {
         case "chapter" where isInPSCChapters && (namespaceURI == pscNS || qualifiedName == "psc:chapter"):
             // <psc:chapter start="00:00:00.000" title="Intro" href="..." image="..." />
             if let startStr = attributes["start"], let title = attributes["title"] {
-                let startTime = parsePodloveTimestamp(startStr)
+                // Guard: skip chapters with empty/unparseable timestamps instead of crashing
+                guard let startTime = parsePodloveTimestamp(startStr) else {
+                    rssLogger.warning("Skipping chapter '\(title)': unparseable start timestamp '\(startStr)'")
+                    break
+                }
                 let chapter = InlineChapter(
                     startTime: startTime,
                     title: title,
@@ -363,11 +396,18 @@ private final class RSSXMLParser: NSObject, XMLParserDelegate {
     }
     
     func parser(_ parser: XMLParser, foundCharacters string: String) {
+        guard skipDepth == 0 else { return }
         currentText += string
     }
     
     func parser(_ parser: XMLParser, didEndElement elementName: String,
                 namespaceURI: String?, qualifiedName: String?) {
+        // If we're exiting a skipped namespaced block, decrement depth and return.
+        if skipDepth > 0 {
+            skipDepth -= 1
+            return
+        }
+        
         let text = currentText.trimmingCharacters(in: .whitespacesAndNewlines)
         
         if isInItem {
@@ -409,7 +449,9 @@ private final class RSSXMLParser: NSObject, XMLParserDelegate {
                 isInPSCChapters = false
                 currentInlineChapters = []
                 
-            case "item":
+            case "item" where (namespaceURI == nil || namespaceURI!.isEmpty) && (qualifiedName == nil || qualifiedName == "item"):
+                // Mirror of the start-element guard: only close item-parsing mode for
+                // core RSS 2.0 </item>. Namespaced closers like </podaccess:item> are ignored.
                 if var episode = currentEpisode {
                     // Fallback: use audioUrl as guid if none provided
                     if episode.guid.isEmpty {
@@ -537,10 +579,23 @@ private final class RSSXMLParser: NSObject, XMLParserDelegate {
     }
     
     /// Parse Podlove NPT (Normal Play Time) timestamps: "HH:MM:SS.mmm", "HH:MM:SS", "MM:SS"
-    private func parsePodloveTimestamp(_ text: String) -> Double {
+    /// Returns nil for empty or unparseable input instead of crashing.
+    private func parsePodloveTimestamp(_ text: String) -> Double? {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        // Guard: empty or whitespace-only strings have no timestamp to parse
+        guard !trimmed.isEmpty else {
+            rssLogger.debug("parsePodloveTimestamp called with empty string")
+            return nil
+        }
+        
         // Split off optional milliseconds
-        let parts = text.split(separator: ".")
-        let timePart = String(parts[0])
+        let parts = trimmed.split(separator: ".")
+        // Guard: split can return empty if input is just dots
+        guard let firstPart = parts.first else {
+            rssLogger.debug("parsePodloveTimestamp: no segments in '\(text)'")
+            return nil
+        }
+        let timePart = String(firstPart)
         let millis = parts.count > 1 ? (Double("0." + parts[1]) ?? 0) : 0
         
         let segments = timePart.split(separator: ":").compactMap { Int($0) }
@@ -548,7 +603,7 @@ private final class RSSXMLParser: NSObject, XMLParserDelegate {
         case 3: return Double(segments[0] * 3600 + segments[1] * 60 + segments[2]) + millis
         case 2: return Double(segments[0] * 60 + segments[1]) + millis
         case 1: return Double(segments[0]) + millis
-        default: return millis
+        default: return millis > 0 ? millis : nil
         }
     }
 }

@@ -1,7 +1,7 @@
 import Foundation
 import os
 
-/// Global app settings. Port of settings_provider.dart.
+/// Global app settings.
 ///
 /// All properties are computed (backed by UserDefaults), so we use manual
 /// `access(keyPath:)` / `withMutation(keyPath:)` calls to make `@Observable`
@@ -10,7 +10,11 @@ import os
 @Observable
 final class SettingsManager {
     @ObservationIgnored private let logger = Logger(subsystem: "com.yourpods", category: "SettingsManager")
-    @ObservationIgnored private let defaults = UserDefaults.standard
+    @ObservationIgnored private let defaults: UserDefaults
+    
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
     
     // MARK: - Playback Settings
     
@@ -109,7 +113,7 @@ final class SettingsManager {
     var syncInterval: Int {
         get {
             access(keyPath: \.syncInterval)
-            return defaults.object(forKey: "syncInterval") as? Int ?? 30
+            return defaults.object(forKey: "syncInterval") as? Int ?? 60
         }
         set {
             withMutation(keyPath: \.syncInterval) {
@@ -224,6 +228,20 @@ final class SettingsManager {
         set {
             withMutation(keyPath: \.defaultAutoDownload) {
                 defaults.set(newValue, forKey: "defaultAutoDownload")
+            }
+        }
+    }
+    
+    var autoDownloadNetworkPolicy: AutoDownloadNetworkPolicy {
+        get {
+            access(keyPath: \.autoDownloadNetworkPolicy)
+            guard let raw = defaults.string(forKey: "autoDownloadNetworkPolicy"),
+                  let policy = AutoDownloadNetworkPolicy(rawValue: raw) else { return .wifiOnly }
+            return policy
+        }
+        set {
+            withMutation(keyPath: \.autoDownloadNetworkPolicy) {
+                defaults.set(newValue.rawValue, forKey: "autoDownloadNetworkPolicy")
             }
         }
     }
@@ -380,6 +398,22 @@ final class SettingsManager {
         }
     }
     
+    /// Whether watch downloads should be restricted to Wi-Fi only.
+    /// Separate from the iPhone's autoDownloadNetworkPolicy because the
+    /// watch has much tighter battery and radio constraints.
+    /// Default: true (Wi-Fi only) to preserve watch battery.
+    var watchDownloadWiFiOnly: Bool {
+        get {
+            access(keyPath: \.watchDownloadWiFiOnly)
+            return defaults.object(forKey: "watchDownloadWiFiOnly") as? Bool ?? true
+        }
+        set {
+            withMutation(keyPath: \.watchDownloadWiFiOnly) {
+                defaults.set(newValue, forKey: "watchDownloadWiFiOnly")
+            }
+        }
+    }
+    
     // MARK: - Background Refresh
     
     var backgroundRefreshEnabled: Bool {
@@ -406,6 +440,35 @@ final class SettingsManager {
         }
     }
     
+    /// Whether to post local notifications when new episodes are discovered during background refresh.
+    /// Default: false (privacy-first — users must opt in).
+    var newEpisodeNotificationsEnabled: Bool {
+        get {
+            access(keyPath: \.newEpisodeNotificationsEnabled)
+            return defaults.bool(forKey: "newEpisodeNotificationsEnabled")
+        }
+        set {
+            withMutation(keyPath: \.newEpisodeNotificationsEnabled) {
+                defaults.set(newValue, forKey: "newEpisodeNotificationsEnabled")
+            }
+        }
+    }
+    
+    /// Whether to show unplayed episode count as the app icon badge.
+    /// Independent from notifications — users can enable badges, notifications, or both.
+    /// Default: false (privacy-first — users must opt in).
+    var appBadgeEnabled: Bool {
+        get {
+            access(keyPath: \.appBadgeEnabled)
+            return defaults.bool(forKey: "appBadgeEnabled")
+        }
+        set {
+            withMutation(keyPath: \.appBadgeEnabled) {
+                defaults.set(newValue, forKey: "appBadgeEnabled")
+            }
+        }
+    }
+    
     // MARK: - gPodder Settings
     
     var hidePlayedEpisodes: Bool {
@@ -416,6 +479,23 @@ final class SettingsManager {
         set {
             withMutation(keyPath: \.hidePlayedEpisodes) {
                 defaults.set(newValue, forKey: "hidePlayedEpisodes")
+            }
+        }
+    }
+    
+    // MARK: - P3 — Privacy Preserving Playback
+    
+    /// Global toggle for P3 (Privacy Preserving Playback).
+    /// When enabled, known tracking/ad-insertion redirects are stripped from episode URLs.
+    /// Per-podcast overrides take precedence over this global setting.
+    var p3Enabled: Bool {
+        get {
+            access(keyPath: \.p3Enabled)
+            return defaults.bool(forKey: "p3Enabled")
+        }
+        set {
+            withMutation(keyPath: \.p3Enabled) {
+                defaults.set(newValue, forKey: "p3Enabled")
             }
         }
     }
@@ -460,6 +540,31 @@ final class SettingsManager {
         }
     }
     
+    // MARK: - Vault Mode Detection
+    
+    /// True when the active profile is a Vault Mode (on-device, no sync) profile.
+    /// Used to suppress network-related UI when there's no server dependency.
+    var isVaultMode: Bool {
+        access(keyPath: \.isVaultMode)
+        guard let activeId = defaults.string(forKey: "activeProfileId"),
+              let data = defaults.data(forKey: "serverProfiles"),
+              let profiles = try? JSONDecoder().decode([ServerProfile].self, from: data),
+              let active = profiles.first(where: { $0.id == activeId }) else {
+            return false
+        }
+        return active.isLocal
+    }
+    
+    /// The currently active profile, if any.
+    var activeProfile: ServerProfile? {
+        guard let activeId = defaults.string(forKey: "activeProfileId"),
+              let data = defaults.data(forKey: "serverProfiles"),
+              let profiles = try? JSONDecoder().decode([ServerProfile].self, from: data) else {
+            return nil
+        }
+        return profiles.first(where: { $0.id == activeId })
+    }
+    
     // MARK: - Onboarding
     
     var hasCompletedOnboarding: Bool {
@@ -472,6 +577,77 @@ final class SettingsManager {
                 defaults.set(newValue, forKey: "hasCompletedOnboarding")
             }
         }
+    }
+
+    // MARK: - YourPods Pro: Profile Sync
+
+    /// Whether the first profile pull for this `profileName` has been applied.
+    ///
+    /// The guard is per-profile-name so switching profiles or adding a second
+    /// device correctly re-pulls defaults from the server on first connect.
+    func proFirstSyncCompleted(profileName: String) -> Bool {
+        defaults.bool(forKey: "proFirstSyncCompleted_\(profileName)")
+    }
+
+    /// Mark the first profile pull as complete for `profileName`.
+    func markProFirstSyncCompleted(profileName: String) {
+        defaults.set(true, forKey: "proFirstSyncCompleted_\(profileName)")
+    }
+
+    /// Apply server profile settings locally **only on the first pull** for `profileName`.
+    ///
+    /// After the first pull the local device is the source of truth; subsequent
+    /// pulls are pushed TO the server (not from it). This prevents a remote
+    /// default from overwriting the user's configured preferences on later syncs.
+    ///
+    /// - Parameters:
+    ///   - settings: The decoded `ProProfileSettings` from `GET /settings/profile`.
+    ///   - profileName: The profile name (used as the first-sync guard key).
+    func applyFromProfile(_ settings: ProProfileSettings, profileName: String) {
+        guard !proFirstSyncCompleted(profileName: profileName) else {
+            logger.debug("Profile sync: first sync already done for '\(profileName)' — skipping server apply")
+            return
+        }
+
+        let p = settings.resolvedPayload
+
+        if case .double(let v) = p["playbackSpeed"] { playbackSpeed = v }
+        if case .int(let v) = p["skipForwardSec"] { skipForwardSeconds = v }
+        if case .int(let v) = p["skipBackwardSec"] { skipBackwardSeconds = v }
+        if case .int(let v) = p["skipIntroSec"] { skipIntroSeconds = v }
+        if case .int(let v) = p["skipOutroSec"] { skipOutroSeconds = v }
+        if case .bool(let v) = p["autoDownload"] { defaultAutoDownload = v }
+        if case .bool(let v) = p["archiveOnComplete"] { defaultArchiveOnComplete = v }
+        if case .bool(let v) = p["p3Enabled"] { p3Enabled = v }
+        if case .bool(let v) = p["newEpisodeNotificationsEnabled"] { newEpisodeNotificationsEnabled = v }
+        if case .bool(let v) = p["appBadgeEnabled"] { appBadgeEnabled = v }
+        if case .string(let raw) = p["autopilot"],
+           let mode = AutoQueueMode.fromServerValue(raw) {
+            defaultAutoQueueMode = mode
+        }
+
+        markProFirstSyncCompleted(profileName: profileName)
+        logger.info("Profile sync: applied server settings from '\(profileName)'")
+    }
+
+    /// Serialise the current settings as a profile payload for `PATCH /settings/profile`.
+    ///
+    /// Only includes settings that are meaningful to sync across devices.
+    /// Device-specific settings (e.g. `watchSyncEnabled`) are intentionally excluded.
+    func asProfilePayload() -> [String: AnyCodableValue] {
+        [
+            "playbackSpeed":    .double(playbackSpeed),
+            "skipForwardSec":   .int(skipForwardSeconds),
+            "skipBackwardSec":  .int(skipBackwardSeconds),
+            "skipIntroSec":     .int(skipIntroSeconds),
+            "skipOutroSec":     .int(skipOutroSeconds),
+            "autopilot":        .string(defaultAutoQueueMode.serverValue),
+            "autoDownload":     .bool(defaultAutoDownload),
+            "archiveOnComplete":.bool(defaultArchiveOnComplete),
+            "p3Enabled":        .bool(p3Enabled),
+            "newEpisodeNotificationsEnabled": .bool(newEpisodeNotificationsEnabled),
+            "appBadgeEnabled":  .bool(appBadgeEnabled)
+        ]
     }
 }
 

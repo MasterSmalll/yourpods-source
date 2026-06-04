@@ -22,26 +22,13 @@ extension PlaybackSource: Equatable {
 struct PlayerView: View {
     let episode: WatchEpisode
     @EnvironmentObject var sessionManager: WatchSessionManager
+    @EnvironmentObject var audioManager: WatchAudioManager
     @Environment(\.dismiss) private var dismiss
-    @State private var player: AVPlayer?
-    @State private var isPlaying = false
-    @State private var progress: Double = 0.0
-    @State private var timer: Timer?
-    @State private var statusText: String = "Tap play to start"
-    @State private var playbackSource: PlaybackSource = .none
-    @State private var hasSetupAudio = false
     @State private var chaptersExpanded = false
-    @State private var lastSyncTime = Date()
-    @State private var bufferStallStart: Date? = nil
     
-    /// Max seconds of continuous buffering before we stop playback
-    private let maxBufferStallSeconds: TimeInterval = 30
-    
-    /// Check if battery is too low for streaming
-    private var isBatteryTooLow: Bool {
-        let device = WKInterfaceDevice.current()
-        device.isBatteryMonitoringEnabled = true
-        return device.batteryLevel >= 0 && device.batteryLevel < 0.10
+    /// Whether this view's episode is currently playing in the audio manager
+    private var isCurrentEpisode: Bool {
+        audioManager.currentEpisode?.id == episode.id
     }
 
     var body: some View {
@@ -84,62 +71,53 @@ struct PlayerView: View {
                 
                 // Source Indicator
                 HStack(spacing: 4) {
-                    switch playbackSource {
-                    case .local:
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundColor(.green)
-                        Text("Downloaded")
-                            .font(.caption2)
-                            .foregroundColor(.green)
-                    case .streaming:
-                        Image(systemName: "antenna.radiowaves.left.and.right")
-                            .foregroundColor(.orange)
-                        Text("Will Stream")
-                            .font(.caption2)
-                            .foregroundColor(.orange)
-                    case .none:
-                        Image(systemName: "exclamationmark.triangle")
-                            .foregroundColor(.red)
-                        Text("No Source")
-                            .font(.caption2)
-                            .foregroundColor(.red)
+                    if isCurrentEpisode {
+                        // Show live playback source from the audio manager
+                        sourceIndicator(for: audioManager.playbackSource)
+                    } else {
+                        // Show what source would be used
+                        sourceIndicator(for: determinePlaybackSource())
                     }
                 }
+                .accessibilityElement(children: .combine)
                 
                 // Status Text
-                Text(statusText)
+                Text(isCurrentEpisode ? audioManager.statusText : statusTextForIdle())
                     .font(.system(size: 10))
                     .foregroundColor(.gray)
                 
                 // Playback Controls
                 HStack(spacing: 20) {
                     Button(action: {
-                        seek(seconds: -15)
+                        audioManager.seek(by: -15)
                     }) {
                         Image(systemName: "gobackward.15")
                             .font(.title2)
                     }
-                    .disabled(!hasSetupAudio)
+                    .disabled(!isCurrentEpisode || !audioManager.hasSetupAudio)
+                    .accessibilityLabel("Skip back 15 seconds")
                     
                     Button(action: {
-                        if hasSetupAudio {
-                            togglePlay()
+                        if isCurrentEpisode {
+                            audioManager.togglePlayPause()
                         } else {
-                            setupAndPlay()
+                            audioManager.play(episode: episode)
                         }
                     }) {
-                        Image(systemName: isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                        Image(systemName: (isCurrentEpisode && audioManager.isPlaying) ? "pause.circle.fill" : "play.circle.fill")
                             .font(.system(size: 50))
                             .foregroundColor(.accentColor)
                     }
+                    .accessibilityLabel((isCurrentEpisode && audioManager.isPlaying) ? "Pause" : "Play \(episode.title)")
                     
                     Button(action: {
-                        seek(seconds: 30)
+                        audioManager.seek(by: 30)
                     }) {
                         Image(systemName: "goforward.30")
                             .font(.title2)
                     }
-                    .disabled(!hasSetupAudio)
+                    .disabled(!isCurrentEpisode || !audioManager.hasSetupAudio)
+                    .accessibilityLabel("Skip forward 30 seconds")
                 }
                 .padding(.vertical, 4)
                 
@@ -167,9 +145,10 @@ struct PlayerView: View {
                     if chaptersExpanded {
                         ForEach(chapters) { chapter in
                             Button(action: {
-                                let targetTime = CMTime(seconds: chapter.startTime, preferredTimescale: 1)
-                                player?.seek(to: targetTime)
-                                updateProgress()
+                                if !isCurrentEpisode {
+                                    audioManager.play(episode: episode)
+                                }
+                                audioManager.seek(to: chapter.startTime)
                             }) {
                                 HStack {
                                     Text(chapter.title)
@@ -227,6 +206,10 @@ struct PlayerView: View {
                     
                     // Remove from Queue
                     Button(action: {
+                        // Stop if this episode is playing
+                        if isCurrentEpisode {
+                            audioManager.stop()
+                        }
                         sessionManager.removeFromQueue(for: episode.id)
                         dismiss()
                     }) {
@@ -238,6 +221,9 @@ struct PlayerView: View {
                     
                     // Mark as Played
                     Button(action: {
+                        if isCurrentEpisode {
+                            audioManager.stop()
+                        }
                         sessionManager.markAsPlayed(for: episode.id)
                         dismiss()
                     }) {
@@ -253,177 +239,53 @@ struct PlayerView: View {
         }
         .navigationTitle("Episode")
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear {
-            determinePlaybackSource()
-        }
-        .onDisappear {
-            timer?.invalidate()
-        }
     }
     
-    private func determinePlaybackSource() {
-        // Check what source we'll use - but don't start playing
+    // MARK: - Helpers
+    
+    private func determinePlaybackSource() -> PlaybackSource {
         if let localPath = episode.localPath {
             let docURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             let fileURL = docURL.appendingPathComponent(localPath)
             if FileManager.default.fileExists(atPath: fileURL.path) {
-                playbackSource = .local
-                statusText = "Tap play to start"
-                return
+                return .local
             }
         }
-        
         if episode.streamUrl != nil {
-            playbackSource = .streaming
-            statusText = "Tap play to stream"
-        } else {
-            playbackSource = .none
-            statusText = "No audio source"
+            return .streaming
+        }
+        return .none
+    }
+    
+    private func statusTextForIdle() -> String {
+        switch determinePlaybackSource() {
+        case .local: return "Tap play to start"
+        case .streaming: return "Tap play to stream"
+        case .none: return "No audio source"
         }
     }
     
-    private func setupAndPlay() {
-        statusText = "Setting up..."
-        var urlToPlay: URL?
-        
-        // 1. Try Local File
-        if let localPath = episode.localPath {
-            let docURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            let fileURL = docURL.appendingPathComponent(localPath)
-            if FileManager.default.fileExists(atPath: fileURL.path) {
-                playbackSource = .local
-                urlToPlay = fileURL
-            }
-        }
-        
-        // 2. Fallback to Stream
-        if urlToPlay == nil {
-           if let streamUrl = episode.streamUrl, let remote = URL(string: streamUrl) {
-               // Battery guard for streaming
-               if isBatteryTooLow {
-                   playbackSource = .none
-                   statusText = "Battery too low to stream"
-                   return
-               }
-               playbackSource = .streaming
-               urlToPlay = remote
-           } else {
-                playbackSource = .none
-                statusText = "No audio source"
-                return
-            }
-        }
-        
-        guard let url = urlToPlay else { return }
-        
-        DispatchQueue.global(qos: .userInitiated).async {
-            do {
-                try AVAudioSession.sharedInstance().setCategory(
-                    .playback,
-                    mode: .default,
-                    policy: .longFormAudio
-                )
-                try AVAudioSession.sharedInstance().setActive(true)
-                
-                DispatchQueue.main.async {
-                    let item = AVPlayerItem(url: url)
-                    self.player = AVPlayer(playerItem: item)
-                    self.player?.rate = Float(self.sessionManager.playbackSpeed)
-                    self.player?.play()
-                    self.isPlaying = true
-                    self.hasSetupAudio = true
-                    self.startTimer()
-                    
-                    // Resume from synced position (from iOS)
-                    if self.episode.position > 0 {
-                        let targetTime = CMTime(seconds: Double(self.episode.position), preferredTimescale: 1)
-                        self.player?.seek(to: targetTime)
-                        self.progress = Double(self.episode.position)
-                    }
-                    
-                    if self.playbackSource == .streaming {
-                        self.statusText = "Streaming..."
-                    } else {
-                        self.statusText = "Playing"
-                    }
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self.statusText = "Error: \(error.localizedDescription)"
-                }
-            }
-        }
-    }
-    
-    private func togglePlay() {
-        guard let p = player else { return }
-        if p.timeControlStatus == .playing {
-            p.pause()
-            isPlaying = false
-            timer?.invalidate()
-            statusText = "Paused"
-        } else {
-            p.rate = Float(sessionManager.playbackSpeed)
-            p.play()
-            isPlaying = true
-            startTimer()
-        }
-    }
-    
-    private func seek(seconds: Double) {
-        guard let p = player else { return }
-        let current = p.currentTime()
-        let newTime = CMTimeAdd(current, CMTimeMakeWithSeconds(seconds, preferredTimescale: 1))
-        p.seek(to: newTime)
-    }
-    
-    private func startTimer() {
-        timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
-            if let p = player {
-                progress = CMTimeGetSeconds(p.currentTime())
-                
-                // Periodic Progress Sync to Phone (using configurable interval)
-                if Date().timeIntervalSince(lastSyncTime) >= sessionManager.positionSyncInterval {
-                    sessionManager.sendProgress(episodeId: episode.id, position: Int(progress))
-                    lastSyncTime = Date()
-                    
-                    // Update local WatchEpisode position for persistence
-                    if let index = sessionManager.episodes.firstIndex(where: { $0.id == episode.id }) {
-                        sessionManager.episodes[index].position = Int(progress)
-                    }
-                }
-
-                if let error = p.currentItem?.error {
-                    statusText = "Error: \(error.localizedDescription)"
-                    bufferStallStart = nil
-                } else if p.status == .failed {
-                    statusText = "Failed"
-                    bufferStallStart = nil
-                } else if p.timeControlStatus == .playing {
-                    bufferStallStart = nil
-                    let mins = Int(progress) / 60
-                    let secs = Int(progress) % 60
-                    statusText = playbackSource == .streaming 
-                        ? "Streaming \(mins):\(String(format: "%02d", secs))"
-                        : "Playing \(mins):\(String(format: "%02d", secs))"
-                } else if p.timeControlStatus == .waitingToPlayAtSpecifiedRate {
-                    // Buffer stall detection
-                    if bufferStallStart == nil {
-                        bufferStallStart = Date()
-                    } else if let start = bufferStallStart,
-                              Date().timeIntervalSince(start) > maxBufferStallSeconds {
-                        // Stalled too long, stop playback
-                        p.pause()
-                        isPlaying = false
-                        timer?.invalidate()
-                        statusText = "Stopped: buffering too long"
-                        bufferStallStart = nil
-                        return
-                    }
-                    statusText = "Buffering..."
-                }
-            }
+    @ViewBuilder
+    private func sourceIndicator(for source: PlaybackSource) -> some View {
+        switch source {
+        case .local:
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundColor(.green)
+            Text("Downloaded")
+                .font(.caption2)
+                .foregroundColor(.green)
+        case .streaming:
+            Image(systemName: "antenna.radiowaves.left.and.right")
+                .foregroundColor(.orange)
+            Text(isCurrentEpisode ? "Streaming" : "Will Stream")
+                .font(.caption2)
+                .foregroundColor(.orange)
+        case .none:
+            Image(systemName: "exclamationmark.triangle")
+                .foregroundColor(.red)
+            Text("No Source")
+                .font(.caption2)
+                .foregroundColor(.red)
         }
     }
     
@@ -431,11 +293,5 @@ struct PlayerView: View {
         let mins = Int(seconds) / 60
         let secs = Int(seconds) % 60
         return "\(mins):\(String(format: "%02d", secs))"
-    }
-    
-    private func updateProgress() {
-        if let p = player {
-            progress = CMTimeGetSeconds(p.currentTime())
-        }
     }
 }

@@ -4,6 +4,7 @@ import XCTest
 /// Tests for the "End of Episode" sleep timer mode.
 /// When active, the current episode finishes normally but playback stops
 /// instead of auto-advancing to the next queued episode.
+@MainActor
 final class SleepTimerEndOfEpisodeTests: XCTestCase {
     
     // MARK: - Helpers

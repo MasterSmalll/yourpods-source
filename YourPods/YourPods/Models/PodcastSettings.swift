@@ -1,6 +1,6 @@
 import Foundation
 
-/// Controls how new episodes are auto-added to the queue.
+/// Controls how new episodes are auto-added to the queue (AutoPilot).
 enum AutoQueueMode: String, Codable, CaseIterable {
     /// Don't auto-add new episodes to Up Next.
     case off
@@ -26,6 +26,25 @@ enum AutoQueueMode: String, Codable, CaseIterable {
         case .priority: return "New episodes are added to the top of Up Next"
         }
     }
+    
+    /// Server API value (differs from rawValue).
+    var serverValue: String {
+        switch self {
+        case .off:      return "off"
+        case .normal:   return "addToQueue"
+        case .priority: return "playNext"
+        }
+    }
+    
+    /// Create from server API value.
+    static func fromServerValue(_ value: String) -> AutoQueueMode? {
+        switch value {
+        case "off":         return .off
+        case "addToQueue":  return .normal
+        case "playNext":    return .priority
+        default:            return nil
+        }
+    }
 }
 
 /// Controls when downloaded episode files are automatically cleaned up.
@@ -47,9 +66,30 @@ enum DownloadCleanupPolicy: String, Codable, CaseIterable {
         case .never: "Never"
         }
     }
+    
+    /// Server API value.
+    var serverValue: String {
+        switch self {
+        case .oncePlayed:   return "oncePlayed"
+        case .afterOneWeek: return "1week"
+        case .afterOneMonth: return "1month"
+        case .never:        return "never"
+        }
+    }
+    
+    /// Create from server API value.
+    static func fromServerValue(_ value: String) -> DownloadCleanupPolicy? {
+        switch value {
+        case "oncePlayed":  return .oncePlayed
+        case "1week":       return .afterOneWeek
+        case "1month":      return .afterOneMonth
+        case "never":       return .never
+        default:            return nil
+        }
+    }
 }
 
-/// Per-podcast settings that override global defaults.
+/// Listening Profile — per-podcast settings that override global defaults.
 /// Any nil field means "use the global default from SettingsManager".
 struct PodcastSettings: Codable, Hashable {
     var autoQueueMode: AutoQueueMode? = nil
@@ -61,6 +101,11 @@ struct PodcastSettings: Codable, Hashable {
     var downloadCleanupPolicy: DownloadCleanupPolicy? = nil
     var autoDownloadEpisodeLimit: Int? = nil
     var markedPlayedBefore: Date? = nil
+    /// P3 — Privacy Preserving Playback override. nil = use global default.
+    var privacyMode: Bool? = nil
+    /// Per-podcast notification override. nil/false = don't notify, true = notify.
+    /// Opt-in model: users must explicitly enable per podcast.
+    var notificationsEnabled: Bool? = nil
     
     /// Whether any setting is overridden from defaults.
     var hasOverrides: Bool {
@@ -72,7 +117,9 @@ struct PodcastSettings: Codable, Hashable {
         autoDownloadNewEpisodes != nil ||
         downloadCleanupPolicy != nil ||
         autoDownloadEpisodeLimit != nil ||
-        markedPlayedBefore != nil
+        markedPlayedBefore != nil ||
+        privacyMode != nil ||
+        notificationsEnabled != nil
     }
     
     static let useDefaults = PodcastSettings()
@@ -83,6 +130,8 @@ struct PodcastSettings: Codable, Hashable {
         case autoQueueMode, skipIntroSeconds, skipOutroSeconds, archiveOnComplete
         case playbackSpeed, autoDownloadNewEpisodes, downloadCleanupPolicy
         case autoDownloadEpisodeLimit, markedPlayedBefore
+        case privacyMode, notificationsEnabled
+        case serverExtras
         case removeDownloadAfterPlay // legacy key for migration
     }
     
@@ -96,6 +145,9 @@ struct PodcastSettings: Codable, Hashable {
         autoDownloadNewEpisodes = try container.decodeIfPresent(Bool.self, forKey: .autoDownloadNewEpisodes)
         autoDownloadEpisodeLimit = try container.decodeIfPresent(Int.self, forKey: .autoDownloadEpisodeLimit)
         markedPlayedBefore = try container.decodeIfPresent(Date.self, forKey: .markedPlayedBefore)
+        privacyMode = try container.decodeIfPresent(Bool.self, forKey: .privacyMode)
+        notificationsEnabled = try container.decodeIfPresent(Bool.self, forKey: .notificationsEnabled)
+        serverExtras = (try container.decodeIfPresent([String: AnyCodableValue].self, forKey: .serverExtras)) ?? [:]
         
         // Try new key first, fall back to legacy Bool
         if let policy = try container.decodeIfPresent(DownloadCleanupPolicy.self, forKey: .downloadCleanupPolicy) {
@@ -116,8 +168,106 @@ struct PodcastSettings: Codable, Hashable {
         try container.encodeIfPresent(downloadCleanupPolicy, forKey: .downloadCleanupPolicy)
         try container.encodeIfPresent(autoDownloadEpisodeLimit, forKey: .autoDownloadEpisodeLimit)
         try container.encodeIfPresent(markedPlayedBefore, forKey: .markedPlayedBefore)
+        try container.encodeIfPresent(privacyMode, forKey: .privacyMode)
+        try container.encodeIfPresent(notificationsEnabled, forKey: .notificationsEnabled)
+        if !serverExtras.isEmpty {
+            try container.encode(serverExtras, forKey: .serverExtras)
+        }
         // Do NOT encode legacy removeDownloadAfterPlay — new data uses downloadCleanupPolicy
     }
     
     init() {}
+    
+    // MARK: - Server Sync Mapping
+    
+    /// Extra keys from the server that don't map to a local property.
+    /// Preserved for round-tripping so other platforms don't lose data.
+    var serverExtras: [String: AnyCodableValue] = [:]
+    
+    /// Convert local settings to the server's payload format.
+    /// Only includes non-nil overrides. Unknown keys from `serverExtras` are merged.
+    func toServerPayload() -> [String: AnyCodableValue] {
+        var payload: [String: AnyCodableValue] = [:]
+        
+        if let skipIntroSeconds { payload["skipIntroSec"] = .int(skipIntroSeconds) }
+        if let skipOutroSeconds { payload["skipOutroSec"] = .int(skipOutroSeconds) }
+        if let autoQueueMode { payload["autopilot"] = .string(autoQueueMode.serverValue) }
+        if let playbackSpeed { payload["playbackSpeed"] = .double(playbackSpeed) }
+        if let autoDownloadNewEpisodes { payload["autoDownload"] = .bool(autoDownloadNewEpisodes) }
+        if let downloadCleanupPolicy { payload["downloadCleanup"] = .string(downloadCleanupPolicy.serverValue) }
+        if let archiveOnComplete { payload["archiveOnComplete"] = .bool(archiveOnComplete) }
+        if let privacyMode { payload["privacyMode"] = .bool(privacyMode) }
+        if let notificationsEnabled { payload["notifications"] = .bool(notificationsEnabled) }
+        
+        // Merge unknown keys for round-tripping
+        for (key, value) in serverExtras {
+            payload[key] = value
+        }
+        
+        return payload
+    }
+    
+    /// Create a PodcastSettings from a server payload dictionary.
+    /// Known keys are mapped to local properties; unknown keys are stored in `serverExtras`.
+    static func fromServerPayload(_ payload: [String: AnyCodableValue]) -> PodcastSettings {
+        let knownKeys: Set<String> = [
+            "skipIntroSec", "skipOutroSec", "autopilot", "playbackSpeed",
+            "autoDownload", "downloadCleanup", "archiveOnComplete", "privacyMode",
+            "notifications"
+        ]
+        
+        var settings = PodcastSettings()
+        
+        // Skip intro/outro: accept both .int and .double (server may send 15 or 15.0)
+        if case .int(let v) = payload["skipIntroSec"] { settings.skipIntroSeconds = v }
+        else if case .double(let v) = payload["skipIntroSec"] { settings.skipIntroSeconds = Int(v) }
+        if case .int(let v) = payload["skipOutroSec"] { settings.skipOutroSeconds = v }
+        else if case .double(let v) = payload["skipOutroSec"] { settings.skipOutroSeconds = Int(v) }
+        if case .string(let v) = payload["autopilot"] { settings.autoQueueMode = AutoQueueMode.fromServerValue(v) }
+        // Playback speed: accept both .double and .int (server may send 2 or 2.0)
+        if case .double(let v) = payload["playbackSpeed"] { settings.playbackSpeed = v }
+        else if case .int(let v) = payload["playbackSpeed"] { settings.playbackSpeed = Double(v) }
+        if case .bool(let v) = payload["autoDownload"] { settings.autoDownloadNewEpisodes = v }
+        if case .string(let v) = payload["downloadCleanup"] { settings.downloadCleanupPolicy = DownloadCleanupPolicy.fromServerValue(v) }
+        if case .bool(let v) = payload["archiveOnComplete"] { settings.archiveOnComplete = v }
+        if case .bool(let v) = payload["privacyMode"] { settings.privacyMode = v }
+        if case .bool(let v) = payload["notifications"] { settings.notificationsEnabled = v }
+        
+        // Preserve unknown keys for round-tripping
+        for (key, value) in payload where !knownKeys.contains(key) {
+            settings.serverExtras[key] = value
+        }
+        
+        return settings
+    }
+    
+    // MARK: - Field-Level Merge
+    
+    /// Merge server settings with local settings at the field level.
+    /// Local non-nil fields take priority (they were just pushed to the server).
+    /// Server values fill in fields that are nil locally (cross-device adoption).
+    /// Server extras are merged with local extras taking priority.
+    func merging(serverSettings: PodcastSettings) -> PodcastSettings {
+        var result = self
+        
+        // For each field: keep local if non-nil, otherwise adopt server value
+        if result.autoQueueMode == nil { result.autoQueueMode = serverSettings.autoQueueMode }
+        if result.skipIntroSeconds == nil { result.skipIntroSeconds = serverSettings.skipIntroSeconds }
+        if result.skipOutroSeconds == nil { result.skipOutroSeconds = serverSettings.skipOutroSeconds }
+        if result.archiveOnComplete == nil { result.archiveOnComplete = serverSettings.archiveOnComplete }
+        if result.playbackSpeed == nil { result.playbackSpeed = serverSettings.playbackSpeed }
+        if result.autoDownloadNewEpisodes == nil { result.autoDownloadNewEpisodes = serverSettings.autoDownloadNewEpisodes }
+        if result.downloadCleanupPolicy == nil { result.downloadCleanupPolicy = serverSettings.downloadCleanupPolicy }
+        if result.autoDownloadEpisodeLimit == nil { result.autoDownloadEpisodeLimit = serverSettings.autoDownloadEpisodeLimit }
+        if result.privacyMode == nil { result.privacyMode = serverSettings.privacyMode }
+        if result.notificationsEnabled == nil { result.notificationsEnabled = serverSettings.notificationsEnabled }
+        // markedPlayedBefore is local-only (not synced) — don't merge
+        
+        // Merge server extras: server values fill gaps, local extras take priority
+        for (key, value) in serverSettings.serverExtras where result.serverExtras[key] == nil {
+            result.serverExtras[key] = value
+        }
+        
+        return result
+    }
 }

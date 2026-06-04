@@ -6,6 +6,7 @@ import os
 import Combine
 
 /// Protocol for WCSession to allow mocking in tests
+#if canImport(WatchConnectivity)
 protocol WatchSessionProtocol: AnyObject {
     var delegate: WCSessionDelegate? { get set }
     var isPaired: Bool { get }
@@ -14,13 +15,14 @@ protocol WatchSessionProtocol: AnyObject {
     func updateApplicationContext(_ context: [String : Any]) throws
     func sendMessage(_ message: [String : Any], replyHandler: (([String : Any]) -> Void)?, errorHandler: ((Error) -> Void)?)
 }
+#endif
 
 #if canImport(WatchConnectivity)
 extension WCSession: WatchSessionProtocol {}
 #endif
 
 /// Native Watch connectivity service.
-/// Port of watch_service.dart — uses WCSessionDelegate directly.
+/// WCSession bridge — uses WCSessionDelegate directly.
 final class WatchService: NSObject, ObservableObject {
     static let shared = WatchService()
     
@@ -30,6 +32,7 @@ final class WatchService: NSObject, ObservableObject {
     weak var audioManager: AudioManager?
     weak var playerManager: PlayerManager?
     weak var podcastManager: PodcastManager?
+    weak var settingsManager: SettingsManager?
     
     #if canImport(WatchConnectivity)
     var session: WatchSessionProtocol = WCSession.default
@@ -69,6 +72,7 @@ final class WatchService: NSObject, ObservableObject {
     // MARK: - Queue Sync
     
     /// Sync the playback queue to the watch via application context.
+    @MainActor
     func syncQueue(autoSyncEnabled: Bool = true, watchSyncCount: Int = 5, watchPositionSyncInterval: Int = 30) {
         #if os(iOS)
         #if canImport(WatchConnectivity)
@@ -110,9 +114,8 @@ final class WatchService: NSObject, ObservableObject {
         currentContext["speed"] = audioManager?.playbackRate ?? 1.0
         currentContext["positionSyncInterval"] = watchPositionSyncInterval
         
-        // Update WiFi-only download policy from settings (assuming true for now, 
-        // can be wired to SettingsManager later)
-        currentContext["wifiOnly"] = true
+        // Push Watch download network policy from user setting
+        currentContext["wifiOnly"] = settingsManager?.watchDownloadWiFiOnly ?? true
         
         do {
             let jsonData = try JSONSerialization.data(withJSONObject: currentContext)
@@ -144,6 +147,7 @@ final class WatchService: NSObject, ObservableObject {
     
     // MARK: - Playback State Sync
     
+    @MainActor
     func updatePlaybackState() {
         #if os(iOS)
         #if canImport(WatchConnectivity)
@@ -202,6 +206,9 @@ final class WatchService: NSObject, ObservableObject {
         }
         lastLibraryJSON = jsonStr
         logger.info("Library synced: \(libraryData.count) podcasts")
+        
+        // Proactively send recently updated episodes alongside library
+        sendRecentEpisodes()
         #endif
         #endif
     }
@@ -222,6 +229,46 @@ final class WatchService: NSObject, ObservableObject {
             self.logger.error("Failed to send episodes to watch: \(error.localizedDescription)")
         }
         logger.info("Sent \(episodes.count) episodes for \(feedUrl) to watch")
+        #endif
+        #endif
+    }
+    
+    // MARK: - Recently Updated Episodes
+    
+    /// Send the 10 most recent unplayed episodes across all subscriptions to the watch.
+    @MainActor
+    func sendRecentEpisodes() {
+        #if os(iOS)
+        #if canImport(WatchConnectivity)
+        guard session.isPaired, session.isReachable else { return }
+        guard let subscriptions = podcastManager?.subscriptions else { return }
+        
+        let dateFormatter = ISO8601DateFormatter()
+        
+        // Filter episodes using the shared 2-month recency cutoff
+        let filtered = RecentlyUpdatedFilter.filter(
+            episodes: subscriptions.flatMap { $0.episodes },
+            limit: 10
+        )
+        
+        let recentEpisodes: [[String: Any]] = filtered.map { episode in
+            let podcast = episode.podcast
+            return [
+                "id": episode.guid,
+                "title": episode.title,
+                "duration": episode.durationSeconds ?? 0,
+                "audioUrl": episode.audioUrl ?? "",
+                "imageUrl": episode.imageUrl ?? podcast?.logoUrl ?? "",
+                "podcastTitle": podcast?.title ?? "",
+                "podcastArtUri": podcast?.logoUrl ?? "",
+                "pubDate": episode.pubDate.map { dateFormatter.string(from: $0) } ?? "",
+            ] as [String: Any]
+        }
+        
+        session.sendMessage(["recent_episodes": recentEpisodes], replyHandler: nil) { error in
+            self.logger.error("Failed to send recent episodes to watch: \(error.localizedDescription)")
+        }
+        logger.info("Sent \(recentEpisodes.count) recent episodes to watch")
         #endif
         #endif
     }
@@ -278,10 +325,10 @@ extension WatchService: WCSessionDelegate {
                 self.audioManager?.pause()
                 
             case "skipForward":
-                self.audioManager?.seekRelative(seconds: 30)
+                self.audioManager?.seekRelative(seconds: Double(self.settingsManager?.skipForwardSeconds ?? 30))
                 
             case "skipBackward":
-                self.audioManager?.seekRelative(seconds: -15)
+                self.audioManager?.seekRelative(seconds: -Double(self.settingsManager?.skipBackwardSeconds ?? 15))
                 
             case "remove_from_queue":
                 if let episodeId = message["episodeId"] as? String {
@@ -320,6 +367,9 @@ extension WatchService: WCSessionDelegate {
                 if let feedUrl = message["feedUrl"] as? String {
                     self.onCustomCommand?("request_episodes", ["feedUrl": feedUrl])
                 }
+                
+            case "request_recent_episodes":
+                self.onCustomCommand?("request_recent_episodes", [:])
                 
             default:
                 self.logger.warning("Unknown watch command: \(command)")

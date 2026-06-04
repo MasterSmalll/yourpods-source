@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Per-podcast settings sheet. Port of podcast_settings_sheet.dart.
+/// Listening Profile — per-podcast settings sheet.
 struct PodcastSettingsSheet: View {
     @Bindable var podcast: Podcast
     @Environment(\.dismiss) private var dismiss
@@ -24,12 +24,12 @@ struct PodcastSettingsSheet: View {
                         }
                     }
                 } header: {
-                    Text("Auto-Queue")
+                    Text("AutoPilot")
                 } footer: {
                     if let mode = podcast.effectiveSettings.autoQueueMode {
                         Text(mode.subtitle)
                     } else {
-                        Text("Uses your global auto-queue setting from Settings.")
+                        Text("Uses your global AutoPilot setting from Settings.")
                     }
                 }
                 
@@ -40,7 +40,7 @@ struct PodcastSettingsSheet: View {
                             get: { podcast.effectiveSettings.skipIntroSeconds ?? 0 },
                             set: { podcast.effectiveSettings.skipIntroSeconds = $0 > 0 ? $0 : nil }
                         ),
-                        in: 0...120,
+                        in: 0...999,
                         step: 5
                     )
                     
@@ -50,7 +50,7 @@ struct PodcastSettingsSheet: View {
                             get: { podcast.effectiveSettings.skipOutroSeconds ?? 0 },
                             set: { podcast.effectiveSettings.skipOutroSeconds = $0 > 0 ? $0 : nil }
                         ),
-                        in: 0...120,
+                        in: 0...999,
                         step: 5
                     )
                     
@@ -95,6 +95,35 @@ struct PodcastSettingsSheet: View {
                     ))
                 }
                 
+                Section {
+                    Picker("P3", selection: Binding<Bool?>(
+                        get: { podcast.effectiveSettings.privacyMode },
+                        set: { podcast.effectiveSettings.privacyMode = $0 }
+                    )) {
+                        Text("Global Setting").tag(Bool?.none)
+                        Text("On").tag(Bool?.some(true))
+                        Text("Off").tag(Bool?.some(false))
+                    }
+                    .accessibilityLabel("Privacy Preserving Playback")
+                } header: {
+                    Label("Privacy", systemImage: "shield.checkered")
+                } footer: {
+                    Text("Privacy Preserving Playback. Overrides your global P3 setting for this podcast. When on, tracking and ad-insertion redirects are removed from episode URLs.")
+                }
+                
+                Section {
+                    Toggle("New Episode Notifications", isOn: Binding(
+                        get: { podcast.effectiveSettings.notificationsEnabled ?? false },
+                        set: { podcast.effectiveSettings.notificationsEnabled = $0 ? true : nil }
+                    ))
+                    .accessibilityLabel("New Episode Notifications")
+                    .accessibilityHint("When on, you'll be notified when new episodes are found during background refresh")
+                } header: {
+                    Label("Notifications", systemImage: "bell.badge")
+                } footer: {
+                    Text("Get a local notification when new episodes are discovered. Requires notifications to be enabled in Settings → Background Refresh.")
+                }
+                
                 // Feed Credentials (only for protected feeds)
                 if podcast.requiresAuth {
                     Section {
@@ -105,7 +134,7 @@ struct PodcastSettingsSheet: View {
                             .autocorrectionDisabled()
                             #endif
                         
-                        SecureField("Password", text: $feedPassword)
+                        RevealableSecureField(label: "Password", text: $feedPassword)
                             .textContentType(.password)
                         
                         Button {
@@ -133,14 +162,14 @@ struct PodcastSettingsSheet: View {
                     }
                 }
             }
-            .navigationTitle("Podcast Settings")
+            .navigationTitle("Listening Profile")
             #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
+            .inlineNavigationBarTitle()
             #endif
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") {
-                        try? modelContext.save()
+                        modelContext.guardedSave(storeURL: YourPodsApp.modelStoreURL())
                         dismiss()
                     }
                 }

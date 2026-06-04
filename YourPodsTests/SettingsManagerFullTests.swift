@@ -94,9 +94,9 @@ final class SettingsManagerFullTests: XCTestCase {
     
     // MARK: - Sync Settings
     
-    func test_syncInterval_defaultsTo30() {
+    func test_syncInterval_defaultsTo60() {
         let s = SettingsManager()
-        XCTAssertEqual(s.syncInterval, 30)
+        XCTAssertEqual(s.syncInterval, 60)
     }
     
     func test_syncInterval_persists() {
@@ -395,5 +395,23 @@ final class SettingsManagerFullTests: XCTestCase {
         let s = SettingsManager()
         XCTAssertEqual(s.defaultDownloadCleanupPolicy, .afterOneWeek,
                        "New key should take precedence over legacy")
+    }
+    
+    // MARK: - Skip Duration High Values (120→999)
+    
+    func test_skipIntroSeconds_accepts_high_values() {
+        let s1 = SettingsManager()
+        s1.skipIntroSeconds = 500
+        let s2 = SettingsManager()
+        XCTAssertEqual(s2.skipIntroSeconds, 500,
+                       "skipIntroSeconds must support values above the old 120s cap")
+    }
+    
+    func test_skipOutroSeconds_accepts_high_values() {
+        let s1 = SettingsManager()
+        s1.skipOutroSeconds = 999
+        let s2 = SettingsManager()
+        XCTAssertEqual(s2.skipOutroSeconds, 999,
+                       "skipOutroSeconds must support values up to 999s")
     }
 }

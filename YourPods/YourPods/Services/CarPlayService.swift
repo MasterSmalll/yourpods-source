@@ -6,10 +6,8 @@ import os
 import Combine
 
 /// Native CarPlay integration for YourPods.
-/// Port of carplay_service.dart — uses CPTemplateApplicationSceneDelegate pattern.
-///
-/// The flutter version relies on `flutter_carplay` plugin. This native version
-/// talks directly to the CarPlay framework and the AudioManager.
+/// Uses CPTemplateApplicationSceneDelegate pattern to talk directly
+/// to the CarPlay framework and the AudioManager.
 
 #if canImport(CarPlay)
 @available(iOS 14.0, *)
@@ -23,6 +21,7 @@ final class CarPlayService: NSObject {
     weak var podcastManager: PodcastManager?
     weak var playerManager: PlayerManager?
     weak var audioManager: AudioManager?
+    var networkMonitor: NetworkMonitor?
     
     // CarPlay state
     private var interfaceController: CPInterfaceController?
@@ -31,8 +30,9 @@ final class CarPlayService: NSObject {
     // Chapter state for the current episode
     private var currentChapters: [Chapter]?
     
-    // Image cache for artwork
-    private var imageCache = NSCache<NSString, UIImage>()
+    // Image cache — uses shared ImageCacheStore for disk cache fallback.
+    // Previously this was a CarPlay-local NSCache that was wiped on every
+    // CarPlay connect, causing missing artwork on low/no network.
     
     // Debouncing
     private var debounceTimer: Timer?
@@ -49,6 +49,11 @@ final class CarPlayService: NSObject {
     
     // MARK: - Connection Lifecycle
     
+    /// Maximum number of deferred init retries when dependencies aren't ready.
+    private static let maxDeferredInitRetries = 5
+    /// Counter for deferred init attempts.
+    private var deferredInitRetries = 0
+    
     func didConnect(interfaceController: CPInterfaceController) {
         logger.info("CarPlay connected")
         self.interfaceController = interfaceController
@@ -62,7 +67,24 @@ final class CarPlayService: NSObject {
         lastQueueCount = -1
         lastRecentCount = -1
         lastMediaItemId = nil
-        imageCache.removeAllObjects()
+
+        
+        // ── Deferred init: if dependencies aren't wired yet (race with app init),
+        // retry every 0.5s up to maxDeferredInitRetries times. ──
+        if self.podcastManager == nil || self.playerManager == nil || self.audioManager == nil {
+            self.deferredInitRetries += 1
+            if self.deferredInitRetries <= Self.maxDeferredInitRetries {
+                self.logger.info("CarPlay dependencies not ready — deferring init (attempt \(self.deferredInitRetries)/\(Self.maxDeferredInitRetries))")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    guard let self, self.interfaceController != nil else { return }
+                    self.didConnect(interfaceController: self.interfaceController!)
+                }
+                return
+            } else {
+                self.logger.warning("CarPlay dependencies still nil after \(Self.maxDeferredInitRetries) retries — proceeding with available state")
+            }
+        }
+        self.deferredInitRetries = 0
         
         // Refresh when queue changes (reorder, add, remove)
         // Wrap existing handler (set by YourPodsApp for watch sync) instead of replacing
@@ -153,14 +175,13 @@ final class CarPlayService: NSObject {
     // MARK: - Recently Updated Episodes (shared logic)
     
     /// Filters and sorts episodes the same way as HomeView.recentEpisodes.
-    /// Returns unplayed, non-interacted episodes sorted by pubDate descending, capped at 20.
+    /// Returns unplayed, non-interacted episodes from the last 2 months,
+    /// sorted by pubDate descending, capped at 20.
     private func recentEpisodes(from subscriptions: [Podcast]) -> [Episode] {
-        subscriptions
-            .flatMap { $0.episodes }
-            .filter { !$0.isPlayed && !$0.isInteracted }
-            .sorted { ($0.pubDate ?? .distantPast) > ($1.pubDate ?? .distantPast) }
-            .prefix(20)
-            .map { $0 }
+        RecentlyUpdatedFilter.filter(
+            episodes: subscriptions.flatMap { $0.episodes },
+            limit: 20
+        )
     }
     
     // MARK: - Now Playing Tab
@@ -168,25 +189,43 @@ final class CarPlayService: NSObject {
     private func buildNowPlayingTab() -> CPListTemplate {
         var sections: [CPListSection] = []
         
+        // Offline indicator
+        if let networkMonitor, !networkMonitor.isConnected {
+            let offlineItem = CPListItem(
+                text: "No Connection",
+                detailText: "Downloaded episodes are still available."
+            )
+            offlineItem.setImage(UIImage(systemName: "wifi.slash") ?? UIImage())
+            sections.append(CPListSection(items: [offlineItem], header: nil, sectionIndexTitle: nil))
+        }
+        
         // Current item
         if let current = audioManager?.currentItem {
-            let item = CPListItem(text: current.title, detailText: current.podcastTitle)
+            let detailText: String
+            if audioManager?.isBuffering == true {
+                detailText = "Connecting… — \(current.podcastTitle)"
+            } else if audioManager?.errorMessage != nil {
+                detailText = "No connection — \(current.podcastTitle)"
+            } else {
+                detailText = current.podcastTitle
+            }
+            let item = CPListItem(text: current.title, detailText: detailText)
             item.isPlaying = audioManager?.isPlaying ?? false
             item.handler = { [weak self] _, completion in
                 guard let self else { completion(); return }
                 
-                // If the episode was restored from persistence but not loaded
-                // into AVPlayer, start playback before pushing Now Playing.
-                if !(self.audioManager?.isPlaying ?? false), let current = self.audioManager?.currentItem {
-                    let position = TimeInterval(current.positionSeconds)
-                    Task {
-                        await self.audioManager?.playEpisode(current, initialPosition: position > 0 ? position : nil)
-                    }
-                }
+                // Push the Now Playing template IMMEDIATELY — the user tapped
+                // "play" and expects to see the Now Playing screen right away.
+                // play() now sets MPNowPlayingInfoCenter metadata synchronously
+                // (Fix 1 in AudioManager), so the template will have title/artwork
+                // available when it appears. Audio starts in the background.
+                let nowPlaying = CPNowPlayingTemplate.shared
+                self.interfaceController?.pushTemplate(nowPlaying, animated: true, completion: nil)
                 
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                    let nowPlaying = CPNowPlayingTemplate.shared
-                    self.interfaceController?.pushTemplate(nowPlaying, animated: true, completion: nil)
+                // Start playback after showing the template. play() handles both
+                // hot resume (AVPlayer has item) and cold-start bootstrap.
+                if !(self.audioManager?.isPlaying ?? false) {
+                    self.audioManager?.play()
                 }
                 completion()
             }
@@ -259,27 +298,56 @@ final class CarPlayService: NSObject {
     // MARK: - Podcasts Tab
     
     private func buildPodcastsTab(subscriptions: [Podcast]) -> CPListTemplate {
-        let items = subscriptions.map { podcast -> CPListItem in
-            let item = CPListItem(
-                text: podcast.title,
-                detailText: "\(podcast.episodes.count) episodes"
-            )
-            item.handler = { [weak self] _, completion in
-                self?.showEpisodes(for: podcast)
-                completion()
+        // Check if groups are configured
+        let profileId = UserDefaults.standard.string(forKey: "activeProfileId") ?? "global"
+        let groups = PodcastGroup.loadGroups(forProfileId: profileId)
+        
+        var sections: [CPListSection] = []
+        
+        if groups.isEmpty {
+            // Flat list — no groups configured
+            let items = subscriptions.map { podcast -> CPListItem in
+                buildPodcastListItem(podcast)
             }
-            loadArtwork(url: podcast.logoUrl, into: item)
-            return item
+            sections.append(CPListSection(items: items, header: "Library (\(items.count))", sectionIndexTitle: nil))
+        } else {
+            // Grouped sections
+            let byGroup = Dictionary(grouping: subscriptions.filter { $0.groupId != nil }, by: { $0.groupId! })
+            
+            for group in groups.sorted(by: { $0.sortOrder < $1.sortOrder }) {
+                let groupPodcasts = byGroup[group.id] ?? []
+                guard !groupPodcasts.isEmpty else { continue }
+                let items = groupPodcasts.map { buildPodcastListItem($0) }
+                sections.append(CPListSection(items: items, header: group.name, sectionIndexTitle: nil))
+            }
+            
+            // Ungrouped podcasts
+            let ungrouped = subscriptions.filter { $0.groupId == nil }
+            if !ungrouped.isEmpty {
+                let items = ungrouped.map { buildPodcastListItem($0) }
+                sections.append(CPListSection(items: items, header: "Other", sectionIndexTitle: nil))
+            }
         }
         
-        let template = CPListTemplate(
-            title: "Podcasts",
-            sections: [CPListSection(items: items, header: "Library (\(items.count))", sectionIndexTitle: nil)]
-        )
+        let template = CPListTemplate(title: "Podcasts", sections: sections)
         template.tabSystemItem = .featured
         template.emptyViewTitleVariants = ["No Subscriptions"]
         template.emptyViewSubtitleVariants = ["Add podcasts on your phone"]
         return template
+    }
+    
+    /// Build a CPListItem for a single podcast in the Podcasts tab.
+    private func buildPodcastListItem(_ podcast: Podcast) -> CPListItem {
+        let item = CPListItem(
+            text: podcast.title,
+            detailText: "\(podcast.episodes.count) episodes"
+        )
+        item.handler = { [weak self] _, completion in
+            self?.showEpisodes(for: podcast)
+            completion()
+        }
+        loadArtwork(url: podcast.logoUrl, into: item)
+        return item
     }
     
     // MARK: - Episode List (pushed)
@@ -363,11 +431,6 @@ final class CarPlayService: NSObject {
     /// Builds and sets the 5-button array on the Now Playing template.
     /// Called on connect and whenever rate, silence, or chapter state changes.
     private func updateCarPlayButtons() {
-        let currentRate = audioManager?.playbackRate ?? 1.0
-        let rateLabel = currentRate.truncatingRemainder(dividingBy: 1) == 0
-            ? String(format: "%.0f×", currentRate)
-            : String(format: "%.2g×", currentRate)
-        
         // 1. Trim Silence toggle
         let silenceOn = audioManager?.skipSilenceEnabled ?? false
         let silenceIcon = silenceOn ? "waveform.path.badge.minus" : "waveform.path"
@@ -549,8 +612,10 @@ final class CarPlayService: NSObject {
         
         guard let urlString = url, let imageUrl = URL(string: urlString) else { return }
         
-        // Use cached image if available (replaces placeholder instantly)
-        if let cached = imageCache.object(forKey: urlString as NSString) {
+        let key = urlString as NSString
+        
+        // 1. Check shared memory cache (fastest, survives CarPlay reconnects)
+        if let cached = ImageCacheStore.shared.cache.object(forKey: key) {
             let size = CGSize(width: 44, height: 44)
             let renderer = UIGraphicsImageRenderer(size: size)
             let resized = renderer.image { _ in cached.draw(in: CGRect(origin: .zero, size: size)) }
@@ -558,12 +623,24 @@ final class CarPlayService: NSObject {
             return
         }
         
-        // Load asynchronously — placeholder stays visible until this completes
+        // 2. Check disk cache — critical for offline/low-network CarPlay.
+        // Any artwork previously viewed in the phone app is available here.
+        if let diskCached = ImageCacheStore.shared.loadFromDisk(key: urlString) {
+            ImageCacheStore.shared.cache.setObject(diskCached, forKey: key)
+            let size = CGSize(width: 44, height: 44)
+            let renderer = UIGraphicsImageRenderer(size: size)
+            let resized = renderer.image { _ in diskCached.draw(in: CGRect(origin: .zero, size: size)) }
+            item.setImage(resized)
+            return
+        }
+        
+        // 3. Network fetch — placeholder stays visible until this completes
         Task {
             do {
                 let (data, _) = try await URLSession.shared.data(from: imageUrl)
                 guard let image = UIImage(data: data) else { return }
-                self.imageCache.setObject(image, forKey: urlString as NSString)
+                ImageCacheStore.shared.cache.setObject(image, forKey: key)
+                ImageCacheStore.shared.saveToDisk(image: image, key: urlString)
                 let size = CGSize(width: 44, height: 44)
                 let renderer = UIGraphicsImageRenderer(size: size)
                 let resized = renderer.image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
