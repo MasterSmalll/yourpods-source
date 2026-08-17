@@ -1,0 +1,86 @@
+# Localization allowlist — spec §7.1.
+#
+# One repo-relative path per line. A file listed here is scanned strictly by
+# the localization guards; a file not listed is ignored entirely.
+#
+# The list is opt-in on purpose. A deny-everything guard written on day one
+# fails ~1,300 times and gets disabled within a week. A guard written at the
+# end never catches what it was for. This list is green from its first commit
+# and can never regress a file already migrated.
+#
+# Add a file in the SAME commit that migrates it. Never add a file you have
+# not migrated — a listed-but-unmigrated file turns the guard red for everyone
+# else and the pressure will be to delete the line, not fix the file.
+#
+# Blank lines and lines beginning with '#' are ignored.
+
+YourPods/YourPods/Utils/DurationFormatting.swift
+YourPods/YourPods/Services/Intents/SiriIntentHandler.swift
+YourPods/YourPods/Services/NotesExportService.swift
+YourPods/YourPods/State/PlayerManager.swift
+YourPods/YourPods/State/SleepTimerManager.swift
+YourPods/YourPods/Views/Components/AddEditNoteSheet.swift
+YourPods/YourPods/Views/Components/ChapterListSheet.swift
+YourPods/YourPods/Views/Components/TranscriptListSheet.swift
+YourPods/YourPods/Views/EpisodeActivityView.swift
+YourPods/YourPods/Views/NotesView.swift
+YourPods/YourPods/Views/PlayerView.swift
+YourPods/YourPods/Views/SyncConflictSheet.swift
+YourPodsWidgets/PlaybackWidget.swift
+YourPodsWidgets/YourPodsLiveActivity.swift
+YourPods/YourPods/Views/HistoryView.swift
+YourPods/YourPods/Views/ProStatsView.swift
+YourPodsWatch/WatchPodcastEpisodesView.swift
+YourPodsWatch/WatchRecentlyUpdatedView.swift
+YourPods/YourPods/Services/CarPlayService.swift
+YourPods/YourPods/Utils/NowPlayingCardHelper.swift
+YourPods/YourPods/Views/PodcastDetailView.swift
+YourPods/YourPods/Views/QueueView.swift
+YourPodsWatch/PlayerView.swift
+YourPods/YourPods/Utils/EpisodeAccessibility.swift
+YourPods/YourPods/Utils/EpisodeDownloadHelper.swift
+YourPods/YourPods/Services/Intents/Entities/EpisodeEntity.swift
+YourPods/YourPods/Services/Intents/Entities/PodcastEntity.swift
+YourPods/YourPods/Services/Intents/GetterIntents.swift
+YourPods/YourPods/Views/Components/NowPlayingBar.swift
+YourPods/YourPods/Views/Components/PodcastSettingsSheet.swift
+YourPods/YourPods/Views/DataTransparencyView.swift
+YourPods/YourPods/Views/EpisodeDetailSheet.swift
+YourPods/YourPods/Views/HomeView.swift
+YourPods/YourPods/Views/LibraryView.swift
+YourPods/YourPods/Views/OnboardingView.swift
+YourPods/YourPods/Views/P3SettingsView.swift
+YourPods/YourPods/Views/ProPaywallView.swift
+YourPods/YourPods/Views/SettingsView.swift
+YourPodsComplication/YourPodsComplicationWidget.swift
+YourPodsWatch/ContentView.swift
+YourPods/YourPods/Views/DownloadsView.swift
+YourPods/YourPods/Views/PodcastSearchView.swift
+YourPods/YourPods/Views/ProfileSelectionView.swift
+YourPods/YourPods/Services/Intents/Entities/ListeningStatsEntity.swift
+YourPods/YourPods/Services/Intents/LibraryIntents.swift
+YourPods/YourPods/Services/Intents/PlaybackIntents.swift
+YourPods/YourPods/Services/Intents/ShareAndOpenIntents.swift
+YourPods/YourPods/Services/Intents/YourPodsShortcuts.swift
+YourPods/YourPods/Views/AboutSyncView.swift
+YourPods/YourPods/Views/AllRecentEpisodesView.swift
+YourPods/YourPods/Views/ChangePasswordView.swift
+YourPods/YourPods/Views/Components/AutoHideProgressSheet.swift
+YourPods/YourPods/Views/Components/OfflineBanner.swift
+YourPods/YourPods/Views/Components/ProNudgeRow.swift
+YourPods/YourPods/Views/Components/RevealableSecureField.swift
+YourPods/YourPods/Views/Components/SleepTimerSheet.swift
+YourPods/YourPods/Views/ContentView.swift
+YourPods/YourPods/Views/ImportView.swift
+YourPods/YourPods/Views/LibraryEpisodeListView.swift
+YourPods/YourPods/Views/ManageGroupsView.swift
+YourPods/YourPods/Views/SharedEpisodePreviewSheet.swift
+YourPods/YourPods/Views/SharedPodcastPreviewSheet.swift
+YourPods/YourPods/Views/SiriShortcutsSettingsView.swift
+YourPods/YourPods/Views/VaultToSyncSection.swift
+YourPods/YourPods/YourPodsApp.swift
+YourPodsWatch/RemotePlayerView.swift
+YourPodsWatch/WatchLibraryView.swift
+YourPodsWidgets/WidgetPlaybackIntents.swift
+YourPodsWidgets/YourPodsComplicationWidget.swift
+YourPods/YourPods/Views/Components/TranslationDisclosureSheet.swift

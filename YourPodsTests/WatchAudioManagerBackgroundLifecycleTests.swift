@@ -99,6 +99,31 @@ final class WatchAudioManagerBackgroundLifecycleTests: XCTestCase {
                        "Timer should not activate when nothing is playing")
     }
 
+    /// EDGE: A background auto-advance (handleTrackEnd → play() for the next
+    /// episode while still backgrounded) must NOT resurrect the timer. Without
+    /// this, the 1Hz UI timer restarts on every track transition and runs for
+    /// the rest of the background listening session — the confirmed battery
+    /// drain this task fixes. Mirrors WatchAudioManager.startTimer()'s
+    /// isInBackground gate.
+    func test_timerState_playWhileInBackground_staysSuspended() {
+        var state = WatchAudioState()
+        let ep1 = makeEpisode(id: "ep-1")
+        let ep2 = makeEpisode(id: "ep-2")
+        state.play(episode: ep1, documentsDirectory: tempDir)
+        XCTAssertEqual(state.timerState, .active)
+
+        state.handleDidEnterBackground()
+        XCTAssertEqual(state.timerState, .suspended)
+
+        // Auto-advance while still backgrounded (e.g. track finished mid-session).
+        state.play(episode: ep2, documentsDirectory: tempDir)
+
+        XCTAssertEqual(state.timerState, .suspended,
+                       "play() reached via background auto-advance must NOT start " +
+                       "the timer — it would run unbounded for the rest of the " +
+                       "background session, burning battery with the screen off")
+    }
+
     /// Timer should be suspended after stop(), even if we were in foreground.
     func test_timerState_suspendedAfterStop() {
         var state = WatchAudioState()
@@ -150,68 +175,6 @@ final class WatchAudioManagerBackgroundLifecycleTests: XCTestCase {
                        "Audio session must stay active during playback")
     }
 
-    // MARK: - Bug 3: Extended Runtime Session Lifecycle
-
-    /// Extended session should activate when playback starts.
-    func test_extendedSession_activatesOnPlay() {
-        var state = WatchAudioState()
-        let episode = makeEpisode()
-        state.play(episode: episode, documentsDirectory: tempDir)
-        state.handlePlaybackStarted()
-
-        XCTAssertEqual(state.extendedSessionState, .active,
-                       "Extended runtime session MUST be active during playback — " +
-                       "without it, watchOS suspends the app after ~30s in background")
-    }
-
-    /// Extended session should invalidate when playback stops.
-    func test_extendedSession_invalidatesOnStop() {
-        var state = WatchAudioState()
-        let episode = makeEpisode()
-        state.play(episode: episode, documentsDirectory: tempDir)
-        state.handlePlaybackStarted()
-
-        state.handlePlaybackStopped()
-
-        XCTAssertEqual(state.extendedSessionState, .invalidated,
-                       "Extended session must be invalidated when playback stops — " +
-                       "leaving it active wastes battery and confuses watchOS")
-    }
-
-    /// Extended session should be inactive initially (before any playback).
-    func test_extendedSession_inactiveByDefault() {
-        let state = WatchAudioState()
-
-        XCTAssertEqual(state.extendedSessionState, .inactive,
-                       "Extended session should be inactive before playback")
-    }
-
-    /// Extended session should transition: inactive → active → invalidated → active
-    /// (reusable across play/stop/play cycles).
-    func test_extendedSession_fullLifecycle() {
-        var state = WatchAudioState()
-        let ep1 = makeEpisode(id: "ep-1")
-        let ep2 = makeEpisode(id: "ep-2")
-
-        // Initial
-        XCTAssertEqual(state.extendedSessionState, .inactive)
-
-        // Play ep1
-        state.play(episode: ep1, documentsDirectory: tempDir)
-        state.handlePlaybackStarted()
-        XCTAssertEqual(state.extendedSessionState, .active)
-
-        // Stop
-        state.handlePlaybackStopped()
-        XCTAssertEqual(state.extendedSessionState, .invalidated)
-
-        // Play ep2 — should re-activate
-        state.play(episode: ep2, documentsDirectory: tempDir)
-        state.handlePlaybackStarted()
-        XCTAssertEqual(state.extendedSessionState, .active,
-                       "Extended session should re-activate for a new playback session")
-    }
-
     // MARK: - Bug 4: Stall Timer Lifecycle
 
     /// Stall timers should be suspended when the app enters background.
@@ -240,43 +203,52 @@ final class WatchAudioManagerBackgroundLifecycleTests: XCTestCase {
                       "Stall timers should resume when app returns to foreground")
     }
 
-    // MARK: - Integration: Timer + Extended Session + Stop
+    // MARK: - Integration: Timer + Stop
 
-    /// Verify that stop() properly cleans up both timer and extended session state.
+    /// Verify that stop() properly cleans up timer and audio session state.
     func test_stopCleansUpAllBackgroundLifecycleState() {
         var state = WatchAudioState()
         let episode = makeEpisode()
         state.play(episode: episode, documentsDirectory: tempDir)
-        state.handlePlaybackStarted()
 
         XCTAssertEqual(state.timerState, .active)
-        XCTAssertEqual(state.extendedSessionState, .active)
 
         state.stop()
-        state.handlePlaybackStopped()
 
         XCTAssertEqual(state.timerState, .suspended,
                        "Timer should be suspended after stop")
-        XCTAssertEqual(state.extendedSessionState, .invalidated,
-                       "Extended session should be invalidated after stop")
         XCTAssertTrue(state.shouldDeactivateAudioSession,
                       "Audio session should be deactivatable after stop")
     }
 
-    /// Background transition during active playback should only affect the timer,
-    /// NOT the extended session (which keeps audio alive).
-    func test_backgroundDoesNotAffectExtendedSession() {
-        var state = WatchAudioState()
-        let episode = makeEpisode()
-        state.play(episode: episode, documentsDirectory: tempDir)
-        state.handlePlaybackStarted()
+    // MARK: - WKExtendedRuntimeSession source-scan guard
+    //
+    // Precedent: WidgetInteractivityGuardTests. An earlier cleanup deleted the (never-functional
+    // — watchOS has no extended-runtime session type for audio) WKExtendedRuntimeSession
+    // code from production; this file used to carry a twin mirror of that dead code
+    // (ExtendedSessionState / handlePlaybackStarted / handlePlaybackStopped), deleted
+    // above. This guard makes sure neither the twin nor production regrows it.
 
-        state.handleDidEnterBackground()
+    func test_noFileUnderWatchTarget_referencesWKExtendedRuntimeSession() throws {
+        // <repo>/YourPodsTests/WatchAudioManagerBackgroundLifecycleTests.swift → <repo>
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let watchDir = repoRoot.appendingPathComponent("YourPodsWatch")
+        let files = try FileManager.default.contentsOfDirectory(at: watchDir, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "swift" }
+        XCTAssertFalse(files.isEmpty, "No watch sources found at \(watchDir.path) — scanner is misrooted, fix the path instead of skipping")
 
-        XCTAssertEqual(state.timerState, .suspended,
-                       "Timer suspended in background")
-        XCTAssertEqual(state.extendedSessionState, .active,
-                       "Extended session MUST stay active in background — " +
-                       "it's what keeps audio playing!")
+        var violations: [String] = []
+        for file in files {
+            let contents = try String(contentsOf: file, encoding: .utf8)
+            if contents.contains("WKExtendedRuntimeSession") {
+                violations.append(file.lastPathComponent)
+            }
+        }
+        XCTAssertEqual(violations, [],
+                       "WKExtendedRuntimeSession must not reappear under YourPodsWatch/ — " +
+                       "watchOS has no extended-runtime session type for audio playback " +
+                       "(the dead code this class guards against has already been deleted)")
     }
 }

@@ -220,7 +220,7 @@ actor GPodderClient {
     
     func getEpisodeActions(since: Int = 0) async throws -> [EpisodeAction] {
         // Don't filter by device — we want actions from ALL devices
-        // (other clients, web UI, etc.)
+        // (other clients, etc.)
         try await ensureAuthenticated()
         
         let encodedUsername = username.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? username

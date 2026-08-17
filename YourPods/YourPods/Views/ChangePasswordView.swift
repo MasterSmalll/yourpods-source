@@ -47,7 +47,7 @@ struct ChangePasswordView: View {
             Section {
                 RevealableSecureField(label: "Current Password", text: $currentPassword)
                     .textContentType(.password)
-                    .accessibilityLabel("Current password")
+                    .accessibilityLabel("Current Password")
             } header: {
                 Text("Current Password")
             }
@@ -55,11 +55,11 @@ struct ChangePasswordView: View {
             Section {
                 RevealableSecureField(label: "New Password", text: $newPassword)
                     .textContentType(.newPassword)
-                    .accessibilityLabel("New password")
+                    .accessibilityLabel("New Password")
                 
                 RevealableSecureField(label: "Confirm New Password", text: $confirmPassword)
                     .textContentType(.newPassword)
-                    .accessibilityLabel("Confirm new password")
+                    .accessibilityLabel("Confirm New Password")
             } header: {
                 Text("New Password")
             } footer: {
@@ -104,7 +104,7 @@ struct ChangePasswordView: View {
                     }
                 }
                 .disabled(!canSubmit)
-                .accessibilityLabel("Update password")
+                .accessibilityLabel("Update Password")
                 .accessibilityHint(canSubmit ? "Double-tap to change your password" : "Fill in all fields to enable")
             }
         }

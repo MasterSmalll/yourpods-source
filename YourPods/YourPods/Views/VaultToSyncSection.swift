@@ -30,7 +30,8 @@ struct VaultToSyncSection: View {
     
     enum PromotionTarget: String, CaseIterable {
         case gpodder = "gPodder Sync"
-        case pro = "YourPods Sync"
+        case free = "YourPods Free"
+        case pro = "YourPods Pro"
     }
     
     private static let logger = Logger(subsystem: "com.yourpods", category: "vault-promotion")
@@ -136,9 +137,11 @@ struct VaultToSyncSection: View {
                         Text("Your local podcasts and listening history will be migrated to YourPods Sync.")
                         HStack(spacing: 4) {
                             Text("By creating an account, you agree to our")
-                            Link("Terms of Service", destination: URL(string: "https://asecretcompany.com/yourpods-terms-of-service/")!)
-                            Text("and")
-                            Link("Privacy Policy", destination: URL(string: "https://asecretcompany.com/yourpods-privacy-policy/")!)
+                            Link("Terms of Service", destination: AppURLs.termsOfService)
+                            Text(String(localized: "legal.termsAndPrivacy.conjunction",
+                                        defaultValue: "and",
+                                        comment: "Joins the two links in the row [Terms of Service] and [Privacy Policy]. It sits between two separately tappable links, so it cannot be folded into either one."))
+                            Link("Privacy Policy", destination: AppURLs.privacyPolicy)
                         }
                         .font(.caption2)
                     }
@@ -211,7 +214,7 @@ struct VaultToSyncSection: View {
                 .textContentType(.emailAddress)
                 .disableAutocorrection(true)
             
-            RevealableSecureField(label: isCreatingProAccount ? "Create a password (6+ characters)" : "Password", text: $proPassword)
+            RevealableSecureField(label: isCreatingProAccount ? "Create a password (6+ characters)" : "password", text: $proPassword)
                 .textContentType(isCreatingProAccount ? .newPassword : .password)
         }
     }
@@ -222,7 +225,7 @@ struct VaultToSyncSection: View {
         switch promotionTarget {
         case .gpodder:
             return !serverUrl.isEmpty && !username.isEmpty && !password.isEmpty
-        case .pro:
+        case .free, .pro:
             return !proEmail.isEmpty && !proPassword.isEmpty
         }
     }
@@ -273,7 +276,8 @@ struct VaultToSyncSection: View {
                 )
             }
             
-            // Save password for re-auth (kSecAttrAccessibleAfterFirstUnlock per GEMINI.md)
+            // Save password for re-auth (kSecAttrAccessibleAfterFirstUnlock,
+            // so background sync can still re-auth after a reboot)
             _ = KeychainHelper.shared.save(password: proPassword, forProfileId: profile.id)
             
             let mergeCount = try await podcastManager.promoteVaultToPro(

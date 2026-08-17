@@ -12,7 +12,6 @@ struct PodcastStats: Codable, Identifiable {
 }
 
 /// Aggregate listening statistics computed from episode actions.
-///
 struct ListeningStats: Codable {
     let totalListeningSeconds: Int
     let episodesCompleted: Int
@@ -39,20 +38,39 @@ struct ListeningStatsService {
     private static let cacheKey = "listening_stats_cache"
     
     // MARK: - Cache
-    
+
     static func loadFromCache() -> ListeningStats? {
         guard let data = UserDefaults.standard.data(forKey: cacheKey) else { return nil }
         return try? JSONDecoder().decode(ListeningStats.self, from: data)
     }
-    
+
     static func saveToCache(_ stats: ListeningStats) {
         if let data = try? JSONEncoder().encode(stats) {
             UserDefaults.standard.set(data, forKey: cacheKey)
         }
     }
-    
+
     static func clearCache() {
         UserDefaults.standard.removeObject(forKey: cacheKey)
+    }
+
+    // MARK: - Helpers
+
+    /// Canonical day-bucket key for dailyListening. Extracted so intents slice the
+    /// same buckets the stats screen writes.
+    static func dayKey(for date: Date, calendar: Calendar = .current) -> String {
+        ISO8601DateFormatter().string(from: calendar.startOfDay(for: date))
+    }
+
+    /// Sum of listening minutes over the last `daysBack` days (including today).
+    static func minutes(in dailyListening: [String: Int], daysBack: Int,
+                        from now: Date = Date(), calendar: Calendar = .current) -> Int {
+        var seconds = 0
+        for offset in 0..<daysBack {
+            guard let day = calendar.date(byAdding: .day, value: -offset, to: now) else { continue }
+            seconds += dailyListening[dayKey(for: day, calendar: calendar)] ?? 0
+        }
+        return seconds / 60
     }
     
     // MARK: - Compute
@@ -103,10 +121,10 @@ struct ListeningStatsService {
                 if let started = action.started, let pos = action.position, pos > started {
                     let segment = pos - started
                     epSeconds += segment
-                    
+
                     let date = Date(timeIntervalSince1970: TimeInterval(action.timestamp))
-                    let dayKey = ISO8601DateFormatter().string(from: Calendar.current.startOfDay(for: date))
-                    dailySeconds[dayKey, default: 0] += segment
+                    let dayKeyStr = Self.dayKey(for: date)
+                    dailySeconds[dayKeyStr, default: 0] += segment
                 }
             }
             
@@ -116,8 +134,8 @@ struct ListeningStatsService {
                 epSeconds = maxPos
                 if let lastTs = epActions.last?.timestamp {
                     let date = Date(timeIntervalSince1970: TimeInterval(lastTs))
-                    let dayKey = ISO8601DateFormatter().string(from: Calendar.current.startOfDay(for: date))
-                    dailySeconds[dayKey, default: 0] += maxPos
+                    let dayKeyStr = Self.dayKey(for: date)
+                    dailySeconds[dayKeyStr, default: 0] += maxPos
                 }
             }
             

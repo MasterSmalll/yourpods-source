@@ -1,0 +1,2966 @@
+{
+ "YourPods/YourPods/InfoPlist.xcstrings": {
+  "CFBundleDisplayName": {
+   "english": "4079b331e0e57651",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "CFBundleName": {
+   "english": "4079b331e0e57651",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "NSSiriUsageDescription": {
+   "english": "7cbc2bc3cd403ad5",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  }
+ },
+ "YourPods/YourPods/Localizable.xcstrings": {
+  "%@, %lld episodes, %@": {
+   "english": "f0fee0eff3ad77a6",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "%lld auto-hidden": {
+   "english": "6222023409a03961",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "%lld ep \u00b7 %@": {
+   "english": "07c8d18056703bc7",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "%lld episodes": {
+   "english": "b566b21ae7ec696a",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "%lld episodes auto-hidden so far": {
+   "english": "26eedf0dbeed6218",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "%lld episodes \u00b7 %@": {
+   "english": "e6f522006f1f0186",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "%lld of %lld": {
+   "english": "e4ba7620561f9883",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "%lld played": {
+   "english": "2d02900d460f04cd",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "%lld synced actions": {
+   "english": "a4d04311dcdfa933",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "%lld unplayed": {
+   "english": "67501fa921be0b91",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "+%lld more": {
+   "english": "4cb3f9141db385aa",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "Auto-hid %lld unplayed episodes. You can restore them from each podcast's detail page or from Settings \u2192 Auto-Hidden Episodes.": {
+   "english": "7c1faf7ab16b7b93",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "Cache Duration: %lld hours": {
+   "english": "473520cd646cdaba",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "Changing your Sync Profile Name to \"%@\" will link this device to a new shared profile. Devices with the old name will stay on \"%@\".": {
+   "english": "69a296f91006592f",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "Controls AirPods double/triple-tap and lock screen previous/next. Skip durations use your Playback settings above (%llds back, %llds forward).": {
+   "english": "f6911ee7b44b0c15",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "Hide %lld Unplayed Episodes": {
+   "english": "ed4df110bcf885ac",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "Imported %lld podcasts": {
+   "english": "2b448a7766b52d35",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "Mark %lld Episodes as Played": {
+   "english": "bdb2d197a5309b96",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "Match %lld of %lld": {
+   "english": "d4d983f40295c78e",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "Move %lld Selected": {
+   "english": "f96c360b1c0d5972",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "Note at %@: %@": {
+   "english": "799711a382c5a789",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "Play %@ from %@": {
+   "english": "7135118a5b482e51",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "Processing podcast %lld of %lld\u2026": {
+   "english": "a9d0184fba9652f4",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "Recurred %lld times": {
+   "english": "61f27390fe700d14",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "Show All %lld Results": {
+   "english": "d7e2e4ea1f2d85d0",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "Showing newest %lld \u2014 %lld older hidden": {
+   "english": "3fdbaa11c0c51b84",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "Showing the newest %lld episodes. %lld older episodes are hidden.": {
+   "english": "a43739b40258d4de",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "Skip back %lld seconds": {
+   "english": "5202c27a0c16d1e3",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "Skip forward %lld seconds": {
+   "english": "5ad3216c2324ad62",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "This will hide all %lld unplayed episodes from this podcast. They won't appear in your feed but can be shown again with the Show Hidden toggle.": {
+   "english": "360acad0441775f2",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "This will mark all %lld episodes as fully played and sync to the server. This cannot be undone.": {
+   "english": "de1dbc1ae341e4b7",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "This will remove all %lld downloaded episodes and free up %@.": {
+   "english": "c39a91966000b661",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "Unhide all %lld auto-hidden episodes for this podcast": {
+   "english": "bf2209f2efa86c50",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "Unplayed episodes older than %lld days will be auto-hidden for this podcast.": {
+   "english": "b4bf02362bd7e393",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "Unplayed episodes published more than %lld days ago will be automatically hidden on each sync. Hidden episodes can always be restored from the podcast detail.": {
+   "english": "0935d37e3f6d34f1",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "Upload your %lld subscriptions and listening history to YourPods Sync?": {
+   "english": "19df25dc7099a559",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "When adding a new podcast, hide all but the %lld most recent episodes. Unhide anytime via Show Hidden in the podcast detail.": {
+   "english": "4ef460591c68fa3f",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.account.delete.confirmHint": {
+   "english": "f72667ba79c30ee4",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.action.addToQueue": {
+   "english": "04173573e9346246",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.action.details": {
+   "english": "45989de49fb7f66d",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.action.download": {
+   "english": "d6eafe8235910042",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.action.hide": {
+   "english": "ac20a57bfde0bbc4",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.action.markPlayed": {
+   "english": "b90e70d98df07a52",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.action.markUnplayed": {
+   "english": "10001b87879191a8",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.action.play": {
+   "english": "436e61016e26fcb7",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.action.playNext": {
+   "english": "3391e4674320cad6",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.action.removeDownload": {
+   "english": "157a343430e8fe90",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.action.removeFromQueue": {
+   "english": "8bfa5cc5d2c75633",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.action.unhide": {
+   "english": "eb2780f761bfacd0",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.activity.action.deleted": {
+   "english": "b48ff39c2e0f5451",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.activity.action.downloaded": {
+   "english": "f0b0738f75b8bcd1",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.activity.action.new": {
+   "english": "74e1ca7c09abccb5",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.activity.action.played": {
+   "english": "900b1e4c46b4edab",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.activity.atPosition": {
+   "english": "e65bba5fbd85fd1b",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.activity.fromPodcast": {
+   "english": "7dba61b7b6c65f69",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.activity.onDevice": {
+   "english": "dd288b2400e4c922",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.activity.percent": {
+   "english": "aa3ada000859aba4",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.card.loading": {
+   "english": "7750de099cc14f9d",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.dataTransparency.row": {
+   "english": "b947be6296b8480c",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.downloads.row": {
+   "english": "a1290d6281a52844",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.downloads.rowWithDuration": {
+   "english": "d121fb664ab8a28d",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.duration.hours": {
+   "english": "530fb282c0fcade1",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.duration.hoursMinutes": {
+   "english": "0fd7ca00fd8247e3",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.duration.minutes": {
+   "english": "c7e7b0558722b234",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.duration.seconds": {
+   "english": "f76320d3a182a98b",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.episode.hint": {
+   "english": "c0ca882df2aa462e",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.episode.new": {
+   "english": "74e1ca7c09abccb5",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.episode.remaining": {
+   "english": "dcbf12cb2ebcb7f1",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.episode.state.downloaded": {
+   "english": "f0b0738f75b8bcd1",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.episode.state.hidden": {
+   "english": "7e6fefff0f0aeb6c",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.episode.state.inQueue": {
+   "english": "dc665ab162a779c8",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.episode.state.played": {
+   "english": "900b1e4c46b4edab",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.episode.state.playing": {
+   "english": "65732a96a452fba0",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.list.separator": {
+   "english": "0a07f659461970d8",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.note.color.blue": {
+   "english": "ec7d56a01607001e",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.note.color.green": {
+   "english": "d486dfbd5fb57834",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.note.color.purple": {
+   "english": "7d465fb9b9314846",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.note.color.red": {
+   "english": "ba19e9c3d5f49882",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.note.color.yellow": {
+   "english": "19dd83f117525b93",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.nowPlaying.paused": {
+   "english": "c02aa5fb3bf15b7c",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.nowPlaying.playing": {
+   "english": "8ab2c4158851061e",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.onboarding.moreInfo": {
+   "english": "4d53a523ab110d3e",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.onboarding.option": {
+   "english": "eb708d269dcc891e",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.paywall.featureRow": {
+   "english": "8a4558789ac66aae",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.paywall.includedInFree": {
+   "english": "68dd489429d5a06f",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.paywall.includedInPro": {
+   "english": "f880539ded22f553",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.paywall.loadingPrice": {
+   "english": "6fafc6fb1ee800d4",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.paywall.notInFree": {
+   "english": "939b8192ab2f4d72",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.paywall.notInPro": {
+   "english": "2e4de17d9088290d",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.paywall.pricePerPeriod": {
+   "english": "ca4b7db12f714d24",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.player.playbackSpeed": {
+   "english": "cf318ca2dbc1e83c",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.progress.positionOfDuration": {
+   "english": "c7e34bbaca0c4962",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.search.matchedInDescription": {
+   "english": "0cdefc14839b59c3",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.settings.titleWithDetail": {
+   "english": "eb708d269dcc891e",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.speed.rate": {
+   "english": "49229d46d51fc24c",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.stats.card": {
+   "english": "b41da2237a299d09",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.stats.dailyTrendChart": {
+   "english": "0e4eaaaae16143b2",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.stats.row": {
+   "english": "b41da2237a299d09",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.transcript.cue": {
+   "english": "b41da2237a299d09",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "account.delete.confirmPrompt": {
+   "english": "a385fa7da21e3037",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "account.delete.confirmWord": {
+   "english": "65daeb378bdec35d",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "activity.onDevice": {
+   "english": "0f86ad08ed3596b7",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "activity.playedAt": {
+   "english": "e65bba5fbd85fd1b",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "activity.positionOfTotal": {
+   "english": "dea9ad23a95552c2",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "badge.explicit.short": {
+   "english": "a9f51566bd6705f7",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "entity.episode.podcast": {
+   "english": "ee17b0047b7589b9",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "entity.episode.title": {
+   "english": "ee17b0047b7589b9",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "entity.podcast.author": {
+   "english": "ee17b0047b7589b9",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "entity.podcast.title": {
+   "english": "ee17b0047b7589b9",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "episode.badge.new": {
+   "english": "a253ff09c5a8678e",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "format.duration.hoursMinutes": {
+   "english": "401da2ebc8a4b16e",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "format.duration.minutes": {
+   "english": "75ee9b0aa5a1a68b",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "format.duration.remaining": {
+   "english": "6dbf5ec23b175c2a",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "format.duration.remainingTimestamp": {
+   "english": "bf032052edc623b9",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "format.duration.seconds": {
+   "english": "5d1544bd72730fbb",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "format.progress.left": {
+   "english": "a6a693282741cdd6",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "format.progress.listened": {
+   "english": "60022e7640edb0e2",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "format.seconds.short": {
+   "english": "5d1544bd72730fbb",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "format.speed.rate": {
+   "english": "ac525f5b3b728b71",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "intent.error.message": {
+   "english": "ee17b0047b7589b9",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "legal.termsAndPrivacy.conjunction": {
+   "english": "6201111b83a0cb5b",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "library.empty.noEpisodesForFilter": {
+   "english": "84c192392c471298",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "library.filter.all": {
+   "english": "a52ace420f2175d0",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "library.filter.downloaded": {
+   "english": "f0b0738f75b8bcd1",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "library.filter.groups": {
+   "english": "39bbb719fa2b9d22",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "library.filter.inProgress": {
+   "english": "b4cc4b07c300103a",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "library.filter.unplayed": {
+   "english": "ee288d682bc361db",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "library.group.podcastCount": {
+   "english": "fec7a8165bd4767c",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "library.selection.podcastCount": {
+   "english": "f41a87d0cf97c595",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "notes.sync.nextcloud.success": {
+   "english": "0edbcc8ef30390db",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "notes.sync.notesApi.success": {
+   "english": "9eec1ac283d50880",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "notes.sync.partialFailure": {
+   "english": "a59e52729d108f47",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "paywall.period.year": {
+   "english": "4cb4ea25583c2564",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "paywall.pricePerPeriod": {
+   "english": "d15853bd567ec21e",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "paywall.subscribe": {
+   "english": "cc0e38da9c41790b",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "paywall.tier.free": {
+   "english": "f411a1fb62758b4c",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "paywall.tier.pro": {
+   "english": "957b0b874524d09a",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "player.sleep.remaining": {
+   "english": "43e3ece73ff8f4eb",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "player.speedMenuItem": {
+   "english": "2d6a5b15a446f3a5",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "podcast.action.openWebsite": {
+   "english": "a71e757324467ccf",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "podcast.badge.complete": {
+   "english": "143b270a32602d41",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "podcast.badge.serial": {
+   "english": "8ea0949377f7f900",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "podcast.byPublisher": {
+   "english": "83cc2e4671726f85",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "search.subscribe": {
+   "english": "cc0e38da9c41790b",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "search.subscribed": {
+   "english": "7ac7e5f6399a1083",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "settings.glass.classic": {
+   "english": "ae25d6481fc1741f",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "settings.glass.clear": {
+   "english": "71901687bc66bdfa",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "settings.glass.highContrast": {
+   "english": "402a04adacf62b3d",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "settings.glass.regular": {
+   "english": "82c268188cd66576",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "settings.skip.custom": {
+   "english": "494ca78f7374e46f",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "settings.skip.customWithValue": {
+   "english": "84fcc71668fd1469",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "settings.skip.set": {
+   "english": "b6f6f3ad07b3c05f",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "settings.toggle.off": {
+   "english": "ca7981b46ecf2c17",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "settings.toggle.on": {
+   "english": "130011756125313c",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.bookmark.created": {
+   "english": "bb68ee9c132594eb",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.chapters.alreadyLast": {
+   "english": "d4073522c17536d2",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.chapters.backToBeginning": {
+   "english": "a67f189522fc26e5",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.chapters.jumpingTo": {
+   "english": "8208341cd29d29ee",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.chapters.none": {
+   "english": "1077469cf12c17c4",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.download.allDownloaded": {
+   "english": "b880226f7733f344",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.download.alreadyDownloaded": {
+   "english": "5ef09a0247b64f36",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.download.noDownloadableEpisodes": {
+   "english": "00bc9de428dc7ad4",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.download.started": {
+   "english": "c18059b8819fad44",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.download.startedCount": {
+   "english": "3705a3751e5e3ee0",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.error.notReady": {
+   "english": "c78e1147fc0050d8",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.error.nothingPlaying": {
+   "english": "6f3b87f99a79bbaa",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.library.podcastCount": {
+   "english": "b4b60df982520365",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.library.podcastNotFound": {
+   "english": "b1007c4057f5115b",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.markPlayed.andPlayingNext": {
+   "english": "7b426807221d1b3a",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.markPlayed.done": {
+   "english": "fc3f543969280c95",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.navigation.openingPodcast": {
+   "english": "b2214252a609433e",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.navigation.openingQueue": {
+   "english": "bc9973597acefd88",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.playback.alreadyPlaying": {
+   "english": "5848fbee17b4a1eb",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.playback.noPlayableEpisodes": {
+   "english": "82335393dc397d3d",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.playback.nowPlayingFromPodcast": {
+   "english": "e94dce97c478d544",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.playback.paused": {
+   "english": "af0ecb7fcc51ed23",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.playback.playing": {
+   "english": "dc6e8dc5a452beea",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.playback.playingFromPodcast": {
+   "english": "51166d34ca211309",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.playback.playingNextEpisode": {
+   "english": "a64ba2204aa7e314",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.playback.restarting": {
+   "english": "082b442a5d5babce",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.playback.skippedBack": {
+   "english": "1511009d87105f8b",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.playback.skippedForward": {
+   "english": "a9d321d93c68e678",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.playback.speedSet": {
+   "english": "a0e0e01334fdc831",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.playback.stopped": {
+   "english": "f8ec77e7a3a08e74",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.queue.cleared": {
+   "english": "b5d8128b2b82f4be",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.queue.empty": {
+   "english": "d46774a99eb69a3a",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.queue.episodeCount": {
+   "english": "4c1f99564928f0ce",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.queue.nothingNext": {
+   "english": "9f0791490d25c646",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.queue.upNext": {
+   "english": "8f50171ce39d0cb0",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.refresh.newEpisodeCount": {
+   "english": "d7dc5696b779118c",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.refresh.noNewEpisodes": {
+   "english": "c38ea75a0e12c696",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.share.buildFailed": {
+   "english": "242745a5407688c4",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.share.link": {
+   "english": "78214a0bacf844c8",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.sleepTimer.cancelled": {
+   "english": "e0c22781b54d4792",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.sleepTimer.extended": {
+   "english": "6306dbe011c83a7b",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.sleepTimer.notRunning": {
+   "english": "50fbbaba557da6d6",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.sleepTimer.set": {
+   "english": "127bde2a434d3d22",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.stats.notReady": {
+   "english": "f2ff0c82699a66e7",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "siri.stats.summary": {
+   "english": "05f1f813a09f2212",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "sync.conflict.acceptRewrite.a11y": {
+   "english": "e988322ba9c0018c",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "sync.conflict.acceptRewrite.a11yHint": {
+   "english": "eedbb0bb89fc9074",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "sync.conflict.keepLocalRewrite.a11y": {
+   "english": "1cc02afddb8fd82c",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "sync.conflict.keepLocalRewrite.a11yHint": {
+   "english": "4eb942ba7e5fde82",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "sync.conflict.newUrl": {
+   "english": "46dafc1f7af93a93",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "sync.conflict.oldUrl": {
+   "english": "df6f468a735975e4",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "sync.conflict.positions.a11y": {
+   "english": "1d2771e4d9ec457c",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "sync.conflict.positions.a11y.serverPlayed": {
+   "english": "e577782f36578336",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "sync.conflict.rewriteHosts.a11y": {
+   "english": "d76de1fcf6be874c",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "sync.conflict.side.otherDevice.a11y": {
+   "english": "23f9d450c6d3cb99",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "sync.conflict.side.service.a11y": {
+   "english": "4079b331e0e57651",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "sync.conflict.side.thisDevice.a11y": {
+   "english": "d052579c6a317b1b",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "sync.conflict.useDevice.a11y": {
+   "english": "6ee00336546d3de2",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "sync.conflict.useDevice.a11yHint": {
+   "english": "8af1a6a38f5b0851",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "sync.conflict.useOtherDevice.a11y": {
+   "english": "ff484a4a0df9d04e",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "sync.conflict.useServer.a11y": {
+   "english": "d3abac317ec96c67",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "sync.conflict.useServer.a11y.played": {
+   "english": "ef217c9182b7bc18",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "sync.conflict.useServer.a11yHint": {
+   "english": "470be696afd8735c",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "sync.conflict.useServer.a11yHint.played": {
+   "english": "983263436161280a",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "sync.conflict.useService.a11y": {
+   "english": "9d225781924d35b0",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "sync.lastSynced %@": {
+   "english": "bc1ea4aeb6db0567",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  }
+ },
+ "YourPodsComplication/InfoPlist.xcstrings": {
+  "CFBundleDisplayName": {
+   "english": "00756e28a8cc5b03",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "CFBundleName": {
+   "english": "7c2730d0a184be23",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  }
+ },
+ "YourPodsWatch/InfoPlist.xcstrings": {
+  "CFBundleDisplayName": {
+   "english": "4079b331e0e57651",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "CFBundleName": {
+   "english": "f8c21bc77c35c6e2",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  }
+ },
+ "YourPodsWatch/Localizable.xcstrings": {
+  "Library, %lld podcasts": {
+   "english": "75cf5b5526e7ed64",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "Now Playing on Watch, %@, %@, %@": {
+   "english": "835f38ef771c61b8",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "Now Playing on iPhone, %@, %@, %@": {
+   "english": "81a466c6f781b87f",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "Recently Updated, %lld episodes": {
+   "english": "080ff86a3db5a763",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "Skip back %lld seconds": {
+   "english": "5202c27a0c16d1e3",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "Skip back %lld seconds on iPhone": {
+   "english": "dcbb89536c56357c",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "Skip forward %lld seconds": {
+   "english": "5ad3216c2324ad62",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "Skip forward %lld seconds on iPhone": {
+   "english": "d364d03f41a14f82",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.action.addToQueue": {
+   "english": "04173573e9346246",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.action.details": {
+   "english": "45989de49fb7f66d",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.action.download": {
+   "english": "d6eafe8235910042",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.action.hide": {
+   "english": "ac20a57bfde0bbc4",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.action.markPlayed": {
+   "english": "b90e70d98df07a52",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.action.markUnplayed": {
+   "english": "10001b87879191a8",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.action.play": {
+   "english": "436e61016e26fcb7",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.action.playNext": {
+   "english": "3391e4674320cad6",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.action.removeDownload": {
+   "english": "157a343430e8fe90",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.action.removeFromQueue": {
+   "english": "8bfa5cc5d2c75633",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.action.unhide": {
+   "english": "eb2780f761bfacd0",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.activity.fromPodcast": {
+   "english": "7dba61b7b6c65f69",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.duration.hours": {
+   "english": "530fb282c0fcade1",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.duration.hoursMinutes": {
+   "english": "0fd7ca00fd8247e3",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.duration.minutes": {
+   "english": "c7e7b0558722b234",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.duration.seconds": {
+   "english": "f76320d3a182a98b",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.episode.hint": {
+   "english": "c0ca882df2aa462e",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.episode.new": {
+   "english": "74e1ca7c09abccb5",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.episode.remaining": {
+   "english": "dcbf12cb2ebcb7f1",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.episode.state.downloaded": {
+   "english": "f0b0738f75b8bcd1",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.episode.state.hidden": {
+   "english": "7e6fefff0f0aeb6c",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.episode.state.inQueue": {
+   "english": "dc665ab162a779c8",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.episode.state.played": {
+   "english": "900b1e4c46b4edab",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.episode.state.playing": {
+   "english": "65732a96a452fba0",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.list.separator": {
+   "english": "0a07f659461970d8",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.nowPlaying.paused": {
+   "english": "c02aa5fb3bf15b7c",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.nowPlaying.playing": {
+   "english": "8ab2c4158851061e",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.playbackState.paused": {
+   "english": "a7a9dc5bcf71adb2",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.playbackState.playing": {
+   "english": "0db79e63c5179b12",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.progress.positionOfDuration": {
+   "english": "c7e34bbaca0c4962",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.speed.rate": {
+   "english": "49229d46d51fc24c",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.watch.queueRow": {
+   "english": "9776ef65762cb029",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "format.duration.hoursMinutes": {
+   "english": "401da2ebc8a4b16e",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "format.duration.minutes": {
+   "english": "75ee9b0aa5a1a68b",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "format.duration.remaining": {
+   "english": "6dbf5ec23b175c2a",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "format.duration.remainingTimestamp": {
+   "english": "bf032052edc623b9",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "format.duration.seconds": {
+   "english": "5d1544bd72730fbb",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "format.progress.left": {
+   "english": "a6a693282741cdd6",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "format.progress.listened": {
+   "english": "60022e7640edb0e2",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "format.speed.rate": {
+   "english": "ac525f5b3b728b71",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "player.source.downloaded": {
+   "english": "f0b0738f75b8bcd1",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "player.source.streaming": {
+   "english": "a951c5945635e2d3",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "player.source.willStream": {
+   "english": "60924d63d3196b8f",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "watch.sleepTimer.idle": {
+   "english": "b0924eb31382abfe",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "watch.sleepTimer.untilEpisodeEnds": {
+   "english": "237df8beb15d8e73",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  }
+ },
+ "YourPodsWidgets/InfoPlist.xcstrings": {
+  "CFBundleDisplayName": {
+   "english": "82d6b984ca170595",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "CFBundleName": {
+   "english": "04a12f36fe331015",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  }
+ },
+ "YourPodsWidgets/Localizable.xcstrings": {
+  "a11y.duration.hours": {
+   "english": "530fb282c0fcade1",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.duration.hoursMinutes": {
+   "english": "0fd7ca00fd8247e3",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.duration.minutes": {
+   "english": "c7e7b0558722b234",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.duration.seconds": {
+   "english": "f76320d3a182a98b",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "a11y.speed.rate": {
+   "english": "49229d46d51fc24c",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "format.duration.hoursMinutes": {
+   "english": "401da2ebc8a4b16e",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "format.duration.minutes": {
+   "english": "75ee9b0aa5a1a68b",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "format.duration.remaining": {
+   "english": "6dbf5ec23b175c2a",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "format.duration.remainingTimestamp": {
+   "english": "bf032052edc623b9",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "format.duration.seconds": {
+   "english": "5d1544bd72730fbb",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "format.progress.left": {
+   "english": "a6a693282741cdd6",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "format.progress.listened": {
+   "english": "60022e7640edb0e2",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  },
+  "format.speed.rate": {
+   "english": "ac525f5b3b728b71",
+   "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl"
+   ]
+  }
+ }
+}

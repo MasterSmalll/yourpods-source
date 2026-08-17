@@ -29,6 +29,9 @@ struct EpisodeActivityView: View {
 struct GpodderActivityView: View {
     @Environment(PodcastManager.self) private var podcastManager
     @Environment(SettingsManager.self) private var settings
+    // Needed to reach refreshAndSync — see refreshActions().
+    @Environment(PlayerManager.self) private var playerManager
+    @Environment(DownloadManager.self) private var downloadManager
 
     @State private var isRefreshing = false
     @State private var sortOrder: SortOrder = .recent
@@ -58,7 +61,7 @@ struct GpodderActivityView: View {
                             .font(.headline)
                         if let lastSync = UserDefaults.standard.object(forKey: "lastEpisodeActionSync") as? Int, lastSync > 0 {
                             let date = Date(timeIntervalSince1970: TimeInterval(lastSync))
-                            Text("Last synced: \(date, style: .relative) ago")
+                            Text("sync.lastSynced \(DurationFormatting.relative(date))")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -114,7 +117,16 @@ struct GpodderActivityView: View {
     private func refreshActions() {
         isRefreshing = true
         Task {
-            _ = try? await podcastManager.syncEpisodeActions()
+            // Through refreshAndSync rather than the episode-action step alone: pulling
+            // actions in isolation advances the delta cursor for a window whose playback
+            // and queue changes were never applied, so the rest of that window is not
+            // re-offered on the next sync.
+            _ = await podcastManager.refreshAndSync(
+                playerManager: playerManager,
+                downloadManager: downloadManager,
+                settingsManager: settings,
+                strategy: settings.syncConflictStrategy
+            )
             isRefreshing = false
         }
     }
@@ -183,12 +195,20 @@ struct EpisodeActionRow: View {
 
                     // Position / Progress
                     if let position = action.position, let total = action.total, total > 0 {
-                        let pct = min(100, Int(Double(position) / Double(total) * 100))
-                        Text("\(pct)% · \(formatTime(position)) / \(formatTime(total))")
+                        // `.percent` rather than a literal '%': French writes
+                        // "45 %" with a non-breaking space, and the separator
+                        // is not ours to hardcode.
+                        let share = min(1, Double(position) / Double(total))
+                        let percent = share.formatted(.percent.precision(.fractionLength(0)))
+                        Text(String(localized: "activity.positionOfTotal",
+                                    defaultValue: "\(percent) · \(formatTime(position)) / \(formatTime(total))",
+                                    comment: "How far into an episode a synced action happened. Argument 1 is the share already played, 2 the position, 3 the episode's length — e.g. '45% · 12:00 / 30:00'."))
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                     } else if let position = action.position {
-                        Text("at \(formatTime(position))")
+                        Text(String(localized: "activity.playedAt",
+                                    defaultValue: "at \(formatTime(position))",
+                                    comment: "Where in an episode an action happened, as in 'at 12:04'. Argument 1 is a timestamp already formatted as h:mm:ss."))
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                     }
@@ -202,7 +222,9 @@ struct EpisodeActionRow: View {
 
                 // Device
                 if let device = action.device {
-                    Text("Device: \(device)")
+                    Text(String(localized: "activity.onDevice",
+                                defaultValue: "Device: \(device)",
+                                comment: "Which device an action came from. Argument 1 is a user-chosen device name and is never translated."))
                         .font(.caption2)
                         .foregroundStyle(.quaternary)
                 }
@@ -218,48 +240,64 @@ struct EpisodeActionRow: View {
     private var rowAccessibilityLabel: String {
         var parts: [String] = []
 
-        // Action verb
+        // Action verb. The default arm capitalizes a raw server string — it is
+        // an unknown action type, not interface copy, so it stays unlocalized.
         let actionWord: String
         switch action.action {
-        case "play":     actionWord = "Played"
-        case "new":      actionWord = "New episode"
-        case "download": actionWord = "Downloaded"
-        case "delete":   actionWord = "Deleted"
-        default:         actionWord = action.action.capitalized
+        case "play":
+            actionWord = String(localized: "a11y.activity.action.played",
+                                defaultValue: "Played",
+                                comment: "VoiceOver: a sync record for playing an episode.")
+        case "new":
+            actionWord = String(localized: "a11y.activity.action.new",
+                                defaultValue: "New episode",
+                                comment: "VoiceOver: a sync record for an episode arriving in a feed.")
+        case "download":
+            actionWord = String(localized: "a11y.activity.action.downloaded",
+                                defaultValue: "Downloaded",
+                                comment: "VoiceOver: a sync record for downloading an episode.")
+        case "delete":
+            actionWord = String(localized: "a11y.activity.action.deleted",
+                                defaultValue: "Deleted",
+                                comment: "VoiceOver: a sync record for deleting an episode.")
+        default:
+            actionWord = action.action.capitalized
         }
         parts.append(actionWord)
 
         // Episode + podcast
         parts.append(episodeTitle ?? action.episode)
-        parts.append("from \(podcastTitle)")
+        parts.append(String(localized: "a11y.activity.fromPodcast",
+                            defaultValue: "from \(podcastTitle)",
+                            comment: "VoiceOver: names the show an episode belongs to. The argument is the podcast title."))
 
         // Progress
         if let position = action.position, let total = action.total, total > 0 {
             let pct = min(100, Int(Double(position) / Double(total) * 100))
-            parts.append("\(pct) percent")
+            parts.append(String(localized: "a11y.activity.percent",
+                                defaultValue: "\(pct) percent",
+                                comment: "VoiceOver: how far through an episode a sync record was made."))
         } else if let position = action.position {
-            parts.append("at \(formatTime(position))")
+            parts.append(String(localized: "a11y.activity.atPosition",
+                                defaultValue: "at \(formatTime(position))",
+                                comment: "VoiceOver: the playback position of a sync record. The argument is a clock timestamp such as '23:14'."))
         }
 
         // Relative time
         let date = Date(timeIntervalSince1970: TimeInterval(action.timestamp))
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .full
-        parts.append(formatter.localizedString(for: date, relativeTo: .now))
+        parts.append(DurationFormatting.relative(date))
 
         // Device (optional)
         if let device = action.device {
-            parts.append("on \(device)")
+            parts.append(String(localized: "a11y.activity.onDevice",
+                                defaultValue: "on \(device)",
+                                comment: "VoiceOver: which device produced a sync record. The argument is a user-chosen device name."))
         }
 
-        return parts.joined(separator: ", ")
+        return parts.joined(separator: EpisodeAccessibility.listSeparator)
     }
 
     private func formatTime(_ seconds: Int) -> String {
-        let h = seconds / 3600
-        let m = (seconds % 3600) / 60
-        let s = seconds % 60
-        if h > 0 { return String(format: "%d:%02d:%02d", h, m, s) }
-        return String(format: "%d:%02d", m, s)
+        DurationFormatting.timestamp(TimeInterval(seconds))
     }
 }

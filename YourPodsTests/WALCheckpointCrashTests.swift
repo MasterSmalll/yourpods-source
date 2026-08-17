@@ -101,19 +101,18 @@ final class WALCheckpointCrashTests: XCTestCase {
         let schema = Schema([Podcast.self, Episode.self])
         let config = ModelConfiguration(schema: schema, url: storeURL)
         
-        // Step 1: Create a store with SwiftData and leave data (generates WAL)
-        let container1 = try ModelContainer(for: schema, configurations: [config])
-        let ctx = container1.mainContext
-        let podcast = Podcast(url: "__wal_truncate_model_test__", title: "WAL Truncate Test")
-        ctx.insert(podcast)
-        try ctx.save()
+        // Step 1: Create a store with SwiftData, write data, then release.
+        // Must release before preflight — preflightCheck deletes the SHM,
+        // which would break an active ModelContainer connection.
+        try autoreleasepool {
+            let container = try ModelContainer(for: schema, configurations: [config])
+            let ctx = container.mainContext
+            let podcast = Podcast(url: "__wal_truncate_model_test__", title: "WAL Truncate Test")
+            ctx.insert(podcast)
+            try ctx.save()
+        }
         
-        // Verify WAL exists
-        let walPath = storeURL.path + "-wal"
-        // Note: SwiftData may or may not leave a WAL file. If it doesn't, the test
-        // is trivially satisfied (no WAL = no checkpoint = no crash).
-        
-        // Step 2: Run preflight (should truncate WAL)
+        // Step 2: Run preflight (should truncate WAL, delete+recreate SHM)
         let isHealthy = StoreHealthProbe.preflightCheck(storeURL: storeURL)
         XCTAssertTrue(isHealthy, "Healthy store must pass preflight")
         

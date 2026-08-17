@@ -54,7 +54,7 @@ struct PodcastSearchView: View {
                                     .padding(.leading, 76)
                             }
                         }
-                        .background(.ultraThinMaterial)
+                        .yourPodsGlass(role: .card, cornerRadius: 12)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                         .padding(.horizontal)
                     } else if searchText.count >= 2 {
@@ -150,7 +150,7 @@ private struct SearchBar: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
-        .background(.ultraThinMaterial)
+        .yourPodsGlass(role: .card, cornerRadius: 14)
         .clipShape(RoundedRectangle(cornerRadius: 14))
         .overlay(
             RoundedRectangle(cornerRadius: 14)
@@ -262,7 +262,7 @@ private struct AddByLinkCard: View {
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
-            .background(.ultraThinMaterial)
+            .yourPodsGlass(role: .card, cornerRadius: 10)
             .clipShape(RoundedRectangle(cornerRadius: 10))
             
             if isInsecure {
@@ -336,7 +336,7 @@ private struct ProtectedFeedCard: View {
                 .autocorrectionDisabled()
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
-                .background(.ultraThinMaterial)
+                .yourPodsGlass(role: .card, cornerRadius: 10)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
             
             if isInsecure {
@@ -360,14 +360,14 @@ private struct ProtectedFeedCard: View {
                     #endif
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
-                    .background(.ultraThinMaterial)
+                    .yourPodsGlass(role: .card, cornerRadius: 10)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
                 
                 RevealableSecureField(label: "Password", text: $password)
                     .textContentType(.password)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
-                    .background(.ultraThinMaterial)
+                    .yourPodsGlass(role: .card, cornerRadius: 10)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
             }
             
@@ -498,7 +498,13 @@ private struct PodcastPreviewSheet: View {
                                         .controlSize(.small)
                                         .tint(.white)
                                 }
-                                Text(subscribed ? "Subscribed ✓" : "Subscribe")
+                                Text(subscribed
+                                     ? String(localized: "search.subscribed",
+                                              defaultValue: "Subscribed ✓",
+                                              comment: "Button state after the user follows a podcast. Keep the ✓ glyph. This is FOLLOWING A SHOW, not a paid subscription.")
+                                     : String(localized: "search.subscribe",
+                                              defaultValue: "Subscribe",
+                                              comment: "Button that adds this podcast to the user's library. This is FOLLOWING A SHOW — no money is involved. The paid-plan button is a separate string."))
                                     .fontWeight(.semibold)
                             }
                             .frame(maxWidth: .infinity)
@@ -608,7 +614,9 @@ private struct PodcastPreviewSheet: View {
                 
                 if let audioUrl = episode.audioUrl {
                     HStack(spacing: 8) {
-                        // Add to Up Next button (with visual feedback)
+                        // Add-to-queue button (with visual feedback). Same
+                        // addToQueue(playNext: false) call as the context menu
+                        // below, so it says the same thing the menu says.
                         if queuedEpisodeIds.contains(episode.id) {
                             // Just added — show confirmation
                             Label("Added", systemImage: "checkmark.circle.fill")
@@ -629,7 +637,7 @@ private struct PodcastPreviewSheet: View {
                                     .font(.title3)
                                     .foregroundColor(.orange)
                             }
-                            .accessibilityLabel("Add to Up Next")
+                            .accessibilityLabel("Add to Queue")
                         }
                         
                         // Stream button (play without subscribing)
@@ -675,6 +683,21 @@ private struct PodcastPreviewSheet: View {
                 } label: {
                     Label("Stream Now", systemImage: "play.fill")
                 }
+                
+                Button {
+                    podcastManager.toggleHidden(guid: episode.guid, podcastUrl: result.feedUrl, audioUrl: audioUrl)
+                } label: {
+                    let isHidden = podcastManager.episodeActionSync.isHidden(guid: episode.guid)
+                    Label(isHidden ? "Unhide" : "Hide", systemImage: isHidden ? "eye" : "eye.slash")
+                }
+            }
+        }
+        // An all-literal ternary binds LocalizedStringKey and extracts both
+        // words. The `{ … }()` closure this replaces returned String, so
+        // neither "Unhide" nor "Hide" ever reached the catalog.
+        .accessibilityAction(named: podcastManager.episodeActionSync.isHidden(guid: episode.guid) ? "Unhide" : "Hide") {
+            if let audioUrl = episode.audioUrl {
+                podcastManager.toggleHidden(guid: episode.guid, podcastUrl: result.feedUrl, audioUrl: audioUrl)
             }
         }
     }
@@ -749,12 +772,13 @@ private struct PodcastPreviewSheet: View {
         isLoadingEpisodes = true
         do {
             let rssService = RSSService()
-            let (podcast, episodes) = try await rssService.fetchFeed(url: result.feedUrl)
+            guard let (podcast, episodes) = try await rssService.fetchFeed(url: result.feedUrl) else { return }
             feedDescription = podcast.description
             feedWebsite = podcast.website
             let sorted = episodes.sorted { ($0.pubDate ?? .distantPast) > ($1.pubDate ?? .distantPast) }
             previewEpisodes = sorted.prefix(20).map { ep in
                 PreviewEpisode(
+                    guid: ep.guid,
                     title: ep.title,
                     pubDate: ep.pubDate,
                     description: ep.description,
@@ -775,6 +799,7 @@ private struct PodcastPreviewSheet: View {
 /// Lightweight model for preview episodes (not persisted).
 private struct PreviewEpisode: Identifiable {
     let id = UUID()
+    let guid: String
     let title: String
     let pubDate: Date?
     let description: String?

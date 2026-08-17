@@ -253,11 +253,15 @@ final class SyncOrchestratorParityTests: XCTestCase {
             strategy: .serverWins
         )
 
-        // THEN: Server queue item becomes currentItem on fresh device (Bug 3 fix)
-        // sortOrder 0 = now playing
-        XCTAssertEqual(audioManager.currentItem?.id, "parity-ep-1",
-                       "Pro parity: server queue items must be pulled into local queue")
-        XCTAssertEqual(audioManager.currentItem?.positionSeconds, 120)
+        // THEN: server queue item is pulled into the local Up Next queue.
+        // Per the sync contract: a sortOrder-0 item is a normal Up Next position
+        // (web "add to top of queue"), NOT the now-playing episode. Now-playing is
+        // restored from the playback channel, which has none here.
+        XCTAssertEqual(audioManager.queue.map(\.id), ["parity-ep-1"],
+                       "Pro parity: server queue items must be pulled into the local Up Next queue")
+        XCTAssertEqual(audioManager.queue.first?.positionSeconds, 120)
+        XCTAssertNil(audioManager.currentItem,
+                     "No now-playing on the playback channel → a sortOrder-0 item is Up Next, not current")
     }
 
     // MARK: - Cross-Profile Isolation

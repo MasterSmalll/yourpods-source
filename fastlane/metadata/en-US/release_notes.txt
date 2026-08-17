@@ -1,0 +1,41 @@
+YourPods now speaks your language.
+
+German, Spanish, French, Italian and Dutch. The app follows whatever language your device is set to, and you can change it any time in Settings. Every screen is translated — including everything VoiceOver reads aloud and everything Siri says back to you. Dates, durations, speeds and percentages follow your own locale's formatting.
+
+The translations are AI-made, and the app says so. The first time YourPods appears in a language new to you, a sheet explains that we use AI to translate from English, that some wording might be a bit off, and how to report anything that reads wrong. The same explanation lives permanently in Settings.
+
+NEW
+- Chapter artwork, and chapters read straight out of the audio file — including files other players show no chapters for
+- Notes: annotate episodes while you listen, and export to Markdown, Obsidian or Nextcloud
+- A full Shortcuts catalogue for automations and Siri
+- Apple Watch: a real player, with the system Now Playing page, speed control, sleep timer and custom skip intervals
+- Library episode lens: browse every subscription as one flat, filterable episode list
+- Home Screen playback widget, and AirPlay and Bluetooth output picking from the mini player
+- When two devices disagree about where you are in an episode, YourPods asks — and you can make your answer the default from the sheet itself
+- Hide and unhide episodes from anywhere, hide by duration, and hide old episodes when you subscribe
+- Group your podcasts, and give a group priority in Up Next
+- Export My Data
+- Liquid Glass design on iOS 26, with four styles to choose from
+- Transcript search, episode search, and Nextcloud Login Flow v2 sign-in with 2FA and SSO
+- YourPods Pro is now available as an in-app subscription. It stays optional — every player feature is included in the app you already bought
+
+FIXED
+- Played state, position and Up Next now agree across your devices: an episode you started on the web picks up on your phone, un-marking one as played sticks, and one you finished on the web stops lingering in the mini player
+- An episode you paused part-way through is no longer marked played by a background sync, and skipping no longer marks the episode you skipped
+- Tapping a different episode no longer deletes the one you were listening to from Up Next
+- "Sync Now" now syncs everything — it was only ever syncing two of the seven things
+- Feeds update reliably on sync, pull-to-refresh and background refresh
+- The Apple Watch app's core loops work: library browsing, background refresh, mark as played, and the complication
+- Home Screen widget buttons control playback instead of opening the app, and the widget shows artwork again
+- Playback no longer stops silently on auto-advance, and the lock screen, Dynamic Island and CarPlay artwork change with it
+- Notes reach the web, and deleting one propagates
+- Fixed the crashes and background kills behind lost sync — corrupt database recovery, suspension kills and watchdog timeouts
+- Fixed the app quitting when you tapped Restore Purchases or Subscribe
+
+FASTER
+- Much less radio and battery use on Apple Watch during playback
+- RSS refresh skips unchanged feeds, and independent sync steps run in parallel
+
+YourPods now requires iOS 18.
+
+Thank you to everyone who wrote in. Get help or request features: https://asc.is/support/

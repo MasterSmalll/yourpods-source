@@ -34,7 +34,11 @@ struct AboutSyncView: View {
             // MARK: - Vault Mode
             Section {
                 VStack(alignment: .leading, spacing: 8) {
-                    Label(AccountTypeDescriptions.vault.title, systemImage: AccountTypeDescriptions.vault.icon)
+                    Label {
+                        Text(AccountTypeDescriptions.vault.title)
+                    } icon: {
+                        Image(systemName: AccountTypeDescriptions.vault.icon)
+                    }
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.blue)
                     
@@ -51,7 +55,11 @@ struct AboutSyncView: View {
             // MARK: - Nextcloud / Self-Hosted
             Section {
                 VStack(alignment: .leading, spacing: 8) {
-                    Label(AccountTypeDescriptions.selfHosted.title, systemImage: AccountTypeDescriptions.selfHosted.icon)
+                    Label {
+                        Text(AccountTypeDescriptions.selfHosted.title)
+                    } icon: {
+                        Image(systemName: AccountTypeDescriptions.selfHosted.icon)
+                    }
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.green)
                     
@@ -82,18 +90,43 @@ struct AboutSyncView: View {
                 }
             }
             
-            // MARK: - YourPods Sync
+            // MARK: - YourPods Free
             Section {
                 VStack(alignment: .leading, spacing: 8) {
-                    Label(AccountTypeDescriptions.yourPodsSync.title, systemImage: AccountTypeDescriptions.yourPodsSync.icon)
+                    Label {
+                        Text(AccountTypeDescriptions.yourPodsFree.title)
+                    } icon: {
+                        Image(systemName: AccountTypeDescriptions.yourPodsFree.icon)
+                    }
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.purple)
                     
-                    Text("Seamlessly sync subscriptions and listen positions across all your Apple devices. Sign up directly in the app — just an email and password.")
+                    Text("Create a free account to sync subscriptions and listen positions across all your Apple devices. Just an email and password — no payment required.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                     
-                    Text("We collect the bare minimum: authentication credentials and sync data. No analytics, no tracking, no ad identifiers. Ever.")
+                    Text("No analytics, no tracking, no ad identifiers. Upgrade to Pro anytime for extra features.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            
+            // MARK: - YourPods Pro
+            Section {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label {
+                        Text(AccountTypeDescriptions.yourPodsPro.title)
+                    } icon: {
+                        Image(systemName: AccountTypeDescriptions.yourPodsPro.icon)
+                    }
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.purple)
+                    
+                    Text("The full cloud experience. Web player, cross-device queue sync, listening stats, annotations, gPodder bridge, and media proxy.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    
+                    Text("Your subscription directly funds development, keeps the servers running, and ensures YourPods stays independent and open source.")
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                 }

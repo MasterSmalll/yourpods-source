@@ -9,18 +9,18 @@ final class TranscriptServiceTests: XCTestCase {
     
     func test_parsePlainText_withTimestampedSpeakerFormat() {
         let content = """
-        [00:00:00] Nathan: we're live. We think we're live.
+        [00:00:00] Host: Welcome to the show.
 
-        [00:00:01] Andrew: we're, we're alive and we're not laid off yet.
+        [00:00:01] Guest: Thanks for having me.
 
-        [00:01:05] Nathan: Good point about that.
+        [00:01:05] Host: Good point about that.
         """
         let transcript = TranscriptService.parseContentSync(content, url: "test.txt", type: "text/plain")
         
         XCTAssertEqual(transcript.items.count, 3, "Should parse 3 segments separated by blank lines")
         XCTAssertEqual(transcript.items[0].start, 0, "First item starts at 0:00:00")
-        XCTAssertTrue(transcript.items[0].text.contains("Nathan:"), "Should preserve speaker label")
-        XCTAssertTrue(transcript.items[0].text.contains("we're live"), "Should preserve text content")
+        XCTAssertTrue(transcript.items[0].text.contains("Host:"), "Should preserve speaker label")
+        XCTAssertTrue(transcript.items[0].text.contains("Welcome to the show"), "Should preserve text content")
         XCTAssertEqual(transcript.items[1].start, 1, "Second item starts at 0:00:01")
         XCTAssertEqual(transcript.items[2].start, 65, "Third item starts at 1:05")
         XCTAssertEqual(transcript.type, "text/plain")
@@ -45,15 +45,15 @@ final class TranscriptServiceTests: XCTestCase {
     
     func test_parseHTML_stripsTagsAndParsesTimestamps() {
         let content = """
-        <p>[00:00:00] <b>Nathan:</b> we're live.</p>
+        <p>[00:00:00] <b>Host:</b> Welcome to the show.</p>
         <p></p>
-        <p>[00:01:30] <b>Andrew:</b> let's talk about AI.</p>
+        <p>[00:01:30] <b>Guest:</b> Thanks for having me.</p>
         """
         let transcript = TranscriptService.parseContentSync(content, url: "test.html", type: "text/html")
         
         XCTAssertEqual(transcript.items.count, 2, "Should parse 2 segments from HTML")
         XCTAssertEqual(transcript.items[0].start, 0, "First segment at 0:00")
-        XCTAssertTrue(transcript.items[0].text.contains("Nathan:"), "Should preserve speaker after stripping HTML")
+        XCTAssertTrue(transcript.items[0].text.contains("Host:"), "Should preserve speaker after stripping HTML")
         XCTAssertEqual(transcript.items[1].start, 90, "Second segment at 1:30")
         XCTAssertEqual(transcript.type, "text/html")
     }
@@ -119,10 +119,10 @@ final class TranscriptServiceTests: XCTestCase {
     
     func test_parsePlainText_multiLineSegments() {
         let content = """
-        [00:00:00] Andrew: First line of speech.
+        [00:00:00] Host: First line of speech.
         And it continues on the next line.
 
-        [00:00:30] Nathan: Another segment.
+        [00:00:30] Guest: Another segment.
         """
         let transcript = TranscriptService.parseContentSync(content, url: "test.txt", type: "text/plain")
         
@@ -136,11 +136,11 @@ final class TranscriptServiceTests: XCTestCase {
     func test_parsePlainText_inlineTimestamps() {
         // The 3reate format sometimes has inline timestamps mid-sentence
         let content = """
-        [00:00:00] Nathan: we're live. We think we're live.
+        [00:00:00] Host: Welcome to the show.
 
-        [00:00:01] Andrew: we're, we're alive and we're not laid off yet.
+        [00:00:01] Guest: Thanks for having me.
 
-        [00:00:04] Nathan: [00:00:05] Well, I mean, it's kind of hard to lay yourself off.
+        [00:00:04] Host: [00:00:05] And here is a second sentence with an inline marker.
         """
         let transcript = TranscriptService.parseContentSync(content, url: "test.txt", type: "text/plain")
         

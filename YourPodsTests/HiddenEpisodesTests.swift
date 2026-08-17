@@ -2,16 +2,13 @@ import XCTest
 import SwiftData
 @testable import YourPods
 
-// MARK: - Hidden Episodes Tests (TDD Phase 1: Red)
+// MARK: - Hidden Episodes Tests
 
-/// Tests for the Hidden Episodes feature (Build 198).
+/// Tests for the Hidden Episodes feature.
 ///
 /// Hidden episodes are treated as played (`isPlayed = true`) for filtering
 /// and badge counts. A separate `hiddenEpisodeGuids` set tracks which episodes
 /// were hidden (vs genuinely played) for the "Show Hidden" toggle and unhide.
-///
-/// Phase 1 (Red): All tests must FAIL with assertion errors until the
-/// implementation is written in Phase 2 (Green).
 final class HiddenEpisodesModelTests: XCTestCase {
     
     private let decoder = JSONDecoder()

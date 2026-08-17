@@ -14,6 +14,11 @@ final class Episode {
     var link: String?
     var chaptersUrl: String?
     var transcriptUrl: String?
+    /// MIME type declared by `<podcast:transcript type="...">`.
+    ///
+    /// Persisted so the parser never has to re-guess the format from the URL —
+    /// presigned CDN URLs carry query strings and often no extension at all.
+    var transcriptType: String?
     /// Inline Podlove Simple Chapters, serialized as JSON for persistence
     var chaptersJSON: String?
     
@@ -29,6 +34,9 @@ final class Episode {
     var episodeDisplay: String?
     /// Episode type: "full", "trailer", or "bonus" (itunes:episodeType)
     var episodeType: String?
+    /// Position of this episode in the RSS feed's document order (0-based).
+    /// Used as a tie-breaker when pubDates are nil or equal.
+    var feedItemIndex: Int?
     /// Whether the episode contains explicit content (itunes:explicit)
     var explicit: Bool?
     
@@ -76,6 +84,7 @@ final class Episode {
         link: String? = nil,
         chaptersUrl: String? = nil,
         transcriptUrl: String? = nil,
+        transcriptType: String? = nil,
         podcast: Podcast? = nil
     ) {
         self.guid = guid
@@ -88,6 +97,34 @@ final class Episode {
         self.link = link
         self.chaptersUrl = chaptersUrl
         self.transcriptUrl = transcriptUrl
+        self.transcriptType = transcriptType
         self.podcast = podcast
+    }
+}
+
+extension Episode {
+    /// Assign `listenedSeconds` only when the value differs.
+    ///
+    /// Core Data marks a row dirty on ANY setter call — even an
+    /// identical-value assignment whose `changedValues()` is empty — and
+    /// re-writes it (Z_OPT version bump ≈ 2 WAL pages). The
+    /// episode-actions apply re-assigns the server position for every episode
+    /// that has an action; under a `since=0` full re-pull that is the whole
+    /// library, so without this guard a no-change sync re-writes ~1488 rows.
+    func setListenedSecondsIfChanged(_ value: Int) {
+        if listenedSeconds != value { listenedSeconds = value }
+    }
+
+    /// Mark played only when not already played — same no-churn guard.
+    func markPlayedIfNeeded() {
+        if !isPlayed { isPlayed = true }
+    }
+
+    /// Mark unplayed only when currently played — churn guard mirror of markPlayedIfNeeded.
+    /// Resets the listen position so a re-add/relisten starts clean.
+    /// Safe to call unconditionally: no-ops when already unplayed.
+    func markUnplayedIfNeeded() {
+        if isPlayed { isPlayed = false }
+        if listenedSeconds != 0 { listenedSeconds = 0 }
     }
 }

@@ -139,7 +139,7 @@ final class FirebaseAuthProvider: AuthProvider, @unchecked Sendable {
             try Auth.auth().signOut()
             logger.info("Firebase sign-out successful")
         } catch {
-            // Log and continue — never crash the player (per GEMINI.md)
+            // Log and continue — never crash the player
             logger.error("Firebase sign-out failed: \(error.localizedDescription)")
         }
     }

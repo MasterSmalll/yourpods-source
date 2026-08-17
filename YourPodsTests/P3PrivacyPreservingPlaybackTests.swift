@@ -102,7 +102,7 @@ final class P3PrivacyPreservingPlaybackTests: XCTestCase {
         XCTAssertTrue(result.trackersRemoved.contains("vPixl"))
     }
 
-    // MARK: - TrackingURLStripper: Phase 1 — New prefix patterns
+    // MARK: - TrackingURLStripper: New prefix patterns
 
     /// Podsights / Spotify alternate domain (prfx.byspotify.com) should be stripped.
     func test_strip_podsights_spotify_alt() {
@@ -289,7 +289,7 @@ final class P3PrivacyPreservingPlaybackTests: XCTestCase {
                       "Should report Podscribe as removed, got: \(result.trackersRemoved)")
     }
 
-    // MARK: - TrackingURLStripper: Phase 2 — Query parameter stripping
+    // MARK: - TrackingURLStripper: Query parameter stripping
 
     /// UTM tracking parameters should be stripped from CDN URLs.
     func test_strip_utm_queryParams() {
@@ -329,36 +329,36 @@ final class P3PrivacyPreservingPlaybackTests: XCTestCase {
         XCTAssertFalse(result.url.contains("utm_source"), "Should strip utm_source param")
     }
 
-    // MARK: - TrackingURLStripper: DAI prefix stripping
+    // MARK: - TrackingURLStripper: DAI hosts pass through (not stripped)
 
-    /// Megaphone DAI URLs should be stripped to bypass ad insertion.
+    /// Megaphone is DAI — ads are stitched into the audio at the same host, so there is no
+    /// inner URL to reveal. P3 no longer strips it; the URL must pass through unchanged.
     func test_strip_megaphone_dai() {
         let input = "https://traffic.megaphone.fm/ADL1234567890/cdn.megaphone.fm/episodes/ep1.mp3"
         let result = TrackingURLStripper.strip(input)
 
-        XCTAssertEqual(result.url, "https://cdn.megaphone.fm/episodes/ep1.mp3")
-        XCTAssertTrue(result.wasModified, "Should strip Megaphone DAI prefix")
-        XCTAssertTrue(result.trackersRemoved.contains("Megaphone"),
-                      "Should report Megaphone as removed, got: \(result.trackersRemoved)")
+        XCTAssertEqual(result.url, input, "Megaphone (DAI) must not be stripped")
+        XCTAssertFalse(result.wasModified)
+        XCTAssertTrue(result.trackersRemoved.isEmpty)
     }
 
-    /// AdsWizz (adswizz.com) DAI URLs should be stripped.
+    /// AdsWizz-served audio is DAI — the host is no longer stripped (attribution params are
+    /// handled separately via query-param stripping).
     func test_strip_adswizz() {
         let input = "https://adswizz.com/e/cdn.example.com/episodes/ep1.mp3"
         let result = TrackingURLStripper.strip(input)
 
-        XCTAssertEqual(result.url, "https://cdn.example.com/episodes/ep1.mp3")
-        XCTAssertTrue(result.trackersRemoved.contains("AdsWizz"),
-                      "Should report AdsWizz as removed, got: \(result.trackersRemoved)")
+        XCTAssertEqual(result.url, input, "AdsWizz host must not be stripped")
+        XCTAssertFalse(result.wasModified)
     }
 
-    /// AdsWizz PCM domain (pcm.adswizz.com) should be stripped.
+    /// AdsWizz PCM host is no longer stripped.
     func test_strip_adswizz_pcm() {
         let input = "https://pcm.adswizz.com/e/cdn.example.com/episodes/ep1.mp3"
         let result = TrackingURLStripper.strip(input)
 
-        XCTAssertEqual(result.url, "https://cdn.example.com/episodes/ep1.mp3")
-        XCTAssertTrue(result.trackersRemoved.contains("AdsWizz"))
+        XCTAssertEqual(result.url, input, "AdsWizz PCM host must not be stripped")
+        XCTAssertFalse(result.wasModified)
     }
 
     // MARK: - TrackingURLStripper: Multi-layer stripping
@@ -373,14 +373,16 @@ final class P3PrivacyPreservingPlaybackTests: XCTestCase {
                       "Should strip at least 3 layers, got: \(result.trackersRemoved)")
     }
 
-    /// Nested: analytics + DAI — OP3 → Megaphone DAI → CDN
+    /// Nested analytics + DAI: the OP3 analytics prefix is stripped, but stripping STOPS at
+    /// the Megaphone DAI host (ads are stitched there — there is no inner URL to reveal),
+    /// leaving that URL intact.
     func test_strip_multiLayer_analyticsAndDAI() {
         let input = "https://op3.dev/e/traffic.megaphone.fm/ADL1234/cdn.megaphone.fm/episodes/ep1.mp3"
         let result = TrackingURLStripper.strip(input)
 
-        XCTAssertEqual(result.url, "https://cdn.megaphone.fm/episodes/ep1.mp3")
-        XCTAssertTrue(result.trackersRemoved.count >= 2,
-                      "Should strip at least 2 layers, got: \(result.trackersRemoved)")
+        XCTAssertEqual(result.url, "https://traffic.megaphone.fm/ADL1234/cdn.megaphone.fm/episodes/ep1.mp3",
+                       "OP3 stripped; Megaphone DAI host left intact")
+        XCTAssertEqual(result.trackersRemoved, ["OP3"])
     }
 
     // MARK: - TrackingURLStripper: Passthrough (no trackers)
@@ -828,5 +830,74 @@ final class P3PrivacyPreservingPlaybackTests: XCTestCase {
                       "Auto-download should strip when per-podcast=on overrides global=off")
 
         defaults.removePersistentDomain(forName: "P3AutoDL")
+    }
+
+    // MARK: - Data-driven source
+
+    /// The stripper must load its patterns from the bundled JSON (snapshot + supplemental).
+    func test_patterns_loadedFromBundle() {
+        XCTAssertGreaterThanOrEqual(TrackingURLStripper.patterns.count, 30,
+            "Expected ≥30 merged patterns from OPAWG snapshot + supplemental, got \(TrackingURLStripper.patterns.count)")
+    }
+
+    /// A malformed snapshot must degrade to no patterns (safe pass-through), never crash.
+    func test_decodeEntries_malformed_returnsEmpty() {
+        let garbage = Data("{ not an array }".utf8)
+        XCTAssertTrue(TrackingURLStripper.decodeEntries(garbage).isEmpty)
+    }
+
+    /// Supplemental wins on host collision (preserves our display name).
+    func test_makePatterns_supplementalOverridesName() {
+        let snap = [TrackingURLStripper.OPAWGEntry(prefixpattern: "prfx.byspotify.com", prefixname: "Spotify")]
+        let supp = [TrackingURLStripper.OPAWGEntry(prefixpattern: "prfx.byspotify.com", prefixname: "Podsights")]
+        let merged = TrackingURLStripper.makePatterns(snapshot: snap, supplemental: supp)
+        XCTAssertEqual(merged.count, 1)
+        XCTAssertEqual(merged.first?.name, "Podsights")
+    }
+
+    // MARK: - TrackingURLStripper: Expanded OPAWG coverage
+
+    /// New OPAWG hosts (not previously covered) strip to the embedded CDN URL.
+    func test_strip_newOPAWGHosts() {
+        let cdn = "https://cdn.example.com/ep.mp3"
+        let cases: [(url: String, expectedName: String)] = [
+            ("https://arttrk.com/p/ABC/cdn.example.com/ep.mp3",                  "ArtsAI"),
+            ("https://media.blubrry.com/show/cdn.example.com/ep.mp3",           "Blubrry"),
+            ("https://clrtpod.com/m/cdn.example.com/ep.mp3",                     "Claritas"),
+            ("https://t.glystn.com/cdn.example.com/ep.mp3",                      "Glystn"),
+            ("https://news.proxycast.org/cdn.example.com/ep.mp3",               "Médiamétrie"),  // suffix match
+            ("https://pdcds.co/e/cdn.example.com/ep.mp3",                        "Podcards"),
+            ("https://p.podderapp.com/x/cdn.example.com/ep.mp3",                "Podder"),
+            ("https://growx.podkite.com/x/cdn.example.com/ep.mp3",             "Podkite"),
+            ("https://suprefix.fm/e/cdn.example.com/ep.mp3",                     "Podscribe"),
+            ("https://www.podtrac.com/pts/redirect.mp3/cdn.example.com/ep.mp3", "Podtrac"),
+            ("https://a.pdcst.to/e/cdn.example.com/ep.mp3",                      "Voxalyze"),
+        ]
+        for c in cases {
+            let result = TrackingURLStripper.strip(c.url)
+            XCTAssertEqual(result.url, cdn, "Failed to strip to CDN for \(c.url): got \(result.url)")
+            XCTAssertTrue(result.trackersRemoved.contains(c.expectedName),
+                "Expected \(c.expectedName) for \(c.url), got \(result.trackersRemoved)")
+        }
+    }
+
+    /// gum.fm generalization: ANY *.gum.fm subdomain is now stripped (was only 2.gum.fm).
+    func test_strip_gumfm_anySubdomain() {
+        let result = TrackingURLStripper.strip("https://7.gum.fm/XYZ/cdn.example.com/ep.mp3")
+        XCTAssertEqual(result.url, "https://cdn.example.com/ep.mp3")
+        XCTAssertTrue(result.trackersRemoved.contains("Gumshoe"))
+    }
+
+    // MARK: - TrackingURLStripper: AdsWizz query params
+
+    /// AdsWizz attribution params (awCollectionId/awEpisodeId) are stripped; signed params kept.
+    func test_strip_adswizz_queryParams() {
+        let input = "https://cdn.example.com/ep.mp3?awCollectionId=123&awEpisodeId=456&token=keepme"
+        let result = TrackingURLStripper.strip(input)
+
+        XCTAssertTrue(result.url.contains("token=keepme"), "Must keep signed param")
+        XCTAssertFalse(result.url.contains("awCollectionId"), "Must strip awCollectionId")
+        XCTAssertFalse(result.url.contains("awEpisodeId"), "Must strip awEpisodeId")
+        XCTAssertTrue(result.queryParamsStripped)
     }
 }

@@ -1,0 +1,26 @@
+{
+  "configurations" : [
+    {
+      "id" : "F0000000-0000-4000-A000-000000000001",
+      "name" : "Full",
+      "options" : {
+
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "codeCoverage" : false,
+    "testTimeoutsEnabled" : true
+  },
+  "testTargets" : [
+    {
+      "parallelizable" : true,
+      "target" : {
+        "containerPath" : "container:YourPods.xcodeproj",
+        "identifier" : "YourPodsTests",
+        "name" : "YourPodsTests"
+      }
+    }
+  ],
+  "version" : 1
+}

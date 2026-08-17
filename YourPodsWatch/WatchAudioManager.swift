@@ -24,7 +24,14 @@ class WatchAudioManager: NSObject, ObservableObject {
     @Published private(set) var playbackSource: PlaybackSource = .none
     @Published private(set) var statusText: String = "No episode"
     @Published private(set) var hasSetupAudio = false
-    
+
+    /// Watch-local speed override. nil = follow the phone's synced speed.
+    @Published private(set) var speedOverride: Double? =
+        UserDefaults.standard.object(forKey: "watchSpeedOverride") as? Double
+
+    /// Active sleep timer, if any. nil = no timer running.
+    @Published private(set) var sleepTimer: WatchSleepTimerModel? = nil
+
     // MARK: - Dependencies
     
     /// Set by YourPodsWatchApp after both managers are initialized.
@@ -43,35 +50,36 @@ class WatchAudioManager: NSObject, ObservableObject {
     private var cachedArtworkUrl: String?
     private var artworkFetchTask: Task<Void, Never>?
     private var endOfTrackObserver: Any?
-    
-    /// CAROUSEL FIX: Extended runtime session for background audio playback.
-    /// Without this, watchOS suspends the app ~30s after entering background,
-    /// even with the `audio` background mode. The extended session signals to
-    /// the system that the app has ongoing audio work.
-    private var extendedSession: WKExtendedRuntimeSession?
-    
+
     /// Observers for background/foreground lifecycle notifications.
     private var backgroundObserver: Any?
     private var foregroundObserver: Any?
-    
+
+    /// Set by the lifecycle observers. play()/auto-advance in the background
+    /// must NOT start the 1Hz UI timer — it would run for the rest of the
+    /// session, burning battery with the screen off.
+    private var isInBackground = false
+
     private let logger = Logger(subsystem: "com.yourpods", category: "WatchAudio")
-    
+
     /// Check if battery is too low for streaming
     private var isBatteryTooLow: Bool {
         let device = WKInterfaceDevice.current()
-        device.isBatteryMonitoringEnabled = true
         return device.batteryLevel >= 0 && device.batteryLevel < 0.10
     }
-    
+
     override init() {
         super.init()
+        // Enable once — the computed property above is a pure read. Re-enabling
+        // on every check was redundant (and each call briefly wakes the battery
+        // sensor on watchOS).
+        WKInterfaceDevice.current().isBatteryMonitoringEnabled = true
         setupLifecycleObservers()
     }
     
     deinit {
         timer?.invalidate()
         artworkFetchTask?.cancel()
-        extendedSession?.invalidate()
         if let observer = endOfTrackObserver {
             NotificationCenter.default.removeObserver(observer)
         }
@@ -94,16 +102,18 @@ class WatchAudioManager: NSObject, ObservableObject {
             queue: .main
         ) { [weak self] _ in
             guard let self else { return }
+            self.isInBackground = true
             self.logger.debug("App entering background — suspending progress timer")
             self.stopTimer()
         }
-        
+
         foregroundObserver = NotificationCenter.default.addObserver(
             forName: WKApplication.didBecomeActiveNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
             guard let self else { return }
+            self.isInBackground = false
             if self.isPlaying {
                 self.logger.debug("App returning to foreground — resuming progress timer")
                 self.startTimer()
@@ -112,8 +122,30 @@ class WatchAudioManager: NSObject, ObservableObject {
         }
     }
     
+    // MARK: - Speed
+
+    /// Resolved playback speed: watch-local override wins, else the phone-synced speed.
+    var currentEffectiveSpeed: Double {
+        WatchSpeedPolicy.effectiveSpeed(override: speedOverride,
+                                        phoneSpeed: sessionManager?.playbackSpeed ?? 1.0)
+    }
+
+    func setSpeedOverride(_ speed: Double?) {
+        speedOverride = speed
+        if let speed { UserDefaults.standard.set(speed, forKey: "watchSpeedOverride") }
+        else { UserDefaults.standard.removeObject(forKey: "watchSpeedOverride") }
+        if isPlaying { player?.rate = Float(currentEffectiveSpeed) }
+    }
+
+    // MARK: - Sleep Timer
+
+    func setSleepTimer(_ timer: WatchSleepTimerModel?) {
+        sleepTimer = timer
+        logger.info("Sleep timer set: \(String(describing: timer))")
+    }
+
     // MARK: - Play
-    
+
     func play(episode: WatchEpisode) {
         statusText = "Setting up..."
         var urlToPlay: URL?
@@ -146,82 +178,109 @@ class WatchAudioManager: NSObject, ObservableObject {
         }
         
         guard let url = urlToPlay else { return }
-        
+
         // Stop existing playback
         stopTimer()
-        extendedSession?.invalidate()
         player?.pause()
-        
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+
+        Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                try AVAudioSession.sharedInstance().setCategory(
-                    .playback,
-                    mode: .default,
-                    policy: .longFormAudio
-                )
-                try AVAudioSession.sharedInstance().setActive(true)
-                
-                DispatchQueue.main.async {
-                    let item = AVPlayerItem(url: url)
-                    self.player = AVPlayer(playerItem: item)
-                    let speed = self.sessionManager?.playbackSpeed ?? 1.0
-                    self.player?.rate = Float(speed)
-                    self.player?.play()
-                    self.currentEpisode = episode
-                    self.isPlaying = true
-                    self.hasSetupAudio = true
-                    self.startTimer()
-                    self.setupEndOfTrackObserver()
-                    
-                    // CAROUSEL FIX: Start extended runtime session for background audio
-                    self.startExtendedSession()
-                    
-                    // Resume from synced position
-                    if episode.position > 0 {
-                        let targetTime = CMTime(seconds: Double(episode.position), preferredTimescale: 1)
-                        self.player?.seek(to: targetTime)
-                        self.progress = Double(episode.position)
-                    }
-                    
-                    if self.playbackSource == .streaming {
-                        self.statusText = "Streaming..."
-                    } else {
-                        self.statusText = "Playing"
-                    }
-                    
-                    self.updateNowPlayingInfo()
-                    self.setupRemoteCommands()
-                    
-                    self.logger.info("Playback started: \(episode.title) (\(self.playbackSource == .local ? "local" : "streaming"))")
-                }
+                let session = AVAudioSession.sharedInstance()
+                try session.setCategory(.playback, mode: .default, policy: .longFormAudio)
+                // watchOS requires async activation for .longFormAudio: it selects
+                // (or prompts for) the mandatory Bluetooth route. Synchronous
+                // setActive(true) just throws when no route is connected.
+                _ = try await session.activate(options: [])
+                self.beginPlayback(of: episode, at: url)
             } catch {
-                DispatchQueue.main.async {
-                    self.statusText = "Error: \(error.localizedDescription)"
-                    self.logger.error("Audio session setup failed: \(error.localizedDescription)")
-                }
+                self.playbackSource = .none
+                self.statusText = "Connect Bluetooth headphones and try again"
+                self.logger.error("Audio session activation failed: \(error.localizedDescription)")
             }
         }
     }
-    
+
+    /// Player construction after the audio session is active. Main actor.
+    private func beginPlayback(of episode: WatchEpisode, at url: URL) {
+        let item = AVPlayerItem(url: url)
+        player = AVPlayer(playerItem: item)
+        player?.rate = Float(currentEffectiveSpeed)
+        player?.play()
+        currentEpisode = episode
+        isPlaying = true
+        hasSetupAudio = true
+        startTimer()
+        setupEndOfTrackObserver()
+
+        if episode.position > 0 {
+            let targetTime = CMTime(seconds: Double(episode.position), preferredTimescale: 1)
+            player?.seek(to: targetTime)
+            progress = Double(episode.position)
+        }
+
+        statusText = playbackSource == .streaming ? "Streaming..." : "Playing"
+        updateNowPlayingInfo()
+        setupRemoteCommands()
+        logger.info("Playback started: \(episode.title) (\(self.playbackSource == .local ? "local" : "streaming"))")
+
+        WatchComplicationRefresher.update { data in
+            data.nowPlayingTitle = episode.title
+            data.nowPlayingPodcast = episode.album
+            data.isPlaying = true
+        }
+    }
+
     // MARK: - Toggle Play/Pause
-    
+
     func togglePlayPause() {
         guard let p = player else { return }
         if p.timeControlStatus == .playing {
-            p.pause()
-            isPlaying = false
-            statusText = "Paused"
+            pausePlayback()
         } else {
-            let speed = sessionManager?.playbackSpeed ?? 1.0
-            p.rate = Float(speed)
+            p.rate = Float(currentEffectiveSpeed)
             p.play()
             isPlaying = true
             statusText = playbackSource == .streaming ? "Streaming..." : "Playing"
+            updateNowPlayingPlaybackState()
+
+            WatchComplicationRefresher.update { data in
+                data.isPlaying = self.isPlaying
+            }
+        }
+    }
+
+    /// Pause playback — timeControlStatus-INDEPENDENT (unconditional: pauses
+    /// whatever is currently loaded; never branches on `AVPlayer.timeControlStatus`).
+    /// Extracted from `togglePlayPause()`'s pause branch (parity — same player
+    /// pause, isPlaying flip, durable position push, now-playing + complication
+    /// update) so `timerFired()`'s sleep-timer expiry can call it directly
+    /// instead of routing through `togglePlayPause()`.
+    ///
+    /// W34: `togglePlayPause()`'s branch condition (`p.timeControlStatus == .playing`)
+    /// is FALSE during a buffer stall even though `isPlaying` is still true —
+    /// the old code took the "else" (resume) branch when the sleep timer expired
+    /// mid-stall, silently defeating the timer instead of pausing. Calling this
+    /// helper directly (guarded by `isPlaying`, not `timeControlStatus`) fixes
+    /// that without touching `togglePlayPause()`'s own branch condition, so
+    /// behavior for manual taps is unchanged.
+    private func pausePlayback() {
+        guard let p = player else { return }
+        p.pause()
+        isPlaying = false
+        statusText = "Paused"
+        // Durably push the final position to the phone so resume works after a pause.
+        let secs = CMTimeGetSeconds(p.currentTime())
+        if let episode = currentEpisode, secs.isFinite, secs > 0 {
+            sessionManager?.sendProgress(episodeId: episode.id, position: Int(secs))
         }
         updateNowPlayingPlaybackState()
+
+        WatchComplicationRefresher.update { data in
+            data.isPlaying = self.isPlaying
+        }
     }
-    
+
     // MARK: - Seek
     
     func seek(by seconds: Double) {
@@ -242,6 +301,13 @@ class WatchAudioManager: NSObject, ObservableObject {
     // MARK: - Stop
     
     func stop() {
+        // Capture and push the final position BEFORE teardown, while currentTime() is still valid.
+        if let p = player, let episode = currentEpisode {
+            let secs = CMTimeGetSeconds(p.currentTime())
+            if secs.isFinite, secs > 0 {
+                sessionManager?.sendProgress(episodeId: episode.id, position: Int(secs))
+            }
+        }
         player?.pause()
         player = nil
         stopTimer()
@@ -258,6 +324,7 @@ class WatchAudioManager: NSObject, ObservableObject {
         lastPublishedProgress = nil
         lastNowPlayingUpdate = nil
         cachedArtworkUrl = nil
+        bufferStallStart = nil
         artworkFetchTask?.cancel()
         artworkFetchTask = nil
         
@@ -265,43 +332,19 @@ class WatchAudioManager: NSObject, ObservableObject {
             NotificationCenter.default.removeObserver(observer)
             endOfTrackObserver = nil
         }
-        
-        // CAROUSEL FIX: Invalidate extended session and deactivate audio session.
+
+        WatchComplicationRefresher.update { data in
+            data.nowPlayingTitle = nil
+            data.nowPlayingPodcast = nil
+            data.isPlaying = false
+        }
+
+        // CAROUSEL FIX: Deactivate audio session when nothing is playing.
         // An active audio session without playback keeps watchOS from suspending
         // the app → eventual watchdog kill.
-        endExtendedSession()
         deactivateAudioSession()
     }
-    
-    // MARK: - Extended Runtime Session (CAROUSEL Watchdog Fix)
-    
-    /// Start a WKExtendedRuntimeSession for background audio playback.
-    /// Without this, watchOS may suspend the app after ~30s in background
-    /// even with the `audio` background mode declared in Info.plist.
-    ///
-    /// NOTE: Extended runtime sessions require a delegate and may not be fully
-    /// supported in the watchOS simulator. Failure is non-fatal — the app falls
-    /// back to the `audio` background mode alone.
-    private func startExtendedSession() {
-        guard extendedSession == nil || extendedSession?.state == .invalid else {
-            logger.debug("Extended session already active — skipping")
-            return
-        }
-        let session = WKExtendedRuntimeSession()
-        session.delegate = self
-        session.start()
-        extendedSession = session
-        logger.info("Extended runtime session started for background audio")
-    }
-    
-    /// Invalidate the extended runtime session when playback stops.
-    private func endExtendedSession() {
-        guard let session = extendedSession, session.state != .invalid else { return }
-        session.invalidate()
-        extendedSession = nil
-        logger.info("Extended runtime session invalidated")
-    }
-    
+
     /// Deactivate the AVAudioSession when nothing is playing.
     /// This lets watchOS fully suspend the app and prevents watchdog enforcement.
     private func deactivateAudioSession() {
@@ -318,6 +361,10 @@ class WatchAudioManager: NSObject, ObservableObject {
     
     private func startTimer() {
         stopTimer()
+        guard !isInBackground else {
+            logger.debug("Skipping timer start — app is in background")
+            return   // foreground observer restarts it
+        }
         // Freeze Fix #2: Reduced from 0.5s → 1.0s to cut CPU/UI pressure in half
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.timerFired()
@@ -330,6 +377,17 @@ class WatchAudioManager: NSObject, ObservableObject {
     }
     
     private func timerFired() {
+        if let sleepTimer, sleepTimer.isExpired(at: Date()) {
+            logger.info("Sleep timer expired — pausing")
+            self.sleepTimer = nil
+            // W34: call pausePlayback() directly, NOT togglePlayPause() — during
+            // a buffer stall, timeControlStatus != .playing even though isPlaying
+            // is true, so togglePlayPause()'s branch would RESUME instead of
+            // pause here. pausePlayback() is timeControlStatus-independent.
+            if isPlaying { pausePlayback() }   // pauses + pushes position durably
+            return
+        }
+
         guard let p = player, let episode = currentEpisode else { return }
         
         let rawProgress = CMTimeGetSeconds(p.currentTime())
@@ -363,11 +421,18 @@ class WatchAudioManager: NSObject, ObservableObject {
         
         // Status update
         if let error = p.currentItem?.error {
-            statusText = "Error: \(error.localizedDescription)"
+            logger.error("Player item failed: \(error.localizedDescription)")
+            let message = "Error: \(error.localizedDescription)"
             bufferStallStart = nil
+            stop()                    // releases player, timer, audio session
+            statusText = message      // stop() resets statusText — restore the error for the UI
+            return
         } else if p.status == .failed {
-            statusText = "Failed"
+            logger.error("Player failed")
             bufferStallStart = nil
+            stop()
+            statusText = "Playback failed"
+            return
         } else if p.timeControlStatus == .playing {
             bufferStallStart = nil
             if shouldPublish {
@@ -428,38 +493,57 @@ class WatchAudioManager: NSObject, ObservableObject {
             object: player?.currentItem,
             queue: .main
         ) { [weak self] _ in
-            self?.handleEpisodeCompleted()
+            self?.handleTrackEnd(reason: .finished)
         }
     }
-    
-    private func handleEpisodeCompleted() {
-        guard let completed = currentEpisode else {
+
+    /// Whether a track ended because it played to completion, or because the
+    /// user skipped it. Only `.finished` counts as a real completion — it's
+    /// the only case that marks the episode played on the phone.
+    enum TrackEndReason { case finished, skipped }
+
+    private func handleTrackEnd(reason: TrackEndReason) {
+        guard let ended = currentEpisode else {
+            logger.debug("Track end with no current episode — stopping")
             stop()
             return
         }
-        
-        logger.info("Episode completed: \(completed.title)")
-        
-        // Sync final position
-        sessionManager?.sendProgress(episodeId: completed.id, position: completed.duration)
-        
-        // Find next episode in queue
-        guard let sm = sessionManager, !sm.episodes.isEmpty else {
-            logger.info("Queue empty — stopping playback")
+        logger.info("Track end (\(reason == .finished ? "finished" : "skipped")): \(ended.title)")
+
+        // Snapshot the queue BEFORE any mutation — markAsPlayed removes the
+        // episode locally, which would break next-episode selection.
+        let queueIds = sessionManager?.episodes.map(\.id) ?? []
+        let nextId = WatchAdvancePlanner.next(after: ended.id, inQueue: queueIds)
+        let nextEpisode = nextId.flatMap { id in sessionManager?.episodes.first(where: { $0.id == id }) }
+
+        switch reason {
+        case .finished:
+            // Real completion: durable final position + real mark-played on the phone.
+            sessionManager?.sendProgress(episodeId: ended.id, position: ended.duration)
+            sessionManager?.markAsPlayed(for: ended.id)
+        case .skipped:
+            // A skip is NOT a finish — push the actual position only.
+            if let p = player {
+                let secs = CMTimeGetSeconds(p.currentTime())
+                if secs.isFinite, secs > 0 {
+                    sessionManager?.sendProgress(episodeId: ended.id, position: Int(secs))
+                }
+            }
+        }
+
+        // Sleep timer: "end of episode" stops here instead of advancing, and a
+        // duration timer that lapsed while backgrounded (the 1Hz timer is
+        // foreground-only) stops playback at the next track boundary.
+        if sleepTimer?.stopsAtTrackEnd == true || (sleepTimer?.isExpired(at: Date()) ?? false) {
+            sleepTimer = nil
+            logger.info("Sleep timer — stopping at track end")
             stop()
             return
         }
-        
-        // Find the current episode's index in the queue and get the next one
-        if let currentIndex = sm.episodes.firstIndex(where: { $0.id == completed.id }),
-           currentIndex + 1 < sm.episodes.count {
-            let next = sm.episodes[currentIndex + 1]
-            logger.info("Auto-advancing to: \(next.title)")
-            play(episode: next)
-        } else if let first = sm.episodes.first, first.id != completed.id {
-            // If completed episode isn't in queue (edge case), play first
-            logger.info("Auto-advancing to first in queue: \(first.title)")
-            play(episode: first)
+
+        if let nextEpisode {
+            logger.info("Auto-advancing to: \(nextEpisode.title)")
+            play(episode: nextEpisode)
         } else {
             logger.info("No next episode — stopping playback")
             stop()
@@ -491,10 +575,15 @@ class WatchAudioManager: NSObject, ObservableObject {
                 do {
                     let (data, _) = try await URLSession.shared.data(from: url)
                     guard !Task.isCancelled else { return }
-                    if let image = UIImage(data: data) {
+                    // 256px is ample for the watch now-playing artwork slot; bounded
+                    // decode avoids the widget-OOM crash class on a 3000px cover.
+                    if let cg = WatchArtworkDownsampler.downsample(data: data, maxPixelSize: 256) {
+                        let image = UIImage(cgImage: cg)
                         let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
                         info[MPMediaItemPropertyArtwork] = artwork
                         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+                    } else {
+                        logger.debug("Artwork downsample returned nil for \(url.absoluteString)")
                     }
                 } catch {
                     if !Task.isCancelled {
@@ -566,23 +655,29 @@ class WatchAudioManager: NSObject, ObservableObject {
             return .success
         }
         
+        // Skip-interval parity: synced from the iPhone's settings via
+        // sessionManager. NOTE accepted limitation — preferredIntervals is only
+        // read here, gated by remoteCommandsConfigured above, so a mid-session
+        // interval change from the iPhone applies to the remote command targets
+        // on next launch, not live. The seek(by:) calls always read the current
+        // sessionManager value, so in-app buttons stay live.
         commandCenter.skipBackwardCommand.isEnabled = true
-        commandCenter.skipBackwardCommand.preferredIntervals = [15]
+        commandCenter.skipBackwardCommand.preferredIntervals = [NSNumber(value: sessionManager?.skipBackwardSeconds ?? 15)]
         commandCenter.skipBackwardCommand.addTarget { [weak self] _ in
-            self?.seek(by: -15)
+            self?.seek(by: -Double(self?.sessionManager?.skipBackwardSeconds ?? 15))
             return .success
         }
-        
+
         commandCenter.skipForwardCommand.isEnabled = true
-        commandCenter.skipForwardCommand.preferredIntervals = [30]
+        commandCenter.skipForwardCommand.preferredIntervals = [NSNumber(value: sessionManager?.skipForwardSeconds ?? 30)]
         commandCenter.skipForwardCommand.addTarget { [weak self] _ in
-            self?.seek(by: 30)
+            self?.seek(by: Double(self?.sessionManager?.skipForwardSeconds ?? 30))
             return .success
         }
         
         commandCenter.nextTrackCommand.isEnabled = true
         commandCenter.nextTrackCommand.addTarget { [weak self] _ in
-            self?.handleEpisodeCompleted()
+            self?.handleTrackEnd(reason: .skipped)
             return .success
         }
         
@@ -596,28 +691,5 @@ class WatchAudioManager: NSObject, ObservableObject {
         }
         
         remoteCommandsConfigured = true
-    }
-}
-
-// MARK: - WKExtendedRuntimeSessionDelegate
-
-extension WatchAudioManager: WKExtendedRuntimeSessionDelegate {
-    func extendedRuntimeSessionDidStart(_ extendedRuntimeSession: WKExtendedRuntimeSession) {
-        logger.info("Extended runtime session did start")
-    }
-    
-    func extendedRuntimeSessionWillExpire(_ extendedRuntimeSession: WKExtendedRuntimeSession) {
-        // watchOS is about to end our extended session — log but don't interfere
-        logger.warning("Extended runtime session will expire")
-    }
-    
-    func extendedRuntimeSession(_ extendedRuntimeSession: WKExtendedRuntimeSession, didInvalidateWith reason: WKExtendedRuntimeSessionInvalidationReason, error: (any Error)?) {
-        if let error {
-            logger.error("Extended runtime session invalidated: \(error.localizedDescription)")
-        } else {
-            logger.debug("Extended runtime session invalidated (reason: \(reason.rawValue))")
-        }
-        // Clear reference so a new session can be started on next play
-        extendedSession = nil
     }
 }

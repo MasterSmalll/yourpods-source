@@ -31,14 +31,32 @@ final class RecentlyUpdatedDiversityTests: XCTestCase {
 
     // MARK: - Per-Podcast Cutoff Tests
 
-    func test_filterRecentlyUpdated_excludesEpisodesOlderThan2Months() {
+    func test_filterRecentlyUpdated_excludesEpisodesOlderThan3Months() {
         let now = Date()
-        let oneMonthAgo = Calendar.current.date(byAdding: .month, value: -1, to: now)!
+        let twoMonthsAgo = Calendar.current.date(byAdding: .month, value: -2, to: now)!
+        let fourMonthsAgo = Calendar.current.date(byAdding: .month, value: -4, to: now)!
+
+        let episodes = [
+            makeEpisode(guid: "recent", podcastUrl: "feed-a", pubDate: twoMonthsAgo),
+            makeEpisode(guid: "old", podcastUrl: "feed-a", pubDate: fourMonthsAgo),
+        ]
+
+        let result = RecentlyUpdatedFilter.filter(
+            episodes: episodes,
+            limit: 12,
+            now: now
+        )
+
+        XCTAssertEqual(result.episodes.count, 1, "Should exclude episodes older than 3 months")
+        XCTAssertEqual(result.episodes.first?.guid, "recent")
+    }
+
+    func test_filterRecentlyUpdated_episodesExactlyAt3MonthsAreIncluded() {
+        let now = Date()
         let threeMonthsAgo = Calendar.current.date(byAdding: .month, value: -3, to: now)!
 
         let episodes = [
-            makeEpisode(guid: "recent", podcastUrl: "feed-a", pubDate: oneMonthAgo),
-            makeEpisode(guid: "old", podcastUrl: "feed-a", pubDate: threeMonthsAgo),
+            makeEpisode(guid: "boundary", podcastUrl: "feed-a", pubDate: threeMonthsAgo),
         ]
 
         let result = RecentlyUpdatedFilter.filter(
@@ -47,25 +65,7 @@ final class RecentlyUpdatedDiversityTests: XCTestCase {
             now: now
         )
 
-        XCTAssertEqual(result.count, 1, "Should exclude episodes older than 2 months")
-        XCTAssertEqual(result.first?.guid, "recent")
-    }
-
-    func test_filterRecentlyUpdated_episodesExactlyAt2MonthsAreIncluded() {
-        let now = Date()
-        let twoMonthsAgo = Calendar.current.date(byAdding: .month, value: -2, to: now)!
-
-        let episodes = [
-            makeEpisode(guid: "boundary", podcastUrl: "feed-a", pubDate: twoMonthsAgo),
-        ]
-
-        let result = RecentlyUpdatedFilter.filter(
-            episodes: episodes,
-            limit: 12,
-            now: now
-        )
-
-        XCTAssertEqual(result.count, 1, "Episodes exactly at 2-month boundary should be included")
+        XCTAssertEqual(result.episodes.count, 1, "Episodes exactly at 3-month boundary should be included")
     }
 
     func test_filterRecentlyUpdated_improvesDiversityAcrossPodcasts() {
@@ -90,7 +90,7 @@ final class RecentlyUpdatedDiversityTests: XCTestCase {
         )
 
         // Both podcasts should appear in results
-        let podcastBCount = result.filter { $0.guid.hasPrefix("b-") }.count
+        let podcastBCount = result.episodes.filter { $0.guid.hasPrefix("b-") }.count
         XCTAssertEqual(podcastBCount, 2, "Both Podcast B episodes should appear")
     }
 
@@ -107,7 +107,7 @@ final class RecentlyUpdatedDiversityTests: XCTestCase {
             now: now
         )
 
-        XCTAssertLessThanOrEqual(result.count, 12, "Should respect the limit parameter")
+        XCTAssertLessThanOrEqual(result.episodes.count, 12, "Should respect the limit parameter")
     }
 
     func test_filterRecentlyUpdated_sortsNewestFirst() {
@@ -126,7 +126,7 @@ final class RecentlyUpdatedDiversityTests: XCTestCase {
             now: now
         )
 
-        XCTAssertEqual(result.first?.guid, "newer", "Results should be sorted newest first")
+        XCTAssertEqual(result.episodes.first?.guid, "newer", "Results should be sorted newest first")
     }
 
     func test_filterRecentlyUpdated_excludesPlayedAndInteracted() {
@@ -146,8 +146,8 @@ final class RecentlyUpdatedDiversityTests: XCTestCase {
             now: now
         )
 
-        XCTAssertEqual(result.count, 1)
-        XCTAssertEqual(result.first?.guid, "fresh")
+        XCTAssertEqual(result.episodes.count, 1)
+        XCTAssertEqual(result.episodes.first?.guid, "fresh")
     }
 
     func test_filterRecentlyUpdated_nilPubDateExcluded() {
@@ -165,6 +165,6 @@ final class RecentlyUpdatedDiversityTests: XCTestCase {
             now: now
         )
 
-        XCTAssertEqual(result.count, 0, "Episodes with nil pubDate should be excluded")
+        XCTAssertEqual(result.episodes.count, 0, "Episodes with nil pubDate should be excluded")
     }
 }

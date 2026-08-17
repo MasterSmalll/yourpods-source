@@ -17,7 +17,7 @@ import XCTest
 final class QueueSyncRaceTests: XCTestCase {
 
     private let defaults = UserDefaults.standard
-    private let serverGuidsKey = "proQueueSyncServerGuids"
+    private let serverGuidsKey = PlayerManager.proQueueSyncServerGuidsKey
     private let syncCompletedKey = "proQueueSyncCompleted"
 
     override func setUp() {

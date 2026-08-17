@@ -211,6 +211,38 @@ final class WatchAudioManagerFreezeTests: XCTestCase {
                       "After stop, same URL should be fetchable again")
     }
 
+    // MARK: - W34: Sleep-timer stall race — twin coverage note
+    //
+    // Production bug: timerFired()'s sleep-timer expiry called togglePlayPause(),
+    // which branched on AVPlayer.timeControlStatus — during a buffer stall
+    // (isPlaying == true but timeControlStatus != .playing) that took the
+    // "resume" branch instead of pausing, silently defeating the timer. Fixed
+    // by extracting a timeControlStatus-independent pausePlayback() helper that
+    // timerFired() now calls directly.
+    //
+    // The twin CANNOT represent this bug: WatchAudioState.togglePlayPause() has
+    // no AVPlayer/timeControlStatus concept at all (it's a plain Bool toggle),
+    // and the twin has no sleepTimer/timerFired equivalent — the sleep-timer
+    // feature was added to production without ever extending the twin. There is
+    // no twin-side stall state to fix. This test locks the one thing the twin
+    // CAN promise: toggling from isPlaying always lands on paused, with no
+    // timeControlStatus-shaped branch that could take a "resume" path instead.
+
+    func test_togglePlayPause_fromPlaying_alwaysPauses_neverResumes() {
+        var state = WatchAudioState()
+        let episode = makeEpisode()
+        state.play(episode: episode, documentsDirectory: tempDir)
+        XCTAssertTrue(state.isPlaying, "Precondition: playing")
+
+        state.togglePlayPause()
+
+        XCTAssertFalse(state.isPlaying,
+                       "From isPlaying, togglePlayPause() must always pause — the twin " +
+                       "has no timeControlStatus-style branch that could resume instead " +
+                       "(unlike the production bug this mirrors, W34)")
+        XCTAssertEqual(state.statusText, "Paused")
+    }
+
     // MARK: - Integration: Multiple plays don't accumulate state
 
     func test_multipleAutoAdvances_doNotAccumulateThrottleState() {

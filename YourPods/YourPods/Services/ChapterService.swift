@@ -3,7 +3,6 @@ import os
 import CryptoKit
 
 /// Fetches and caches Podcasting 2.0 chapters from external JSON URLs.
-///
 actor ChapterService {
     static let shared = ChapterService()
     private let logger = Logger(subsystem: "com.yourpods", category: "ChapterService")

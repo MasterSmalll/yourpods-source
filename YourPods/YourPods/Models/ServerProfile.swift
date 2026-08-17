@@ -6,6 +6,14 @@ import Foundation
 // Firebase/Sync features are NOT required — see https://opensource.yourpods.app
 // ─────────────────────────────────────────────────────────────────────────
 
+/// How a Nextcloud gPodder account was authenticated.
+enum AuthMethod: String, Codable {
+    /// User entered an app password manually.
+    case manual
+    /// Authenticated via Nextcloud Login Flow v2.
+    case loginFlow
+}
+
 /// The sync backend for a profile.
 enum ProfileType: String, Codable, CaseIterable {
     /// Nextcloud gPodder sync or any self-hosted gPodder-compatible server.
@@ -32,8 +40,17 @@ struct ServerProfile: Identifiable, Codable, Hashable {
     /// Changing this value forks the profile (a copy of the current settings is saved
     /// under the new name before switching).
     var proProfileName: String
+    /// How this account was authenticated. Optional for backward compatibility
+    /// — existing profiles without this field decode as `nil`, and
+    /// `resolvedAuthMethod` falls back to `.manual`.
+    var storedAuthMethod: AuthMethod?
     /// Password stored in Keychain, not serialized here.
     var isLocal: Bool { baseUrl == nil }
+
+    /// The effective auth method — falls back to `.manual` for pre-existing profiles.
+    var resolvedAuthMethod: AuthMethod {
+        storedAuthMethod ?? .manual
+    }
 
     init(
         id: String = UUID().uuidString,
@@ -42,7 +59,8 @@ struct ServerProfile: Identifiable, Codable, Hashable {
         username: String? = nil,
         deviceId: String = "yourpods-ios",
         profileType: ProfileType = .gpodder,
-        proProfileName: String = "yourpodssync"
+        proProfileName: String = "yourpodssync",
+        authMethod: AuthMethod? = nil
     ) {
         self.id = id
         self.name = name
@@ -51,6 +69,7 @@ struct ServerProfile: Identifiable, Codable, Hashable {
         self.deviceId = deviceId
         self.profileType = profileType
         self.proProfileName = proProfileName
+        self.storedAuthMethod = authMethod
     }
 
     /// Custom decoding to handle existing profiles saved before `proProfileName` was added.
@@ -65,6 +84,8 @@ struct ServerProfile: Identifiable, Codable, Hashable {
         profileType = try container.decodeIfPresent(ProfileType.self, forKey: .profileType) ?? .gpodder
         // Backward compat: profiles saved before proProfileName default to "yourpodssync"
         proProfileName = try container.decodeIfPresent(String.self, forKey: .proProfileName) ?? "yourpodssync"
+        // Backward compat: profiles saved before Login Flow v2 have no authMethod
+        storedAuthMethod = try container.decodeIfPresent(AuthMethod.self, forKey: .storedAuthMethod)
     }
 }
 
@@ -76,7 +97,7 @@ struct SubscriptionDelta {
 }
 
 /// Represents a sync conflict between local and server state.
-struct SyncConflict: Identifiable {
+struct SyncConflict: Identifiable, Sendable, Codable {
     var id: String { episodeGuid }
     let episodeGuid: String
     let episodeTitle: String?
@@ -90,10 +111,60 @@ struct SyncConflict: Identifiable {
     let totalDuration: Int?
     /// Number of times this conflict has been detected across sync cycles.
     let occurrenceCount: Int
+    /// Whether the SERVER holds this episode as finished.
+    ///
+    /// A completed row stores `position_sec = duration`, so `serverPosition` alone cannot
+    /// tell "finished" from "paused one second short" — the sheet renders both as the same
+    /// timestamp and asks the user to choose between two numbers when one of them is not a
+    /// position at all. Defaults to `false`: locally-detected conflicts never carry the
+    /// flag, and the deployed server does not send it yet.
+    let serverCompleted: Bool
+    /// Which device authored `localPosition`.
+    ///
+    /// "Local" means the device that wrote the row, **not** the one reading it. Null for
+    /// bridge-written rows (no device authored those: the local side is YourPods' own
+    /// stored position facing a remote gPodder host) and for conflicts this device
+    /// detected itself, which the server has never seen.
+    let deviceId: String?
+    /// Server conflict record ID for resolving via POST /sync-conflicts/resolve.
+    /// Nil for locally-detected conflicts that haven't been sent to the server.
+    let serverConflictId: Int?
+
+    init(
+        episodeGuid: String,
+        episodeTitle: String?,
+        podcastTitle: String?,
+        podcastUrl: String?,
+        artworkUrl: String?,
+        audioUrl: String?,
+        localPosition: Int,
+        serverPosition: Int,
+        serverTimestamp: Int,
+        totalDuration: Int?,
+        occurrenceCount: Int,
+        serverCompleted: Bool = false,
+        deviceId: String? = nil,
+        serverConflictId: Int? = nil
+    ) {
+        self.episodeGuid = episodeGuid
+        self.episodeTitle = episodeTitle
+        self.podcastTitle = podcastTitle
+        self.podcastUrl = podcastUrl
+        self.artworkUrl = artworkUrl
+        self.audioUrl = audioUrl
+        self.localPosition = localPosition
+        self.serverPosition = serverPosition
+        self.serverTimestamp = serverTimestamp
+        self.totalDuration = totalDuration
+        self.occurrenceCount = occurrenceCount
+        self.serverCompleted = serverCompleted
+        self.deviceId = deviceId
+        self.serverConflictId = serverConflictId
+    }
 }
 
 /// Sync strategy for resolving conflicts.
-enum SyncStrategy: String, Codable, CaseIterable {
+enum SyncStrategy: String, Codable, CaseIterable, Sendable {
     case serverWins
     case deviceWins
     case ask
@@ -107,7 +178,7 @@ enum QueueSyncStrategy: String, Codable, CaseIterable {
 }
 
 /// Represents a URL rewrite conflict from the server's `update_urls` response.
-struct URLRewriteConflict: Identifiable {
+struct URLRewriteConflict: Identifiable, Sendable {
     var id: String { oldUrl }
     let oldUrl: String
     let newUrl: String

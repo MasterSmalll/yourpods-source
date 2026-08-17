@@ -36,7 +36,9 @@ class BackgroundRefreshManager: ObservableObject {
         
         WKApplication.shared().scheduleBackgroundRefresh(
             withPreferredDate: preferredDate,
-            userInfo: nil
+            // .backgroundTask(.appRefresh(id)) matches on userInfo — with nil
+            // userInfo the handler never runs and the task expires unhandled.
+            userInfo: Self.refreshTaskId as NSString
         ) { [self] error in
             if let error = error {
                 logger.error("Failed to schedule: \(error.localizedDescription)")
@@ -63,11 +65,13 @@ class BackgroundRefreshManager: ObservableObject {
         }
         isProcessing = true
         logger.info("Handling background refresh")
-        
+        WatchDiagnosticLog.shared.log("BG_REFRESH_START")
+
         guard WCSession.default.activationState == .activated else {
             logger.warning("WCSession not activated, skipping")
             isProcessing = false
             scheduleNextRefresh()
+            WatchDiagnosticLog.shared.log("BG_REFRESH_DONE")
             completion()
             return
         }
@@ -77,13 +81,7 @@ class BackgroundRefreshManager: ObservableObject {
         
         if let queue = context["queue"] as? [[String: Any]] {
             logger.info("Refreshed queue with \(queue.count) items from application context")
-            
-            // Post notification so WatchSessionManager can process the update
-            NotificationCenter.default.post(
-                name: .backgroundQueueRefresh,
-                object: nil,
-                userInfo: ["queue": queue]
-            )
+            WatchSessionManager.shared.applyQueueData(queue)
         } else {
             logger.debug("No queue data in application context")
         }
@@ -100,14 +98,20 @@ class BackgroundRefreshManager: ObservableObject {
                 completionFired = true
                 isProcessing = false
                 scheduleNextRefresh()
+                WatchDiagnosticLog.shared.log("BG_REFRESH_DONE")
                 completion()
             }
             
             WCSession.default.sendMessage(
                 ["command": "refresh_queue"],
                 replyHandler: { [self] reply in
-                    logger.info("Received fresh data from iPhone")
-                    DispatchQueue.main.async { fireOnce() }
+                    logger.info("Received fresh queue from iPhone")
+                    DispatchQueue.main.async {
+                        if let queue = reply["queue"] as? [[String: Any]] {
+                            WatchSessionManager.shared.applyQueueData(queue)
+                        }
+                        fireOnce()
+                    }
                 },
                 errorHandler: { [self] error in
                     logger.error("Failed to reach iPhone: \(error.localizedDescription)")
@@ -123,12 +127,8 @@ class BackgroundRefreshManager: ObservableObject {
             // iPhone not reachable — complete immediately
             isProcessing = false
             scheduleNextRefresh()
+            WatchDiagnosticLog.shared.log("BG_REFRESH_DONE")
             completion()
         }
     }
-}
-
-// MARK: - Notification Name
-extension Notification.Name {
-    static let backgroundQueueRefresh = Notification.Name("backgroundQueueRefresh")
 }

@@ -4,70 +4,10 @@ import Combine
 import WatchKit
 import os
 
-struct WatchChapter: Identifiable, Codable {
-    var id: Double { startTime }
-    let startTime: Double // seconds
-    let title: String
-    let img: String?
-    let url: String?
-}
-
-struct WatchEpisode: Identifiable, Codable {
-    let id: String
-    let title: String
-    let album: String
-    let artist: String
-    let duration: Int
-    let localPath: String? // Path relative to Documents directory
-    let streamUrl: String? // Remote URL for streaming
-    let artUri: String? // Cover art URL
-    let isAvailableOnPhone: Bool // If true, can be manually downloaded
-    let chapters: [WatchChapter]? // Episode chapters (if available)
-    var position: Int // Playback position in seconds (synced from iOS)
-    let pubDate: Date? // Episode publish date (for Recently Updated sorting)
-    let podcastTitle: String? // Podcast name (for cross-podcast display)
-    let podcastArtUri: String? // Podcast artwork URL (for Recently Updated)
-    
-    /// Backward-compatible decoder — new optional fields default to nil
-    /// when decoding payloads from older iOS app versions or persisted data.
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        id = try container.decode(String.self, forKey: .id)
-        title = try container.decode(String.self, forKey: .title)
-        album = try container.decode(String.self, forKey: .album)
-        artist = try container.decode(String.self, forKey: .artist)
-        duration = try container.decode(Int.self, forKey: .duration)
-        localPath = try container.decodeIfPresent(String.self, forKey: .localPath)
-        streamUrl = try container.decodeIfPresent(String.self, forKey: .streamUrl)
-        artUri = try container.decodeIfPresent(String.self, forKey: .artUri)
-        isAvailableOnPhone = try container.decode(Bool.self, forKey: .isAvailableOnPhone)
-        chapters = try container.decodeIfPresent([WatchChapter].self, forKey: .chapters)
-        position = try container.decode(Int.self, forKey: .position)
-        pubDate = try container.decodeIfPresent(Date.self, forKey: .pubDate)
-        podcastTitle = try container.decodeIfPresent(String.self, forKey: .podcastTitle)
-        podcastArtUri = try container.decodeIfPresent(String.self, forKey: .podcastArtUri)
-    }
-    
-    init(id: String, title: String, album: String, artist: String, duration: Int,
-         localPath: String?, streamUrl: String?, artUri: String?,
-         isAvailableOnPhone: Bool, chapters: [WatchChapter]?, position: Int,
-         pubDate: Date? = nil, podcastTitle: String? = nil, podcastArtUri: String? = nil) {
-        self.id = id
-        self.title = title
-        self.album = album
-        self.artist = artist
-        self.duration = duration
-        self.localPath = localPath
-        self.streamUrl = streamUrl
-        self.artUri = artUri
-        self.isAvailableOnPhone = isAvailableOnPhone
-        self.chapters = chapters
-        self.position = position
-        self.pubDate = pubDate
-        self.podcastTitle = podcastTitle
-        self.podcastArtUri = podcastArtUri
-    }
-}
+// WatchChapter and WatchEpisode live in Services/WatchQueueMerger.swift —
+// that file is compiled into both this (watch) target and the main iOS
+// target (YourPodsTests needs them to test WatchQueueMerger), so the types
+// were moved there rather than duplicated. See WatchQueueMerger.swift.
 
 struct WatchPodcast: Identifiable, Codable {
     let id: String // feedUrl
@@ -81,16 +21,25 @@ struct WatchPodcast: Identifiable, Codable {
 class WatchDownloadManager: NSObject, ObservableObject, URLSessionDownloadDelegate {
     static let shared = WatchDownloadManager()
     static let backgroundSessionId = "com.asecretcompany.yourpods.watch.download"
-    
+
     /// System-provided completion handler for background session events.
     static var backgroundSessionCompletionHandler: (() -> Void)?
-    
+
+    /// Who asked for a download. Queue auto-downloads follow queue membership
+    /// (the orphan GC may delete their files once the episode leaves the queue);
+    /// user-initiated downloads are protected by a persistent manifest and only
+    /// removed on explicit delete.
+    enum DownloadOrigin: String {
+        case queue
+        case user
+    }
+
     @Published var activeDownloads: [String: Double] = [:] // episodeId -> progress (0.0-1.0)
     @Published var completedDownloads: Set<String> = []
-    
+
     private var downloadTasks: [String: URLSessionDownloadTask] = [:]
     private var episodeInfo: [String: (url: String, title: String)] = [:]
-    private var downloadQueue: [(episodeId: String, url: String, title: String)] = []
+    private var downloadQueue: [(episodeId: String, url: String, title: String, origin: DownloadOrigin)] = []
     private var stallTimers: [String: Timer] = [:]
     private var lastBytesReceived: [String: Date] = [:]
     
@@ -108,11 +57,14 @@ class WatchDownloadManager: NSObject, ObservableObject, URLSessionDownloadDelega
         config.isDiscretionary = false          // download ASAP, not at system discretion
         config.sessionSendsLaunchEvents = true  // wake app on download completion
         config.allowsCellularAccess = true      // per-task override in startDownload()
+        config.timeoutIntervalForResource = 3600   // don't let a dead download hold the radio path all day
         return URLSession(configuration: config, delegate: self, delegateQueue: .main)
     }()
-    
+
     override init() {
         super.init()
+        // Enable once — the computed property below is a pure read.
+        WKInterfaceDevice.current().isBatteryMonitoringEnabled = true
         setupLifecycleObservers()
     }
     
@@ -185,7 +137,6 @@ class WatchDownloadManager: NSObject, ObservableObject, URLSessionDownloadDelega
     /// Check if battery is too low for downloads (< 10%)
     private var isBatteryTooLow: Bool {
         let device = WKInterfaceDevice.current()
-        device.isBatteryMonitoringEnabled = true
         return device.batteryLevel >= 0 && device.batteryLevel < 0.10
     }
     
@@ -198,34 +149,53 @@ class WatchDownloadManager: NSObject, ObservableObject, URLSessionDownloadDelega
         currentWifiOnly = wifiOnly
     }
     
-    func startDownload(episodeId: String, url: String, title: String) {
+    func startDownload(episodeId: String, url: String, title: String, origin: DownloadOrigin) {
         guard downloadTasks[episodeId] == nil else {
             logger.debug("Download already in progress for \(episodeId)")
             return
         }
-        
+
+        guard !downloadQueue.contains(where: { $0.episodeId == episodeId }) else {
+            logger.debug("Download already queued for \(episodeId)")
+            return
+        }
+
         // Skip if battery too low
         if isBatteryTooLow {
             logger.info("Skipping download for \(title) — battery too low")
             return
         }
-        
+
         // Queue if max concurrent reached
         if downloadTasks.count >= maxConcurrentDownloads {
             logger.debug("Queueing download for \(title) (max concurrent reached)")
-            downloadQueue.append((episodeId: episodeId, url: url, title: title))
+            downloadQueue.append((episodeId: episodeId, url: url, title: title, origin: origin))
             return
         }
-        
+
         guard let downloadUrl = URL(string: url) else {
             logger.error("Invalid URL for download: \(url)")
             return
         }
-        
-        logger.info("Starting on-watch download for: \(title) (wifiOnly: \(self.currentWifiOnly))")
+
+        logger.info("Starting on-watch download for: \(title) (wifiOnly: \(self.currentWifiOnly), origin: \(origin.rawValue))")
         episodeInfo[episodeId] = (url, title)
         activeDownloads[episodeId] = 0.0
         lastBytesReceived[episodeId] = Date()
+
+        // Persist a registry entry so a background-relaunch completion can
+        // still resolve the deterministic filename for this episode.
+        var registry = (UserDefaults.standard.dictionary(forKey: "watch_download_registry") as? [String: String]) ?? [:]
+        registry[episodeId] = WatchDownloadHygiene.filename(forEpisodeId: episodeId)
+        UserDefaults.standard.set(registry, forKey: "watch_download_registry")
+
+        // Persist the origin alongside the registry entry so a completion that
+        // arrives via a background relaunch (in-memory state gone) can still
+        // tell whether this was a user-initiated download that needs manifest
+        // protection from the orphan GC.
+        var origins = (UserDefaults.standard.dictionary(forKey: "watch_download_origins") as? [String: String]) ?? [:]
+        origins[episodeId] = origin.rawValue
+        UserDefaults.standard.set(origins, forKey: "watch_download_origins")
         
         var request = URLRequest(url: downloadUrl)
         request.allowsCellularAccess = !currentWifiOnly
@@ -259,16 +229,92 @@ class WatchDownloadManager: NSObject, ObservableObject, URLSessionDownloadDelega
         stallTimers[episodeId]?.invalidate()
         stallTimers.removeValue(forKey: episodeId)
         lastBytesReceived.removeValue(forKey: episodeId)
-        
+        removeDownloadRegistryEntry(for: episodeId)
+
         // Start next queued download if any
         processQueue()
     }
-    
+
+    /// Remove this episode's persisted registry + origin entries. Called on
+    /// completion, failure, and cancellation so the registry only ever reflects
+    /// in-flight downloads (never a stale reference the orphan GC would then
+    /// treat as "still referenced").
+    private func removeDownloadRegistryEntry(for episodeId: String) {
+        var registry = (UserDefaults.standard.dictionary(forKey: "watch_download_registry") as? [String: String]) ?? [:]
+        registry.removeValue(forKey: episodeId)
+        UserDefaults.standard.set(registry, forKey: "watch_download_registry")
+
+        var origins = (UserDefaults.standard.dictionary(forKey: "watch_download_origins") as? [String: String]) ?? [:]
+        origins.removeValue(forKey: episodeId)
+        UserDefaults.standard.set(origins, forKey: "watch_download_origins")
+    }
+
+    /// Persisted origin for an in-flight download (survives background relaunch).
+    private func downloadOrigin(for episodeId: String) -> DownloadOrigin? {
+        let origins = (UserDefaults.standard.dictionary(forKey: "watch_download_origins") as? [String: String]) ?? [:]
+        return origins[episodeId].flatMap(DownloadOrigin.init(rawValue:))
+    }
+
+    // MARK: - Completed-download manifest (user-origin GC protection)
+    //
+    // libraryEpisodes is never persisted, and recent/queue lists can be empty
+    // in a freshly relaunched process. A user-initiated download referenced
+    // only by such a list would look "orphaned" to the GC after any relaunch.
+    // The manifest is the persistent record that a user explicitly downloaded
+    // a file — those files are only ever removed by an explicit delete.
+    // Queue auto-downloads are intentionally NOT in the manifest: their files
+    // follow queue membership (that is the GC's cleanup purpose), and the
+    // queue list itself is persisted (saved_episodes).
+    //
+    // All manifest reads/writes are main-thread confined: completion callbacks
+    // arrive on the session's main delegate queue, deleteLocalFile runs on
+    // main, and the GC reads inside its main.sync snapshot / removes via a
+    // main.async hop — so there is no cross-queue read-modify-write.
+
+    private static let completedManifestKey = "watch_completed_downloads"
+
+    /// Record a completed user-origin download. No-op for queue-origin.
+    private func recordCompletedDownload(episodeId: String, filename: String, origin: DownloadOrigin) {
+        guard origin == .user else { return }
+        var manifest = (UserDefaults.standard.dictionary(forKey: Self.completedManifestKey) as? [String: String]) ?? [:]
+        manifest[episodeId] = filename
+        UserDefaults.standard.set(manifest, forKey: Self.completedManifestKey)
+    }
+
+    /// Explicit user delete — the episode's file no longer needs GC protection.
+    func removeCompletedDownloadRecord(for episodeId: String) {
+        var manifest = (UserDefaults.standard.dictionary(forKey: Self.completedManifestKey) as? [String: String]) ?? [:]
+        manifest.removeValue(forKey: episodeId)
+        UserDefaults.standard.set(manifest, forKey: Self.completedManifestKey)
+    }
+
+    /// Filenames of completed user-origin downloads — the orphan GC must
+    /// never delete these. Main thread only.
+    func completedUserDownloadFilenames() -> Set<String> {
+        let manifest = (UserDefaults.standard.dictionary(forKey: Self.completedManifestKey) as? [String: String]) ?? [:]
+        return Set(manifest.values)
+    }
+
+    /// Drop manifest entries whose file the GC just deleted, so the manifest
+    /// can't accumulate references to files that no longer exist. Main thread
+    /// only. (In normal operation the GC never deletes a manifest-protected
+    /// file — this is defensive consistency, not a hot path.)
+    func removeManifestEntries(pointingTo deletedFilenames: Set<String>) {
+        var manifest = (UserDefaults.standard.dictionary(forKey: Self.completedManifestKey) as? [String: String]) ?? [:]
+        let stale = manifest.filter { deletedFilenames.contains($0.value) }
+        guard !stale.isEmpty else { return }
+        for (episodeId, filename) in stale {
+            manifest.removeValue(forKey: episodeId)
+            logger.info("Removed manifest entry for deleted file: \(episodeId) → \(filename)")
+        }
+        UserDefaults.standard.set(manifest, forKey: Self.completedManifestKey)
+    }
+
     private func processQueue() {
         guard downloadTasks.count < maxConcurrentDownloads,
               !downloadQueue.isEmpty else { return }
         let next = downloadQueue.removeFirst()
-        startDownload(episodeId: next.episodeId, url: next.url, title: next.title)
+        startDownload(episodeId: next.episodeId, url: next.url, title: next.title, origin: next.origin)
     }
     
     // MARK: - URLSessionDownloadDelegate
@@ -278,24 +324,12 @@ class WatchDownloadManager: NSObject, ObservableObject, URLSessionDownloadDelega
         
         let fileManager = FileManager.default
         let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        
-        // Sanitize episode ID to create a valid filename
-        let sanitizedId = episodeId
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: ":", with: "_")
-            .replacingOccurrences(of: "?", with: "_")
-            .replacingOccurrences(of: "&", with: "_")
-            .replacingOccurrences(of: "=", with: "_")
-            .replacingOccurrences(of: " ", with: "_")
-        
-        let filename: String
-        if sanitizedId.count > 100 {
-            let hash = episodeId.data(using: .utf8)?.hashValue ?? Int.random(in: 0..<Int.max)
-            filename = "episode_\(abs(hash)).mp3"
-        } else {
-            filename = "\(sanitizedId).mp3"
-        }
-        
+
+        // Deterministic filename — hashValue is process-seeded, so deriving
+        // the name from it meant a relaunch could re-download the same
+        // episode under a second filename.
+        let filename = WatchDownloadHygiene.filename(forEpisodeId: episodeId)
+
         let destinationURL = documentsURL.appendingPathComponent(filename)
         
         // CRITICAL: For background URLSessions, the temp file at `location` is
@@ -314,6 +348,15 @@ class WatchDownloadManager: NSObject, ObservableObject, URLSessionDownloadDelega
                 self.stallTimers[episodeId]?.invalidate()
                 self.stallTimers.removeValue(forKey: episodeId)
                 self.lastBytesReceived.removeValue(forKey: episodeId)
+                self.episodeInfo.removeValue(forKey: episodeId)
+                // Read the persisted origin BEFORE registry cleanup removes it.
+                if let origin = self.downloadOrigin(for: episodeId) {
+                    self.recordCompletedDownload(episodeId: episodeId, filename: filename, origin: origin)
+                } else {
+                    self.logger.warning("No persisted origin for completed download \(episodeId) — treating as user download so it can't be GC'd")
+                    self.recordCompletedDownload(episodeId: episodeId, filename: filename, origin: .user)
+                }
+                self.removeDownloadRegistryEntry(for: episodeId)
                 self.onDownloadComplete?(episodeId, filename)
                 self.processQueue()
             }
@@ -322,6 +365,8 @@ class WatchDownloadManager: NSObject, ObservableObject, URLSessionDownloadDelega
             DispatchQueue.main.async {
                 self.downloadTasks.removeValue(forKey: episodeId)
                 self.activeDownloads.removeValue(forKey: episodeId)
+                self.episodeInfo.removeValue(forKey: episodeId)
+                self.removeDownloadRegistryEntry(for: episodeId)
                 self.processQueue()
             }
         }
@@ -351,10 +396,12 @@ class WatchDownloadManager: NSObject, ObservableObject, URLSessionDownloadDelega
             self.stallTimers[episodeId]?.invalidate()
             self.stallTimers.removeValue(forKey: episodeId)
             self.lastBytesReceived.removeValue(forKey: episodeId)
+            self.episodeInfo.removeValue(forKey: episodeId)
+            self.removeDownloadRegistryEntry(for: episodeId)
             self.processQueue()
         }
     }
-    
+
     /// Called by the system when all background session events have been delivered.
     nonisolated func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
         DispatchQueue.main.async {
@@ -374,7 +421,18 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     @Published var episodes: [WatchEpisode] = []
     @Published var playbackSpeed: Double = 1.0
     @Published var positionSyncInterval: Double = 30.0
-    
+    /// User-configured skip intervals, synced from the iPhone's SettingsManager
+    /// (skip-interval parity). Defaults mirror the iPhone's defaults.
+    @Published var skipForwardSeconds: Int = UserDefaults.standard.object(forKey: "skipForwardSeconds") as? Int ?? 30
+    @Published var skipBackwardSeconds: Int = UserDefaults.standard.object(forKey: "skipBackwardSeconds") as? Int ?? 15
+    /// Tracks WCSession reachability so views can distinguish "still loading"
+    /// from "the phone is unreachable" instead of spinning forever.
+    @Published var isPhoneReachable: Bool = false
+    /// Feed URLs whose most recent episode-list request failed (e.g. transfer
+    /// timeout). Lets the episodes view resolve to an error state instead of
+    /// spinning forever when the request errors after being sent.
+    @Published var episodeRequestFailed: Set<String> = []
+
     // Remote Control State
     @Published var remoteTitle: String = "Not Playing"
     @Published var remoteArtist: String = ""
@@ -389,9 +447,6 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     @Published var recentEpisodes: [WatchEpisode] = []
     /// Maximum number of recently updated episodes to display on watch.
     static let recentEpisodesLimit = 10
-    
-    // Track pending downloads (from iPhone) to show UI state if needed
-    @Published var pendingDownloads: Set<String> = []
     
     // On-device download manager
     let downloadManager = WatchDownloadManager.shared
@@ -424,17 +479,33 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     /// Guards against @Published mutations before SwiftUI's observation is ready.
     /// See: Intermittent crash in YourPodsWatch_Watch_AppApp.$main()
     private var hasBeenActivated = false
+
+    /// Whether loadPersistedData() has completed in this process. The orphan
+    /// GC must never run before this: a cold `.appRefresh` background launch
+    /// skips onAppear (and therefore loadPersistedData), so episodes/
+    /// recentEpisodes/libraryEpisodes are all empty — an ungated GC would
+    /// classify every downloaded file as an orphan and mass-delete them.
+    /// Main thread only (set in loadPersistedData's main-queue completion,
+    /// read from handleQueueUpdate which is main-confined).
+    ///
+    /// Named distinctly from `YourPodsWatchApp`'s `@State hasLoadedPersistedData`
+    /// (a different flag, same era) to end the duplicate-identifier confusion (W26).
+    private var persistedDataLoaded = false
+
+    /// Last context applied via refreshFromApplicationContext — skip identical
+    /// re-processing on every scene activation (full queue rebuild + persistence).
+    private var lastProcessedContext: NSDictionary?
     
     override init() {
         super.init()
-        // CRASH FIX: Do NOT call setupSession() or setupBackgroundRefreshHandler()
-        // here. When this singleton is created as `private let ... = .shared` in the
-        // App struct, init() runs BEFORE SwiftUI evaluates body and wires observation.
-        // WCSession.activate() can deliver pending applicationContext immediately,
-        // mutating @Published properties on an un-observed ObservableObject
+        // CRASH FIX: Do NOT call setupSession() here. When this singleton is
+        // created as `private let ... = .shared` in the App struct, init() runs
+        // BEFORE SwiftUI evaluates body and wires observation. WCSession.activate()
+        // can deliver pending applicationContext immediately, mutating @Published
+        // properties on an un-observed ObservableObject
         // → double-free / use-after-free in Combine → intermittent crash at $main().
         //
-        // These are now called from activate(), invoked by onAppear.
+        // This is now called from activate(), invoked by onAppear.
         
         // CAROUSEL FIX: Do NOT load UserDefaults data here.
         // Synchronous JSON decoding of large queues during init() blocks
@@ -458,7 +529,6 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         }
         hasBeenActivated = true
         setupSession()
-        setupBackgroundRefreshHandler()
         logger.info("WatchSessionManager activated from onAppear")
     }
     
@@ -482,6 +552,9 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 if let library { self.library = library }
                 if let recent { self.recentEpisodes = recent }
                 if let interval { self.positionSyncInterval = max(interval, 10.0) }
+                // The load has actually applied — only now is the orphan GC
+                // allowed to trust the in-memory lists as "everything we know".
+                self.persistedDataLoaded = true
             }
         }
     }
@@ -512,20 +585,6 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         }
     }
     
-    /// Listen for background refresh notifications from BackgroundRefreshManager.
-    private func setupBackgroundRefreshHandler() {
-        NotificationCenter.default.addObserver(
-            forName: .backgroundQueueRefresh,
-            object: nil,
-            queue: .main
-        ) { [weak self] notification in
-            if let queue = notification.userInfo?["queue"] as? [[String: Any]] {
-                self?.logger.info("Processing background queue refresh with \(queue.count) items")
-                self?.handleQueueUpdate(queue)
-            }
-        }
-    }
-
     /// Re-read the latest `receivedApplicationContext` and process it.
     ///
     /// **Why this is needed:** `WCSession.didReceiveApplicationContext` fires
@@ -547,7 +606,14 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             logger.debug("No application context to refresh from")
             return
         }
-        
+
+        let snapshot = context as NSDictionary
+        guard snapshot != lastProcessedContext else {
+            logger.debug("Context unchanged since last processing — skipping")
+            return
+        }
+        lastProcessedContext = snapshot
+
         logger.info("Refreshing from receivedApplicationContext on foreground resume")
         
         // Re-process using the same delegate path
@@ -572,14 +638,27 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             self.positionSyncInterval = Double(max(interval, 10))
             self.savePositionSyncInterval()
         }
-        
+
         if let wifiOnly = context["wifiOnly"] as? Bool {
             self.downloadManager.updateNetworkPolicy(wifiOnly: wifiOnly)
         }
+
+        if let fwd = context["skipForwardSeconds"] as? Int {
+            self.skipForwardSeconds = fwd
+            UserDefaults.standard.set(fwd, forKey: "skipForwardSeconds")
+        }
+        if let back = context["skipBackwardSeconds"] as? Int {
+            self.skipBackwardSeconds = back
+            UserDefaults.standard.set(back, forKey: "skipBackwardSeconds")
+        }
     }
 
+    /// Apply a queue payload (from applicationContext, a refresh_queue reply,
+    /// or a background refresh). Main thread only.
+    func applyQueueData(_ queue: [[String: Any]]) {
+        handleQueueUpdate(queue)
+    }
 
-    
     /// Request fresh queue data from the iPhone.
     func requestQueueRefresh() {
         guard WCSession.default.isReachable else {
@@ -609,7 +688,10 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             logger.warning("No stream URL available for: \(episode.title)")
             return
         }
-        downloadManager.startDownload(episodeId: episode.id, url: streamUrl, title: episode.title)
+        // All downloadOnWatch call sites are explicit user taps (player,
+        // remote player, library episode rows) — user origin, so the file is
+        // manifest-protected from the orphan GC until explicitly deleted.
+        downloadManager.startDownload(episodeId: episode.id, url: streamUrl, title: episode.title, origin: .user)
     }
     
     func cancelOnWatchDownload(episodeId: String) {
@@ -624,25 +706,32 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         return downloadManager.activeDownloads[episodeId] ?? 0.0
     }
     
+    /// Link a completed download into every list that might display the
+    /// episode. Previously this only searched `episodes` (the queue), so
+    /// Library and Recently-Updated downloads never got their localPath —
+    /// the download completed but the episode still showed as not-downloaded.
     private func updateEpisodeLocalPath(episodeId: String, localPath: String) {
+        var linked = false
         if let index = episodes.firstIndex(where: { $0.id == episodeId }) {
-            let old = episodes[index]
-            let updated = WatchEpisode(
-                id: old.id,
-                title: old.title,
-                album: old.album,
-                artist: old.artist,
-                duration: old.duration,
-                localPath: localPath,
-                streamUrl: old.streamUrl,
-                artUri: old.artUri,
-                isAvailableOnPhone: old.isAvailableOnPhone,
-                chapters: old.chapters,
-                position: old.position
-            )
-            episodes[index] = updated
+            episodes[index] = episodes[index].with(localPath: localPath)
             saveEpisodes()
-            logger.info("Updated episode with local path: \(updated.title)")
+            linked = true
+        }
+        if let recentIndex = recentEpisodes.firstIndex(where: { $0.id == episodeId }) {
+            recentEpisodes[recentIndex] = recentEpisodes[recentIndex].with(localPath: localPath)
+            saveRecentEpisodes()
+            linked = true
+        }
+        for (feedUrl, feedEpisodes) in libraryEpisodes {
+            if let i = feedEpisodes.firstIndex(where: { $0.id == episodeId }) {
+                libraryEpisodes[feedUrl]?[i] = feedEpisodes[i].with(localPath: localPath)
+                linked = true
+            }
+        }
+        if linked {
+            logger.info("Linked download to episode \(episodeId): \(localPath)")
+        } else {
+            logger.debug("Download completed for \(episodeId) but it is not in any current list")
         }
     }
     
@@ -661,27 +750,27 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 logger.info("Deleted local file: \(localPath)")
             }
             
-            // Update episode to clear localPath
+            // Clear localPath everywhere it was linked (queue, recently-updated,
+            // library) — mirrors updateEpisodeLocalPath's linking so a deleted
+            // file doesn't leave a stale "downloaded" state in another list.
             if let index = episodes.firstIndex(where: { $0.id == episode.id }) {
-                let old = episodes[index]
-                let updated = WatchEpisode(
-                    id: old.id,
-                    title: old.title,
-                    album: old.album,
-                    artist: old.artist,
-                    duration: old.duration,
-                    localPath: nil, // Clear local path
-                    streamUrl: old.streamUrl,
-                    artUri: old.artUri,
-                    isAvailableOnPhone: old.isAvailableOnPhone,
-                    chapters: old.chapters,
-                    position: old.position
-                )
-                episodes[index] = updated
+                episodes[index] = episodes[index].with(localPath: nil)
                 saveEpisodes()
             }
-            
+            if let recentIndex = recentEpisodes.firstIndex(where: { $0.id == episode.id }) {
+                recentEpisodes[recentIndex] = recentEpisodes[recentIndex].with(localPath: nil)
+                saveRecentEpisodes()
+            }
+            for (feedUrl, feedEpisodes) in libraryEpisodes {
+                if let i = feedEpisodes.firstIndex(where: { $0.id == episode.id }) {
+                    libraryEpisodes[feedUrl]?[i] = feedEpisodes[i].with(localPath: nil)
+                }
+            }
+
             downloadManager.completedDownloads.remove(episode.id)
+            // Explicit user delete — drop the manifest protection so the file
+            // (already removed above) can't be resurrected as "referenced".
+            downloadManager.removeCompletedDownloadRecord(for: episode.id)
         } catch {
             logger.error("Failed to delete local file: \(error.localizedDescription)")
         }
@@ -756,8 +845,17 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     
     func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
         logger.info("Watch Session activated: \(activationState.rawValue)")
+        DispatchQueue.main.async {
+            self.isPhoneReachable = session.isReachable
+        }
     }
-    
+
+    func sessionReachabilityDidChange(_ session: WCSession) {
+        DispatchQueue.main.async {
+            self.isPhoneReachable = session.isReachable
+        }
+    }
+
     // Handle Application Context (Queue List Updates & Playback Info)
     func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String : Any]) {
         DispatchQueue.main.async {
@@ -789,9 +887,23 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             if let wifiOnly = applicationContext["wifiOnly"] as? Bool {
                 self.downloadManager.updateNetworkPolicy(wifiOnly: wifiOnly)
             }
+
+            // Handle skip-interval parity settings from iPhone
+            if let fwd = applicationContext["skipForwardSeconds"] as? Int {
+                self.skipForwardSeconds = fwd
+                UserDefaults.standard.set(fwd, forKey: "skipForwardSeconds")
+            }
+            if let back = applicationContext["skipBackwardSeconds"] as? Int {
+                self.skipBackwardSeconds = back
+                UserDefaults.standard.set(back, forKey: "skipBackwardSeconds")
+            }
+
+            // Mark this payload as processed so a subsequent scene activation
+            // (which re-reads receivedApplicationContext) skips it as unchanged.
+            self.lastProcessedContext = applicationContext as NSDictionary
         }
     }
-    
+
     // Handle incoming messages (library data, episodes)
     func session(_ session: WCSession, didReceiveMessage message: [String : Any]) {
         DispatchQueue.main.async {
@@ -838,60 +950,62 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         }
     }
     
-    func requestDownload(for episodeId: String) {
-        guard WCSession.default.isReachable else { return }
-        logger.info("Requesting download for \(episodeId)")
-        pendingDownloads.insert(episodeId)
-        
-        WCSession.default.sendMessage([
-            "command": "request_download",
-            "episodeId": episodeId
-        ], replyHandler: nil) { [self] error in
-            logger.error("Error requesting download: \(error.localizedDescription)")
-            DispatchQueue.main.async {
-                self.pendingDownloads.remove(episodeId)
+    /// Outstanding queued progress transfer per episode. Superseding a position
+    /// must only cancel THIS episode's pending transfer — a single shared slot
+    /// cancelled the previous episode's final position during offline
+    /// multi-episode listening.
+    private var progressTransfers: [String: WCSessionUserInfoTransfer] = [:]
+
+    func sendProgress(episodeId: String, position: Int) {
+        let payload = WatchWireFormat.encodeAction(
+            .updateProgress, episodeId: episodeId, position: position,
+            sentAt: Date().timeIntervalSince1970)
+        if WCSession.default.isReachable {
+            WCSession.default.sendMessage(payload, replyHandler: nil) { [weak self] error in
+                // Live send failed — fall back to the durable channel.
+                self?.logger.error("Progress send failed, queueing transfer: \(error.localizedDescription)")
+                DispatchQueue.main.async { self?.queueProgressTransfer(payload, episodeId: episodeId) }
             }
+        } else {
+            queueProgressTransfer(payload, episodeId: episodeId)
         }
     }
-    
-    func removeFromQueue(for episodeId: String) {
-        guard WCSession.default.isReachable else { return }
-        logger.info("Requesting remove from queue for \(episodeId)")
-        
-        WCSession.default.sendMessage([
-            "command": "remove_from_queue",
-            "episodeId": episodeId
-        ], replyHandler: nil)
-        
-        // Optimistically remove from local list
+
+    private func queueProgressTransfer(_ payload: [String: Any], episodeId: String) {
+        progressTransfers[episodeId]?.cancel()
+        progressTransfers[episodeId] = WCSession.default.transferUserInfo(payload)
+    }
+
+    /// Send an action durably: live message when reachable (with durable
+    /// fallback on error), queued transfer otherwise. Action transfers are
+    /// never cancelled/superseded.
+    private func sendActionDurably(_ payload: [String: Any]) {
+        if WCSession.default.isReachable {
+            WCSession.default.sendMessage(payload, replyHandler: nil) { [weak self] error in
+                self?.logger.error("Action send failed, queueing transfer: \(error.localizedDescription)")
+                _ = WCSession.default.transferUserInfo(payload)
+            }
+        } else {
+            _ = WCSession.default.transferUserInfo(payload)
+        }
+    }
+
+    func markAsPlayed(for episodeId: String) {
+        logger.info("Requesting mark as played for \(episodeId)")
+        sendActionDurably(WatchWireFormat.encodeAction(
+            .markAsPlayed, episodeId: episodeId, position: nil,
+            sentAt: Date().timeIntervalSince1970))
         DispatchQueue.main.async {
             self.episodes.removeAll(where: { $0.id == episodeId })
             self.saveEpisodes()
         }
     }
-    
-    func sendProgress(episodeId: String, position: Int) {
-        guard WCSession.default.isReachable else { return }
-        WCSession.default.sendMessage([
-            "command": "update_progress",
-            "episodeId": episodeId,
-            "position": position
-        ], replyHandler: nil) { [self] error in
-            logger.error("Error sending progress: \(error.localizedDescription)")
-        }
-    }
 
-    func markAsPlayed(for episodeId: String) {
-        guard WCSession.default.isReachable else { return }
-        logger.info("Requesting mark as played for \(episodeId)")
-        
-        WCSession.default.sendMessage([
-            "command": "mark_as_played",
-            "episodeId": episodeId
-        ], replyHandler: nil)
-        
-        // Optimistically remove/update? Usually playing means it's done. 
-        // Let's remove it from queue as standard behavior for "Mark as Played" in this app context often means "Archived"
+    func removeFromQueue(for episodeId: String) {
+        logger.info("Requesting remove from queue for \(episodeId)")
+        sendActionDurably(WatchWireFormat.encodeAction(
+            .removeFromQueue, episodeId: episodeId, position: nil,
+            sentAt: Date().timeIntervalSince1970))
         DispatchQueue.main.async {
             self.episodes.removeAll(where: { $0.id == episodeId })
             self.saveEpisodes()
@@ -899,63 +1013,103 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     }
 
     private func handleQueueUpdate(_ queueData: [[String: Any]]) {
-        var newEpisodes: [WatchEpisode] = []
-        
-        // 1. Build list from Context (Order matters!)
-        for item in queueData {
-            guard let id = item["id"] as? String else { continue }
-            
-            // Try to find existing episode to preserve local path if we had it
-            let existing = self.episodes.first(where: { $0.id == id })
-            
-            // If we have a local path but the file is gone, reset it?
-            // For now, assume if we have a path, it's good.
-            
-            // Parse chapters if present
-            var parsedChapters: [WatchChapter]? = nil
-            if let chaptersData = item["chapters"] as? [[String: Any]] {
-                parsedChapters = chaptersData.compactMap { chData in
-                    guard let startTime = chData["startTime"] as? Double,
-                          let title = chData["title"] as? String else { return nil }
-                    return WatchChapter(
-                        startTime: startTime,
-                        title: title,
-                        img: chData["img"] as? String,
-                        url: chData["url"] as? String
-                    )
-                }
-                if parsedChapters?.isEmpty == true { parsedChapters = nil }
-            }
-            
-            // Use the server position, but preserve local position if it's ahead
-            // (e.g., watch was actively playing this episode)
-            let serverPosition = item["position"] as? Int ?? 0
-            let localPosition = existing?.position ?? 0
-            let effectivePosition = max(serverPosition, localPosition)
-            
-            let newEpisode = WatchEpisode(
-                id: id,
-                title: item["title"] as? String ?? "Unknown",
-                album: item["album"] as? String ?? "",
-                artist: item["artist"] as? String ?? "",
-                duration: item["duration"] as? Int ?? 0,
-                localPath: existing?.localPath, // Keep path if we had it, otherwise nil
-                streamUrl: item["url"] as? String,
-                artUri: item["artUri"] as? String ?? existing?.artUri,
-                isAvailableOnPhone: item["isAvailableOnPhone"] as? Bool ?? false,
-                chapters: parsedChapters ?? existing?.chapters,
-                position: effectivePosition
-            )
-            newEpisodes.append(newEpisode)
-        }
-        
+        // Parse+merge delegated to WatchQueueMerger — decodes
+        // via WatchWireFormat.decodeQueueItem (the single source of truth) and
+        // preserves watch-local state (localPath, and chapters/artUri when the
+        // payload omits them) from the existing list, exactly as this method
+        // did inline before.
+        let newEpisodes = WatchQueueMerger.merge(rawQueue: queueData, existing: self.episodes)
+
         self.episodes = newEpisodes
-        self.saveEpisodes()
-        
-        // Auto-download episodes flagged for it
-        self.processAutoDownloads(queueData)
+
+        // Cold-launch gate: on a cold `.appRefresh` background launch, onAppear (and
+        // therefore loadPersistedData) never ran, so `existing` above was empty
+        // and WatchQueueMerger had nothing to preserve localPath from — every
+        // merged episode's localPath is nil. Persisting that now would
+        // overwrite the good on-disk "saved_episodes" list with a
+        // localPath-stripped one, and auto-downloading over it would re-fetch
+        // files that already exist on disk, over the radio, on every
+        // background wake. Skip both; a later foreground load
+        // (loadPersistedData) restores the authoritative list and its
+        // localPaths. In-memory `episodes` above and everything below (orphan
+        // GC — which self-gates on the same flag — and the complication
+        // write) still run unconditionally so the queue UI/complication
+        // reflect the fresh data immediately.
+        if persistedDataLoaded {
+            self.saveEpisodes()
+
+            // Auto-download episodes flagged for it
+            self.processAutoDownloads(queueData)
+        } else {
+            logger.debug("Skipping persistence/auto-downloads — persisted data not loaded (cold background launch)")
+        }
+
+        // Episodes leaving the queue (e.g. marked played, removed) can leave
+        // their downloaded file behind with nothing referencing it anymore.
+        self.collectOrphanedDownloads()
+
+        let upNext = newEpisodes.first(where: { $0.id != WatchAudioManager.shared.currentEpisode?.id })
+        WatchComplicationRefresher.update { data in
+            data.queueCount = newEpisodes.count
+            data.upNextTitle = upNext?.title
+            data.upNextPodcast = upNext?.album
+        }
     }
-    
+
+    /// Delete audio files no list references and no download is producing.
+    ///
+    /// Referenced = loaded-list localPaths ∪ current episode ∪ in-flight
+    /// registry ∪ user-download manifest. Semantics: queue auto-downloads
+    /// follow queue membership; user-initiated downloads never silently
+    /// vanish (explicit delete only).
+    private func collectOrphanedDownloads() {
+        // C1 gate: on a cold `.appRefresh` background launch, onAppear (and
+        // therefore loadPersistedData) never ran — the in-memory lists are
+        // empty, NOT authoritative. Running the GC then would delete every
+        // downloaded file. Called from handleQueueUpdate (main-confined),
+        // matching where the flag is set.
+        guard persistedDataLoaded else {
+            logger.debug("Skipping orphan GC — persisted data not loaded")
+            return
+        }
+        persistenceQueue.async { [weak self] in
+            guard let self else { return }
+            let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            guard let files = try? FileManager.default.contentsOfDirectory(atPath: docs.path) else {
+                self.logger.warning("Orphan GC skipped — could not list Documents directory")
+                return
+            }
+
+            var referenced = Set<String>()
+            DispatchQueue.main.sync {
+                referenced.formUnion(self.episodes.compactMap(\.localPath))
+                referenced.formUnion(self.recentEpisodes.compactMap(\.localPath))
+                for eps in self.libraryEpisodes.values { referenced.formUnion(eps.compactMap(\.localPath)) }
+                if let current = WatchAudioManager.shared.currentEpisode?.localPath { referenced.insert(current) }
+                // User-initiated downloads (I1): libraryEpisodes is never
+                // persisted and the other lists may not mention the episode,
+                // so the persistent manifest is what keeps a user's download
+                // alive across relaunches. Manifest access is main-confined.
+                referenced.formUnion(self.downloadManager.completedUserDownloadFilenames())
+            }
+            let registry = (UserDefaults.standard.dictionary(forKey: "watch_download_registry") as? [String: String]) ?? [:]
+            referenced.formUnion(registry.values)   // in-flight downloads
+
+            var deleted = Set<String>()
+            for orphan in WatchDownloadHygiene.orphans(existingFiles: files, referenced: referenced) {
+                try? FileManager.default.removeItem(at: docs.appendingPathComponent(orphan))
+                self.logger.info("Removed orphaned download: \(orphan)")
+                deleted.insert(orphan)
+            }
+            if !deleted.isEmpty {
+                // Manifest writes are main-confined — hop before mutating.
+                DispatchQueue.main.async {
+                    self.downloadManager.removeManifestEntries(pointingTo: deleted)
+                }
+            }
+        }
+    }
+
     private func processAutoDownloads(_ queueData: [[String: Any]]) {
         for item in queueData {
             guard let autoDownload = item["autoDownload"] as? Bool, autoDownload,
@@ -975,7 +1129,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             // No manual NWPathMonitor check needed.
             
             logger.info("Starting auto-download for \(title)")
-            downloadManager.startDownload(episodeId: id, url: url, title: title)
+            downloadManager.startDownload(episodeId: id, url: url, title: title, origin: .queue)
         }
     }
     
@@ -1002,23 +1156,22 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     private func handleEpisodesForFeed(feedUrl: String, episodesData: [[String: Any]]) {
         var episodes: [WatchEpisode] = []
         for item in episodesData {
-            guard let guid = item["guid"] as? String else { continue }
-            let episode = WatchEpisode(
-                id: guid,
-                title: item["title"] as? String ?? "Unknown",
+            guard let decoded = WatchWireFormat.decodeEpisodeListItem(item) else { continue }
+            episodes.append(WatchEpisode(
+                id: decoded.guid,
+                title: decoded.title,
                 album: "",
                 artist: "",
-                duration: item["duration"] as? Int ?? 0,
+                duration: decoded.duration,
                 localPath: nil,
-                streamUrl: item["audioUrl"] as? String,
-                artUri: item["imageUrl"] as? String,
+                streamUrl: decoded.audioUrl,
+                artUri: decoded.imageUrl,
                 isAvailableOnPhone: false,
                 chapters: nil,
-                position: 0
-            )
-            episodes.append(episode)
+                position: 0))
         }
         self.libraryEpisodes[feedUrl] = episodes
+        self.episodeRequestFailed.remove(feedUrl)
         logger.info("Got \(episodes.count) episodes for feed \(feedUrl)")
     }
     
@@ -1041,11 +1194,18 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             logger.debug("iPhone not reachable for episodes request")
             return
         }
+        // Called from view callbacks (main thread) — reset any previous failure
+        // for this feed so the view returns to its loading state.
+        episodeRequestFailed.remove(feedUrl)
         WCSession.default.sendMessage(
             ["command": "request_episodes", "feedUrl": feedUrl],
             replyHandler: nil,
             errorHandler: { [self] error in
                 logger.error("Episodes request failed: \(error.localizedDescription)")
+                // errorHandler arrives on a non-main queue — hop before mutating @Published.
+                DispatchQueue.main.async {
+                    self.episodeRequestFailed.insert(feedUrl)
+                }
             }
         )
     }
@@ -1071,22 +1231,22 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         let dateFormatter = ISO8601DateFormatter()
         
         for item in episodesData {
-            guard let id = item["id"] as? String else { continue }
-            
+            guard let decoded = WatchWireFormat.decodeEpisodeListItem(item) else { continue }
+
             var pubDate: Date? = nil
             if let dateStr = item["pubDate"] as? String {
                 pubDate = dateFormatter.date(from: dateStr)
             }
-            
+
             let episode = WatchEpisode(
-                id: id,
-                title: item["title"] as? String ?? "Unknown",
+                id: decoded.guid,
+                title: decoded.title,
                 album: item["podcastTitle"] as? String ?? "",
                 artist: item["podcastTitle"] as? String ?? "",
-                duration: item["duration"] as? Int ?? 0,
+                duration: decoded.duration,
                 localPath: nil,
-                streamUrl: item["audioUrl"] as? String,
-                artUri: item["imageUrl"] as? String,
+                streamUrl: decoded.audioUrl,
+                artUri: decoded.imageUrl,
                 isAvailableOnPhone: true,
                 chapters: nil,
                 position: 0,
@@ -1134,7 +1294,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     
     private func handleReceivedFile(file: WCSessionFile, metadata: [String: Any]) {
         let destURL = getDocumentsDirectory().appendingPathComponent(file.fileURL.lastPathComponent)
-        
+
         DispatchQueue.global(qos: .background).async {
             let fileManager = FileManager.default
             do {
@@ -1144,34 +1304,15 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 try fileManager.moveItem(at: file.fileURL, to: destURL)
 
                 let id = metadata["id"] as? String ?? UUID().uuidString
+                let filename = file.fileURL.lastPathComponent
 
                 DispatchQueue.main.async {
-                    self.pendingDownloads.remove(id) // Clear pending state
-
-                    // We need to update the specific episode in our list with the new local path
-                    if let index = self.episodes.firstIndex(where: { $0.id == id }) {
-                        let old = self.episodes[index]
-                        let updated = WatchEpisode(
-                            id: old.id,
-                            title: old.title,
-                            album: old.album,
-                            artist: old.artist,
-                            duration: old.duration,
-                            localPath: file.fileURL.lastPathComponent,
-                            streamUrl: old.streamUrl,
-                            artUri: old.artUri,
-                            isAvailableOnPhone: old.isAvailableOnPhone,
-                            chapters: old.chapters,
-                            position: old.position
-                        )
-                        self.episodes[index] = updated
-                        self.saveEpisodes()
-                        self.logger.info("Received and updated episode: \(updated.title)")
-                    } else {
-                        // If it wasn't in list (maybe synced in background?), add it?
-                        // Usually we only care about queue itms.
-                        self.logger.debug("Received file for episode not in queue: \(id)")
-                    }
+                    // W24: route through the same linking logic as an on-watch
+                    // download (updateEpisodeLocalPath) instead of hand-reconstructing
+                    // the episode — the hand-rolled version dropped pubDate/
+                    // podcastTitle/podcastArtUri and only ever checked `episodes`,
+                    // missing Library/Recently-Updated links.
+                    self.updateEpisodeLocalPath(episodeId: id, localPath: filename)
                 }
 
             } catch {

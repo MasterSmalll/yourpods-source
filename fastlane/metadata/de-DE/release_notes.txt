@@ -1,0 +1,41 @@
+YourPods spricht jetzt deine Sprache.
+
+Deutsch, Spanisch, Französisch, Italienisch und Niederländisch. Die App folgt der Sprache, die auf deinem Gerät eingestellt ist, und du kannst sie jederzeit in den Einstellungen wechseln. Jeder Bildschirm ist übersetzt – auch alles, was VoiceOver vorliest, und alles, was Siri dir antwortet. Datum, Dauer, Tempo und Prozentwerte folgen den Formaten deiner Region.
+
+Die Übersetzungen stammen von einer KI, und die App sagt das auch. Wenn YourPods zum ersten Mal in einer für dich neuen Sprache erscheint, erklärt ein Hinweis, dass wir KI zum Übersetzen aus dem Englischen einsetzen, dass manche Formulierung danebenliegen kann und wie du melden kannst, was sich falsch liest. Dieselbe Erklärung steht dauerhaft in den Einstellungen.
+
+NEU
+- Kapitelbilder und Kapitel direkt aus der Audiodatei gelesen – auch aus Dateien, für die andere Player gar keine Kapitel anzeigen
+- Notizen: Folgen beim Hören kommentieren und als Markdown, nach Obsidian oder nach Nextcloud exportieren
+- Ein vollständiger Kurzbefehle-Katalog für Automationen und Siri
+- Apple Watch: ein echter Player, mit der Systemseite „Aktuelle Wiedergabe“, Wiedergabegeschwindigkeit, Sleep-Timer und eigenen Sprungintervallen
+- Folgenansicht der Mediathek: alle Abos in einer einzigen, filterbaren Folgenliste durchblättern
+- Wiedergabe-Widget für den Home-Bildschirm sowie AirPlay- und Bluetooth-Ausgabewahl direkt im Mini-Player
+- Sind zwei Geräte uneins darüber, wo du in einer Folge stehst, fragt YourPods nach – und du kannst deine Antwort gleich dort zum Standard machen
+- Folgen überall ein- und ausblenden, nach Länge ausblenden und beim Abonnieren alte Folgen ausblenden
+- Podcasts gruppieren und einer Gruppe Vorrang in „Als Nächstes“ geben
+- Meine Daten exportieren
+- Liquid Glass Design unter iOS 26, mit vier Stilen zur Auswahl
+- Transkriptsuche, Folgensuche und Nextcloud Login Flow v2 mit 2FA und SSO
+- YourPods Pro gibt es jetzt als In-App-Abo. Es bleibt optional – alle Funktionen des Players stecken in der App, die du schon gekauft hast
+
+BEHOBEN
+- Gespielt-Status, Hörposition und „Als Nächstes“ stimmen auf allen Geräten überein: Eine im Web begonnene Folge läuft auf dem iPhone weiter, ein zurückgenommenes „gespielt“ bleibt zurückgenommen, und eine im Web beendete Folge hängt nicht mehr im Mini-Player
+- Eine Folge, die du mittendrin pausiert hast, markiert der Hintergrund-Sync nicht mehr als gespielt, und beim Überspringen gilt die übersprungene Folge nicht mehr als gespielt
+- Tippst du eine andere Folge an, verschwindet die bisher gehörte nicht mehr aus „Als Nächstes“
+- „Jetzt synchronisieren“ synchronisiert jetzt alles – bisher waren es nur zwei von sieben Dingen
+- Feeds aktualisieren sich zuverlässig beim Sync, beim Ziehen nach unten und im Hintergrund
+- Die Kernfunktionen der Apple-Watch-App laufen: Mediathek durchstöbern, Hintergrundaktualisierung, als gespielt markieren und die Komplikation
+- Die Widget-Tasten auf dem Home-Bildschirm steuern die Wiedergabe, statt die App zu öffnen, und das Widget zeigt wieder Cover
+- Die Wiedergabe bricht beim automatischen Wechsel zur nächsten Folge nicht mehr stumm ab, und Sperrbildschirm, Dynamic Island und CarPlay zeigen dabei das passende Cover
+- Notizen kommen im Web an, und das Löschen einer Notiz wird übernommen
+- Abstürze und Abbrüche im Hintergrund behoben, durch die Sync-Daten verloren gingen: beschädigte Datenbanken, Zwangsbeenden beim Wechsel in den Hintergrund und Watchdog-Timeouts
+- Die App beendet sich nicht mehr, wenn du auf „Käufe wiederherstellen“ oder „Abonnieren“ tippst
+
+SCHNELLER
+- Deutlich weniger Funkaktivität und Batterieverbrauch auf der Apple Watch während der Wiedergabe
+- Die RSS-Aktualisierung überspringt unveränderte Feeds, und unabhängige Sync-Schritte laufen parallel
+
+YourPods setzt jetzt iOS 18 voraus.
+
+Danke an alle, die uns geschrieben haben. Hilfe und Feature-Wünsche: https://asc.is/support/

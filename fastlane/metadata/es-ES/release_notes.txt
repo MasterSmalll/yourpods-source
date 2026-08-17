@@ -1,0 +1,41 @@
+YourPods ya habla tu idioma.
+
+Alemán, español, francés, italiano y neerlandés. La app adopta el idioma que ya tenga tu dispositivo, y puedes cambiarlo cuando quieras en Ajustes. Todas las pantallas están traducidas, incluido todo lo que VoiceOver lee en voz alta y todo lo que te responde Siri. Las fechas, las duraciones, las velocidades y los porcentajes siguen el formato de tu región.
+
+Las traducciones están hechas con IA, y la app lo dice. La primera vez que veas YourPods en un idioma nuevo para ti, un mensaje te explica que usamos IA para traducir desde el inglés, que alguna expresión puede sonar rara y cómo avisarnos de lo que no encaje. Esa misma explicación está siempre disponible en Ajustes.
+
+NOVEDADES
+- Imágenes de capítulo, y capítulos leídos directamente del archivo de audio, incluidos archivos en los que otros reproductores no muestran ningún capítulo
+- Notas: anota los episodios mientras escuchas y expórtalas a Markdown, Obsidian o Nextcloud
+- Un catálogo completo de acciones para Atajos y para Siri
+- Apple Watch: un reproductor de verdad, con la pantalla Reproduciendo ahora del sistema, control de velocidad, temporizador para dormir e intervalos de salto personalizados
+- Vista de episodios en la biblioteca: recorre todas tus suscripciones como una única lista de episodios que puedes filtrar
+- Widget de reproducción en la pantalla de inicio, y selección de salida AirPlay y Bluetooth desde el minirreproductor
+- Cuando dos dispositivos no coinciden en por dónde ibas, YourPods te pregunta, y puedes convertir tu respuesta en la opción por defecto desde ahí mismo
+- Oculta y muestra episodios desde cualquier sitio, ocúltalos por duración y oculta los antiguos al suscribirte
+- Agrupa tus podcasts y da prioridad a un grupo en A continuación
+- Exportar mis datos
+- Diseño Liquid Glass en iOS 26, con cuatro estilos a elegir
+- Búsqueda en las transcripciones, búsqueda de episodios e inicio de sesión con Nextcloud Login Flow v2, con 2FA y SSO
+- YourPods Pro ya está disponible como suscripción dentro de la app. Sigue siendo opcional: todas las funciones del reproductor están incluidas en la app que ya compraste
+
+CORREGIDO
+- El estado de reproducido, la posición y A continuación ya coinciden entre tus dispositivos: un episodio que empezaste en la web continúa en tu iPhone, quitarle la marca de reproducido se mantiene, y uno que terminaste en la web deja de aparecer en el minirreproductor
+- Un episodio que dejaste a medias ya no se marca como reproducido en una sincronización en segundo plano, y saltar al siguiente ya no marca el que te saltaste
+- Tocar otro episodio ya no borra de A continuación el que estabas escuchando
+- «Sincronizar ahora» ahora sincroniza todo: antes solo hacía dos de las siete cosas
+- Los feeds se actualizan de forma fiable al sincronizar, al deslizar para actualizar y en segundo plano
+- Ya funciona lo esencial de la app para Apple Watch: explorar la biblioteca, la actualización en segundo plano, marcar como reproducido y la complicación
+- Los botones del widget de la pantalla de inicio controlan la reproducción en lugar de abrir la app, y el widget vuelve a mostrar la carátula
+- La reproducción ya no se detiene sin avisar al pasar al siguiente episodio, y la carátula cambia con él en la pantalla bloqueada, en la Dynamic Island y en CarPlay
+- Las notas llegan a la web, y borrar una se propaga
+- Corregidos los fallos y los cierres en segundo plano que hacían perder la sincronización: bases de datos dañadas, cierres al suspenderse la app y tiempos de espera agotados
+- Corregido el cierre de la app al tocar Restaurar compras o Suscribirse
+
+MÁS RÁPIDO
+- Mucho menos consumo de red y de batería en el Apple Watch durante la reproducción
+- La actualización RSS se salta los feeds sin cambios, y los pasos de sincronización independientes van en paralelo
+
+YourPods ahora requiere iOS 18.
+
+Gracias a todas las personas que nos han escrito. Ayuda y sugerencias: https://asc.is/support/

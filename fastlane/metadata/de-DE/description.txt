@@ -1,0 +1,44 @@
+YourPods bringt Podcasts flüssig und sicher auf alle deine Geräte – bis ins Auto. Native Wiedergabe auf iPhone, iPad, Apple Watch und Apple CarPlay. Keine Werbung. Kein Tracking. Niemals.
+
+Deine Hörgewohnheiten gehören dir, deshalb behältst du die volle Kontrolle über deine Daten. Nutze ein sicheres, rein lokales Konto: Deine Mediathek bleibt blitzschnell und zu 100 % privat auf dem Gerät. Wer selbst hostet oder Wert auf Datenschutz legt, verbindet YourPods direkt mit einem gPodder-kompatiblen Server (etwa Nextcloud gPodder Sync, NextPod oder RePod). So synchronisierst du deine ganze Mediathek zwischen allen Geräten – zu deinen Bedingungen, ohne Clouds von Big Tech.
+
+Jetzt auf Englisch, Deutsch, Spanisch, Französisch, Italienisch und Niederländisch.
+
+DATENSCHUTZ, DEN DU SEHEN KANNST
+P3 – Privacy Preserving Playback entfernt Tracking-Weiterleitungen aus den Folgen-URLs, bevor dein Gerät überhaupt eine Verbindung aufbaut.
+
+SYNC NACH DEINEN REGELN
+Du entscheidest, wohin deine Daten gehen – oder ob sie dein Gerät überhaupt verlassen:
+- Tresor-Modus: Alles bleibt auf deinem Gerät. Kein Konto, kein Server.
+- Nextcloud / selbst gehostet: dein eigener gPodder-kompatibler Server, deine Kontrolle.
+- gpodder.net: kostenloser öffentlicher Sync, ganz ohne Servereinrichtung.
+- YourPods Cloud: Ein kostenloses Konto synchronisiert Abos und Hörpositionen zwischen deinen Geräten. YourPods Pro ergänzt Web-Player, Warteliste, Statistiken und Notizen-Sync – optional und nie nötig, um die gekaufte App zu nutzen.
+
+WIEDERGABE MIT ALLEM DRUM UND DRAN
+- Hörprofile pro Podcast: Tempo, Intro überspringen, Outro überspringen, Auto-Download und AutoPilot für die Warteliste
+- Kapitel direkt aus der Audiodatei gelesen, mit Kapitelbildern – dazu automatisch aus den Shownotes
+- Transkripte (SRT, VTT, JSON, Markdown, RTF, reiner Text), mit Suche
+- Notizen: Folgen beim Hören kommentieren und als Markdown, nach Obsidian oder Nextcloud exportieren
+- Stille kürzen und ein Sleep-Timer mit DriftOff-Modus
+- Folgen herunterladen und offline hören
+- Clevere Benachrichtigungen zu neuen Folgen, pro Podcast einstellbar
+- Folgen ausblenden und aufräumen, ohne sie als gespielt zu markieren
+
+MITTENDRIN IM APPLE-ÖKOSYSTEM
+• Ein Kauf, alle Geräte: einmal kaufen, auf iPhone, iPad und Apple Watch nutzen.
+• Apple Watch ohne Leine: ein vollwertiger Player am Handgelenk – Folgen offline laden, ohne iPhone, ideal fürs Training.
+• Siri & Kurzbefehle: ein kompletter Aktionskatalog fürs freihändige Hören und eigene Automationen.
+• CarPlay: eine rundum integrierte CarPlay-Oberfläche.
+• Home-Bildschirm-Widget, Dynamic Island und Sperrbildschirm: fühlt sich an, als hätte Apple die App selbst gebaut.
+
+TECHNIK
+YourPods ist Open Source. Keine Werbe-IDs. Keine Analyse-Dienste Dritter. Das Privacy Manifest legt offen, welche Daten erhoben werden – im Tresor-Modus lautet die Antwort: keine. Die vollständige Datenübersicht steht in den Einstellungen.
+• Private Feeds: passwortgeschützte Premium-RSS-Feeds (etwa von Patreon) sicher hinzufügen. Sie bleiben samt Zugangsdaten lokal und gehen an keinen Server.
+• Sync-Backend: optimiert für die Nextcloud-App gPodder Sync (apps.nextcloud.com/apps/gpoddersync). Andere gPodder-Dienste laufen womöglich auch, sind aber ungetestet.
+• Protokoll: implementiert Open Podcast Sync für Abonnements (SubscriptionDelta) und Aktionen (EpisodeAction).
+• Architektur: nativ in Swift und SwiftUI geschrieben. Die Wiedergabe läuft über AVQueuePlayer – mit lückenlosem Wechsel zur nächsten Folge und automatischer Wiederherstellung nach Streaming-Fehlern.
+• Podcast 2.0: vieles wird schon heute unterstützt, und wir bauen weiter aus.
+
+RIESIGES Dankeschön an unsere TestFlight-Tester!!
+Hilfe und Feature-Wünsche: https://asc.is/support/
+Datenschutzrichtlinie: https://yourpods.app/privacy

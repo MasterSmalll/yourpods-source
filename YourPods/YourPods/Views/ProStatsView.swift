@@ -255,10 +255,7 @@ struct ProStatsView: View {
     // MARK: - Formatting
 
     private func formatHours(_ secs: Double) -> String {
-        let h = Int(secs) / 3600
-        let m = (Int(secs) % 3600) / 60
-        if h > 0 { return "\(h)h \(m)m" }
-        return "\(m)m"
+        DurationFormatting.compact(secs)
     }
 
     private func formatMins(_ secs: Double) -> String {
@@ -272,7 +269,9 @@ struct ProStatsView: View {
     private func dailyTrendAccessibilityLabel(_ trend: [DailyTrendEntry]) -> String {
         let totalMins = Int(trend.reduce(0) { $0 + $1.listenTimeSec } / 60)
         let days = trend.count
-        return "Daily listening chart, \(days) days, \(totalMins) total minutes"
+        return String(localized: "a11y.stats.dailyTrendChart",
+                      defaultValue: "Daily listening chart, \(days) days, \(totalMins) total minutes",
+                      comment: "VoiceOver label for the daily listening chart. First argument is a day count, second a total in minutes.")
     }
 }
 
@@ -330,9 +329,11 @@ private struct StatCard: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 14)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .yourPodsGlass(role: .card, cornerRadius: 12)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(title), \(value)")
+        .accessibilityLabel(String(localized: "a11y.stats.card",
+                                   defaultValue: "\(title), \(value)",
+                                   comment: "VoiceOver label for a statistics card. Argument 1 is what is being measured, 2 the measurement — e.g. 'Episodes, 42'."))
     }
 }
 
@@ -353,6 +354,8 @@ private struct StatRow: View {
         }
         // Combine label + value into one VoiceOver element: "Total Listen Time, 2h 30m"
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(label), \(value)")
+        .accessibilityLabel(String(localized: "a11y.stats.row",
+                                   defaultValue: "\(label), \(value)",
+                                   comment: "VoiceOver label for a statistics row. Argument 1 is what is being measured, 2 the measurement — e.g. 'Total Listen Time, 2h 30m'."))
     }
 }

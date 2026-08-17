@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Episode list for a specific podcast.
+/// Episode list for a specific podcast. Port of episode_list_screen.dart.
 struct PodcastDetailView: View {
     @Environment(PodcastManager.self) private var podcastManager
     @Environment(PlayerManager.self) private var playerManager
@@ -23,7 +23,7 @@ struct PodcastDetailView: View {
     private var allEpisodes: [Episode] {
         podcast.episodes
             .filter { !$0.isStale }
-            .sorted { ($0.pubDate ?? .distantPast) > ($1.pubDate ?? .distantPast) }
+            .sorted(by: episodesByFeedOrder)
     }
     
     private var visibleEpisodes: [Episode] {
@@ -96,7 +96,9 @@ struct PodcastDetailView: View {
                                 .foregroundStyle(.secondary)
                         }
                         if let publisher = podcast.publisher, publisher != podcast.author {
-                            Text("by \(publisher)")
+                            Text(String(localized: "podcast.byPublisher",
+                                        defaultValue: "by \(publisher)",
+                                        comment: "Attribution under a podcast title, as in 'by NPR'. Argument 1 is the publisher name and is never translated. German renders this as 'von NPR'."))
                                 .font(.caption)
                                 .foregroundStyle(.tertiary)
                         }
@@ -105,7 +107,7 @@ struct PodcastDetailView: View {
                                 .font(.caption)
                                 .foregroundStyle(.tertiary)
                             if playedCount > 0 {
-                                Text("·")
+                                Text(verbatim: "·")
                                     .foregroundStyle(.tertiary)
                                 Text("\(playedCount) played")
                                     .font(.caption)
@@ -197,18 +199,22 @@ struct PodcastDetailView: View {
             }
             
             // Episodes
-            Section("\(visibleEpisodes.count) Episodes") {
+            Section("\(visibleEpisodes.count) episodes") {
                 ForEach(visibleEpisodes) { episode in
                     let isHidden = podcastManager.episodeActionSync.isHidden(guid: episode.guid)
+                    let isInQueue = playerManager.queuedEpisodeGuids.contains(episode.guid)
                     EpisodeRow(
                         episode: episode,
                         isPlaying: episode.guid == playerManager.currentEpisodeGuid,
                         isDownloaded: downloadManager.isDownloaded(episode.guid),
                         isDownloading: downloadManager.activeDownloads[episode.guid] != nil,
                         isHidden: isHidden,
+                        isInQueue: isInQueue,
                         onDownloadTap: { downloadAction(episode) },
                         onMenuAction: { action in handleMenuAction(action, episode: episode) },
-                        onTap: { episodeSheetItem = EpisodeSheetItem(episode: episode) }
+                        onTap: { episodeSheetItem = EpisodeSheetItem(episode: episode) },
+                        swipeLeading: settingsManager.episodeSwipeLeading,
+                        swipeTrailing: settingsManager.episodeSwipeTrailing
                     )
                     .opacity(isHidden && showHidden ? 0.5 : 1.0)
                     .contextMenu {
@@ -218,8 +224,14 @@ struct PodcastDetailView: View {
                         Button { handleMenuAction(.playNext, episode: episode) } label: {
                             Label("Play Next", systemImage: "text.insert")
                         }
-                        Button { handleMenuAction(.addToQueue, episode: episode) } label: {
-                            Label("Add to Queue", systemImage: "text.append")
+                        if isInQueue {
+                            Button { handleMenuAction(.removeFromQueue, episode: episode) } label: {
+                                Label("Remove from Queue", systemImage: "minus.circle")
+                            }
+                        } else {
+                            Button { handleMenuAction(.addToQueue, episode: episode) } label: {
+                                Label("Add to Queue", systemImage: "text.append")
+                            }
                         }
                         Divider()
                         Button { handleMenuAction(.download, episode: episode) } label: {
@@ -268,9 +280,7 @@ struct PodcastDetailView: View {
                 settingsManager: settingsManager,
                 strategy: strategy
             )
-            if !conflicts.isEmpty && strategy == .ask {
-                playerManager.pendingConflicts = conflicts
-            }
+            playerManager.deliverConflicts(conflicts, strategy: strategy)
         }
         .sheet(isPresented: $showSettings) {
             PodcastSettingsSheet(podcast: podcast)
@@ -328,20 +338,7 @@ struct PodcastDetailView: View {
         ) {
             Button("Hide \(unplayedCount) Unplayed Episodes", role: .destructive) {
                 let unplayed = allEpisodes.filter { !$0.isPlayed }
-                var requests: [ProHideEpisodeRequest] = []
-                for ep in unplayed {
-                    podcastManager.episodeActionSync.setHidden(guid: ep.guid, hidden: true)
-                    if let podcastUrl = ep.podcastUrl, let audioUrl = ep.audioUrl {
-                        requests.append(ProHideEpisodeRequest(episodeUrl: audioUrl, podcastUrl: podcastUrl))
-                    }
-                }
-                podcastManager.episodeActionSync.persistHiddenGuids()
-                // Sync batch to server
-                Task {
-                    if let client = podcastManager.currentSyncClient, !requests.isEmpty {
-                        try? await client.hideEpisodes(requests)
-                    }
-                }
+                podcastManager.hideEpisodes(unplayed)
             }
             Button("Cancel", role: .cancel) { }
         } message: {
@@ -375,31 +372,31 @@ struct PodcastDetailView: View {
             playerManager.addToQueue(episode, playNext: true)
         case .addToQueue:
             playerManager.addToQueue(episode)
+        case .removeFromQueue:
+            // Find the matching QueueItem by GUID and remove it
+            if let item = playerManager.audioManager.queue.first(where: { $0.id == episode.guid }) {
+                playerManager.removeFromQueue(item)
+            } else if playerManager.audioManager.currentItem?.id == episode.guid {
+                playerManager.removeCurrentEpisodeFromQueue()
+            }
         case .download:
             downloadAction(episode)
         case .markPlayed:
             if let podcastUrl = episode.podcastUrl {
                 if episode.isPlayed {
                     podcastManager.markEpisodeAsUnplayed(podcastUrl: podcastUrl, episodeGuid: episode.guid)
+                } else if EpisodeDetailSheetHelper.shouldUsePlayerManager(
+                    episodeGuid: episode.guid,
+                    currentEpisodeGuid: playerManager.currentEpisodeGuid
+                ) {
+                    // Currently playing: mark played + advance the queue
+                    playerManager.markCurrentEpisodeAsPlayed()
                 } else {
                     podcastManager.markEpisodeAsPlayed(podcastUrl: podcastUrl, episodeGuid: episode.guid)
                 }
             }
         case .hide:
-            let isHidden = podcastManager.episodeActionSync.isHidden(guid: episode.guid)
-            podcastManager.episodeActionSync.setHidden(guid: episode.guid, hidden: !isHidden)
-            podcastManager.episodeActionSync.persistHiddenGuids()
-            // Sync to server
-            Task {
-                guard let podcastUrl = episode.podcastUrl, let audioUrl = episode.audioUrl else { return }
-                if let client = podcastManager.currentSyncClient {
-                    if !isHidden {
-                        try? await client.hideEpisodes([ProHideEpisodeRequest(episodeUrl: audioUrl, podcastUrl: podcastUrl)])
-                    } else {
-                        try? await client.unhideEpisode(episodeUrl: audioUrl)
-                    }
-                }
-            }
+            podcastManager.toggleHidden(episode: episode)
         case .details:
             episodeSheetItem = EpisodeSheetItem(episode: episode)
         }
@@ -415,12 +412,16 @@ extension PodcastDetailView {
         if hasBadges {
             HStack(spacing: 6) {
                 if podcast.explicit == true {
-                    Text("🅴")
+                    // U+1F174 NEGATIVE SQUARED LATIN CAPITAL LETTER E — the
+                    // glyph is the badge, so it is verbatim, and VoiceOver
+                    // reads the label rather than the character's Unicode name.
+                    Text(verbatim: "🅴")
                         .font(.caption2.bold())
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(Color.red.opacity(0.12))
                         .clipShape(RoundedRectangle(cornerRadius: 4))
+                        .accessibilityLabel("Explicit")
                 }
                 
                 ForEach(podcast.categories, id: \.self) { cat in
@@ -434,13 +435,19 @@ extension PodcastDetailView {
                 }
                 
                 if podcast.isComplete {
-                    Label("Complete", systemImage: "checkmark.seal.fill")
+                    Label(String(localized: "podcast.badge.complete",
+                                 defaultValue: "Complete",
+                                 comment: "Badge on a podcast that has finished publishing and will get no further episodes. The ADJECTIVE describing a finished series, never a verb telling the user to complete something."),
+                          systemImage: "checkmark.seal.fill")
                         .font(.caption2)
                         .foregroundStyle(.green)
                 }
                 
                 if podcast.showType == "serial" {
-                    Label("Serial", systemImage: "list.number")
+                    Label(String(localized: "podcast.badge.serial",
+                                 defaultValue: "Serial",
+                                 comment: "Badge on a podcast meant to be heard in order from episode 1, as opposed to episodic. Describes the show's format."),
+                          systemImage: "list.number")
                         .font(.caption2)
                         .foregroundStyle(.indigo)
                 }
@@ -470,7 +477,10 @@ extension PodcastDetailView {
             
             if let linkStr = podcast.liveItemContentLink, let url = URL(string: linkStr) {
                 Link(destination: url) {
-                    Label("Watch", systemImage: "arrow.up.right")
+                    Label(String(localized: "podcast.action.openWebsite",
+                                 defaultValue: "Watch",
+                                 comment: "Opens a video podcast's website in the browser. The VERB 'to watch' — never the noun meaning a wristwatch or Apple Watch."),
+                          systemImage: "arrow.up.right")
                         .font(.caption.bold())
                 }
                 .buttonStyle(.bordered)
@@ -549,7 +559,7 @@ extension PodcastDetailView {
 // MARK: - Episode Menu Action
 
 enum EpisodeMenuAction {
-    case play, playNext, addToQueue, download, markPlayed, hide, details
+    case play, playNext, addToQueue, removeFromQueue, download, markPlayed, hide, details
 }
 
 // MARK: - Episode Row
@@ -560,173 +570,43 @@ struct EpisodeRow: View {
     let isDownloaded: Bool
     var isDownloading: Bool = false
     var isHidden: Bool = false
+    var isInQueue: Bool = false
     var onDownloadTap: () -> Void = {}
     var onMenuAction: (EpisodeMenuAction) -> Void = { _ in }
     var onTap: () -> Void = {}
-    
+    /// Episode lens: show an always-visible add/remove-from-queue button.
+    var showQueueButton: Bool = false
+    /// Leading (swipe-from-left) action. nil = no leading swipe (preserves call sites that don't opt in).
+    var swipeLeading: EpisodeSwipeAction? = nil
+    /// Trailing (swipe-from-right) action. nil = no trailing swipe.
+    var swipeTrailing: EpisodeSwipeAction? = nil
+
     var body: some View {
         Button(action: onTap) {
             HStack(spacing: 10) {
-                // Episode-specific artwork
-                let imageUrl = episode.imageUrl ?? episode.podcast?.logoUrl
-                ZStack(alignment: .bottomTrailing) {
-                    CachedAsyncImage(url: URL(string: imageUrl ?? "")) { image in
-                        image.resizable().aspectRatio(contentMode: .fill)
-                    } placeholder: {
-                        RoundedRectangle(cornerRadius: 8).fill(.quaternary)
-                            .overlay {
-                                Image(systemName: "waveform")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                    }
-                    .frame(width: 48, height: 48)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                    
-                    // Played badge
-                    if episode.isPlayed {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.system(size: 14))
-                            .foregroundColor(.green)
-                            .background(Circle().fill(.white).padding(-1))
-                            .offset(x: 4, y: 4)
-                    }
-                }
-                
+                artwork
+
                 VStack(alignment: .leading, spacing: 3) {
                     Text(episode.title)
                         .font(.subheadline.bold())
-                        .foregroundColor(episode.isPlayed ? .secondary : (isPlaying ? .accentColor : .primary))
+                        .foregroundColor(titleColor)
                         .lineLimit(2)
-                    
-                    HStack(spacing: 8) {
-                        // Season/Episode label
-                        if let seasonNum = episode.seasonNumber {
-                            let epNum = episode.episodeNumber.map { Int($0) }
-                            let label = episode.episodeDisplay
-                                ?? (epNum != nil ? "S\(seasonNum)E\(epNum!)" : "S\(seasonNum)")
-                            Text(label)
-                                .font(.caption2.weight(.medium))
-                                .foregroundStyle(.indigo)
-                        } else if let epNum = episode.episodeNumber {
-                            Text(episode.episodeDisplay ?? "Ep \(Int(epNum))")
-                                .font(.caption2.weight(.medium))
-                                .foregroundStyle(.indigo)
-                        }
-                        
-                        // Episode type badge
-                        if let type = episode.episodeType, type != "full" {
-                            Text(type.capitalized)
-                                .font(.system(size: 9, weight: .bold))
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 1)
-                                .background(type == "trailer" ? Color.orange.opacity(0.15) : Color.purple.opacity(0.15))
-                                .foregroundStyle(type == "trailer" ? .orange : .purple)
-                                .clipShape(RoundedRectangle(cornerRadius: 3))
-                        }
-                        
-                        // Explicit badge
-                        if episode.explicit == true {
-                            Text("E")
-                                .font(.system(size: 8, weight: .black))
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 1)
-                                .background(Color.red.opacity(0.12))
-                                .foregroundStyle(.red)
-                                .clipShape(RoundedRectangle(cornerRadius: 2))
-                        }
-                        
-                        if let pubDate = episode.pubDate {
-                            Text(pubDate, style: .date)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                        
-                        if let duration = episode.durationSeconds {
-                            if episode.listenedSeconds > 0 && !episode.isPlayed {
-                                // Show remaining time
-                                let remaining = max(0, duration - episode.listenedSeconds)
-                                Text("\(PlayerManager.formatDuration(TimeInterval(remaining))) left")
-                                    .font(.caption2)
-                                    .foregroundStyle(.orange)
-                            } else {
-                                Text(PlayerManager.formatDuration(TimeInterval(duration)))
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                    
-                    // Listen progress bar for in-progress episodes
-                    if episode.listenedSeconds > 0 && !episode.isPlayed {
-                        GeometryReader { geo in
-                            ZStack(alignment: .leading) {
-                                Capsule()
-                                    .fill(Color.secondary.opacity(0.2))
-                                    .frame(height: 3)
-                                Capsule()
-                                    .fill(Color.accentColor)
-                                    .frame(width: max(0, geo.size.width * episode.listenProgress), height: 3)
-                            }
-                        }
-                        .frame(height: 3)
-                    }
+
+                    metadataBadges
+
+                    listenProgressBar
                 }
-                
+
                 Spacer()
-                
-                // Download button
-                Button(action: onDownloadTap) {
-                    if isDownloading {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Image(systemName: isDownloaded
-                            ? "arrow.down.circle.fill"
-                            : "arrow.down.circle"
-                        )
-                        .font(.body)
-                        .foregroundColor(isDownloaded ? .green : .secondary)
-                    }
+
+                downloadButton
+
+                if showQueueButton {
+                    queueButton
                 }
-                .buttonStyle(.plain)
-                .disabled(isDownloading)
-                
-                // Menu button
-                Menu {
-                    Button { onMenuAction(.play) } label: {
-                        Label("Play", systemImage: "play.fill")
-                    }
-                    Button { onMenuAction(.playNext) } label: {
-                        Label("Play Next", systemImage: "text.insert")
-                    }
-                    Button { onMenuAction(.addToQueue) } label: {
-                        Label("Add to Queue", systemImage: "text.append")
-                    }
-                    Divider()
-                    Button { onMenuAction(.download) } label: {
-                        Label(
-                            isDownloaded ? "Remove Download" : "Download",
-                            systemImage: isDownloaded ? "trash" : "arrow.down.circle"
-                        )
-                    }
-                    Button { onMenuAction(.markPlayed) } label: {
-                        Label(
-                            episode.isPlayed ? "Mark as Unplayed" : "Mark as Played",
-                            systemImage: episode.isPlayed ? "circle" : "checkmark.circle"
-                        )
-                    }
-                    Divider()
-                    Button { onMenuAction(.details) } label: {
-                        Label("Details", systemImage: "info.circle")
-                    }
-                } label: {
-                    Image(systemName: "ellipsis")
-                        .font(.body)
-                        .foregroundColor(.secondary)
-                        .frame(width: 30, height: 30)
-                }
-                
+
+                menuButton
+
                 // Playing indicator
                 if isPlaying {
                     Image(systemName: "speaker.wave.2.fill")
@@ -748,15 +628,269 @@ struct EpisodeRow: View {
             isPlayed: episode.isPlayed,
             isPlaying: isPlaying,
             isDownloaded: isDownloaded,
-            isHidden: isHidden
+            isHidden: isHidden,
+            isInQueue: isInQueue
         ))
         .accessibilityHint(EpisodeAccessibility.episodeHint())
         .accessibilityAddTraits(isPlaying ? [.isSelected, .startsMediaSession] : .startsMediaSession)
         .accessibilityAction(named: "Play") { onMenuAction(.play) }
         .accessibilityAction(named: "Play Next") { onMenuAction(.playNext) }
-        .accessibilityAction(named: "Add to Queue") { onMenuAction(.addToQueue) }
+        .accessibilityAction(named: isInQueue ? "Remove from Queue" : "Add to Queue") {
+            onMenuAction(isInQueue ? .removeFromQueue : .addToQueue)
+        }
         .accessibilityAction(named: isDownloaded ? "Remove Download" : "Download") { onMenuAction(.download) }
         .accessibilityAction(named: episode.isPlayed ? "Mark as Unplayed" : "Mark as Played") { onMenuAction(.markPlayed) }
         .accessibilityAction(named: isHidden ? "Unhide" : "Hide") { onMenuAction(.hide) }
+        .swipeActions(edge: .leading, allowsFullSwipe: true) {
+            if let swipeLeading { swipeButton(swipeLeading) }
+        }
+        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+            if let swipeTrailing { swipeButton(swipeTrailing) }
+        }
+    }
+
+    // MARK: - Sub-views
+    // EpisodeRow.body was a single large expression that Swift 6.4 (Xcode 27) could
+    // not type-check in reasonable time. Splitting it into these sub-views keeps each
+    // expression small enough to compile. No behavior change.
+
+    private var titleColor: Color {
+        if episode.isPlayed { return .secondary }
+        return isPlaying ? .accentColor : .primary
+    }
+
+    @ViewBuilder
+    private var artwork: some View {
+        let imageUrl = episode.imageUrl ?? episode.podcast?.logoUrl
+        ZStack(alignment: .bottomTrailing) {
+            CachedAsyncImage(url: URL(string: imageUrl ?? "")) { image in
+                image.resizable().aspectRatio(contentMode: .fill)
+            } placeholder: {
+                RoundedRectangle(cornerRadius: 8).fill(.quaternary)
+                    .overlay {
+                        Image(systemName: "waveform")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+            }
+            .frame(width: 48, height: 48)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+
+            // Played badge
+            if episode.isPlayed {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 14))
+                    .foregroundColor(.green)
+                    .background(Circle().fill(.white).padding(-1))
+                    .offset(x: 4, y: 4)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var metadataBadges: some View {
+        HStack(spacing: 8) {
+            // Season/Episode label
+            if let seasonNum = episode.seasonNumber {
+                let epNum = episode.episodeNumber.map { Int($0) }
+                let label = episode.episodeDisplay
+                    ?? (epNum != nil ? "S\(seasonNum)E\(epNum!)" : "S\(seasonNum)")
+                Text(label)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.indigo)
+            } else if let epNum = episode.episodeNumber {
+                Text(episode.episodeDisplay ?? "Ep \(Int(epNum))")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.indigo)
+            }
+
+            // Episode type badge
+            if let type = episode.episodeType, type != "full" {
+                Text(type.capitalized)
+                    .font(.system(size: 9, weight: .bold))
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(type == "trailer" ? Color.orange.opacity(0.15) : Color.purple.opacity(0.15))
+                    .foregroundStyle(type == "trailer" ? .orange : .purple)
+                    .clipShape(RoundedRectangle(cornerRadius: 3))
+            }
+
+            // Explicit badge
+            if episode.explicit == true {
+                Text(String(localized: "badge.explicit.short",
+                            defaultValue: "E",
+                            comment: "One- or two-character badge marking explicit content, shown in a small red pill beside a title. Keep it as short as possible — the pill does not grow. English uses 'E'; use whatever short form your language's store convention uses."))
+                    .font(.system(size: 8, weight: .black))
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(Color.red.opacity(0.12))
+                    .foregroundStyle(.red)
+                    .clipShape(RoundedRectangle(cornerRadius: 2))
+            }
+
+            // In Queue badge
+            if isInQueue {
+                HStack(spacing: 2) {
+                    Image(systemName: "text.line.first.and.arrowforward")
+                        .font(.system(size: 8))
+                    Text("Queued")
+                        .font(.system(size: 9, weight: .bold))
+                }
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .background(Color.accentColor.opacity(0.12))
+                .foregroundStyle(Color.accentColor)
+                .clipShape(RoundedRectangle(cornerRadius: 3))
+            }
+
+            if let pubDate = episode.pubDate {
+                Text(pubDate, style: .date)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            durationLabel
+        }
+    }
+
+    @ViewBuilder
+    private var durationLabel: some View {
+        if let duration = episode.durationSeconds {
+            if episode.listenedSeconds > 0 && !episode.isPlayed {
+                // Show remaining time
+                let remaining = max(0, duration - episode.listenedSeconds)
+                Text(DurationFormatting.remaining(TimeInterval(remaining)))
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            } else {
+                Text(PlayerManager.formatDuration(TimeInterval(duration)))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var listenProgressBar: some View {
+        // Listen progress bar for in-progress episodes
+        if episode.listenedSeconds > 0 && !episode.isPlayed {
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color.secondary.opacity(0.2))
+                        .frame(height: 3)
+                    Capsule()
+                        .fill(Color.accentColor)
+                        .frame(width: max(0, geo.size.width * episode.listenProgress), height: 3)
+                }
+            }
+            .frame(height: 3)
+        }
+    }
+
+    @ViewBuilder
+    private var downloadButton: some View {
+        Button(action: onDownloadTap) {
+            if isDownloading {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                let downloadIcon = isDownloaded ? "arrow.down.circle.fill" : "arrow.down.circle"
+                let downloadColor: Color = isDownloaded ? .green : .secondary
+                Image(systemName: downloadIcon)
+                    .font(.body)
+                    .foregroundColor(downloadColor)
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(isDownloading)
+    }
+
+    @ViewBuilder
+    private var queueButton: some View {
+        Button {
+            onMenuAction(isInQueue ? .removeFromQueue : .addToQueue)
+        } label: {
+            Image(systemName: isInQueue ? "checkmark.circle.fill" : "plus.circle")
+                .font(.title3)
+                .foregroundColor(isInQueue ? .green : .accentColor)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(isInQueue ? "Remove from Queue" : "Add to Queue")
+    }
+
+    @ViewBuilder
+    private func swipeButton(_ action: EpisodeSwipeAction) -> some View {
+        // State-aware label/tint for toggles; static otherwise.
+        // Computed via an immediately-invoked plain closure (not @ViewBuilder) so this
+        // switch is ordinary control flow — inline inside the @ViewBuilder function body,
+        // an assignment-only switch case gets misinterpreted as a view-building expression.
+        let (title, icon): (String, String) = {
+            switch action {
+            case .markPlayed:
+                return (episode.isPlayed ? "Unplayed" : "Played", episode.isPlayed ? "circle" : "checkmark.circle")
+            case .hide:
+                return (isHidden ? "Unhide" : "Hide", isHidden ? "eye" : "eye.slash")
+            default:
+                return (action.displayName, action.systemImage)
+            }
+        }()
+        Button {
+            onMenuAction(action.menuAction)
+        } label: {
+            Label(title, systemImage: icon)
+        }
+        .tint(swipeTint(action))
+    }
+
+    private func swipeTint(_ action: EpisodeSwipeAction) -> Color {
+        switch action {
+        case .addToQueue, .playNext, .playNow: return .accentColor
+        case .markPlayed:                      return .green
+        case .hide:                            return .gray
+        }
+    }
+
+    @ViewBuilder
+    private var menuButton: some View {
+        Menu {
+            Button { onMenuAction(.play) } label: {
+                Label("Play", systemImage: "play.fill")
+            }
+            Button { onMenuAction(.playNext) } label: {
+                Label("Play Next", systemImage: "text.insert")
+            }
+            if isInQueue {
+                Button { onMenuAction(.removeFromQueue) } label: {
+                    Label("Remove from Queue", systemImage: "minus.circle")
+                }
+            } else {
+                Button { onMenuAction(.addToQueue) } label: {
+                    Label("Add to Queue", systemImage: "text.append")
+                }
+            }
+            Divider()
+            Button { onMenuAction(.download) } label: {
+                Label(
+                    isDownloaded ? "Remove Download" : "Download",
+                    systemImage: isDownloaded ? "trash" : "arrow.down.circle"
+                )
+            }
+            Button { onMenuAction(.markPlayed) } label: {
+                Label(
+                    episode.isPlayed ? "Mark as Unplayed" : "Mark as Played",
+                    systemImage: episode.isPlayed ? "circle" : "checkmark.circle"
+                )
+            }
+            Divider()
+            Button { onMenuAction(.details) } label: {
+                Label("Details", systemImage: "info.circle")
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.body)
+                .foregroundColor(.secondary)
+                .frame(width: 30, height: 30)
+        }
     }
 }

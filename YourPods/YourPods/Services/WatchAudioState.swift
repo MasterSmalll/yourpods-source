@@ -1,11 +1,19 @@
 import Foundation
 
-/// Pure-logic state manager for watch audio playback.
-/// Lives in the iOS target for testability. The watch `WatchAudioManager` wraps this
-/// and delegates state decisions to it, connecting actual AVPlayer/AVAudioSession calls.
+/// Pure-logic state manager for watch audio playback, kept for testability.
 ///
-/// Design: mirrors the `WatchPlaybackResolver` pattern — testable logic in iOS target,
-/// used by the watch target for production behavior.
+/// Note: this does NOT reflect how production works — the watch target's
+/// `WatchAudioManager` is the actual production implementation; it does NOT
+/// wrap or delegate to this type. `WatchAudioState` hand-mirrors
+/// `WatchAudioManager`'s state-transition logic in the iOS target so it can be
+/// exercised from YourPodsTests (the watch target has no test bundle). Keep
+/// the two in sync by hand when production behavior changes — see
+/// `WatchAudioManagerBackgroundLifecycleTests`'s source-scan guard for one
+/// example of catching drift.
+///
+/// Design: mirrors the `WatchAdvancePlanner` / `WatchWireFormat` pattern —
+/// pure, testable logic lives in the iOS target; the watch target's actual
+/// manager is hand-mirrored to match it for production behavior.
 struct WatchAudioState {
     
     // MARK: - State
@@ -66,8 +74,12 @@ struct WatchAudioState {
         progress = Double(episode.position)
         playbackSource = resolution.source
         statusText = resolution.source == .streaming ? "Streaming..." : "Playing"
-        timerState = .active
-        
+        // Mirrors WatchAudioManager.startTimer()'s isInBackground gate: play()
+        // reached via background auto-advance must NOT resurrect the timer —
+        // it would run for the rest of the background session. The foreground
+        // observer (handleWillEnterForeground) restarts it on resume.
+        timerState = isInBackground ? .suspended : .active
+
         return resolution
     }
     
@@ -219,22 +231,17 @@ struct WatchAudioState {
         case suspended
     }
     
-    /// Extended runtime session state — tracks whether a WKExtendedRuntimeSession is needed.
-    enum ExtendedSessionState: Equatable {
-        case inactive
-        case active
-        case invalidated
-    }
-    
     /// Current timer lifecycle state.
     /// Starts as `.suspended` — transitioned to `.active` only when play() is called.
     /// CAROUSEL FIX: Was `.active` — caused background wakes without playback to
     /// believe a timer should be running. Timer fires accumulated during suspension
     /// and burst on resume → watchdog kill → relaunch penalty.
     private(set) var timerState: TimerLifecycleState = .suspended
-    
-    /// Current extended session state.
-    private(set) var extendedSessionState: ExtendedSessionState = .inactive
+
+    /// Mirrors WatchAudioManager.isInBackground — set by the background/foreground
+    /// lifecycle handlers below. play() consults this so a background auto-advance
+    /// doesn't restart the timer (see play()).
+    private(set) var isInBackground: Bool = false
     
     /// Whether the audio session should be deactivated (i.e., nothing is playing).
     /// True when no episode is loaded — the caller should call
@@ -248,27 +255,17 @@ struct WatchAudioState {
     /// When the app is suspended, timer fires accumulate. On resume, they all fire
     /// in a burst — overwhelming the main thread and triggering a watchdog kill.
     mutating func handleDidEnterBackground() {
+        isInBackground = true
         timerState = .suspended
     }
-    
+
     /// Called when the app returns to the foreground.
     /// Resumes the progress timer ONLY if playback is active.
     /// If nothing is playing, the timer stays suspended — no UI to update.
     mutating func handleWillEnterForeground() {
+        isInBackground = false
         if isPlaying {
             timerState = .active
         }
-    }
-    
-    /// Called when playback starts. Activates the extended runtime session
-    /// so watchOS allows background audio execution beyond the ~30s default.
-    mutating func handlePlaybackStarted() {
-        extendedSessionState = .active
-    }
-    
-    /// Called when playback stops. Invalidates the extended runtime session
-    /// to release system resources and stop blocking app suspension.
-    mutating func handlePlaybackStopped() {
-        extendedSessionState = .invalidated
     }
 }

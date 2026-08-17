@@ -1,0 +1,17 @@
+[
+  { "prefixpattern": "artsai.com",           "prefixname": "ArtsAI" },
+  { "prefixpattern": "prefix.artsai.com",    "prefixname": "ArtsAI" },
+  { "prefixpattern": "www.claritaspod.com",  "prefixname": "Claritas" },
+  { "prefixpattern": "backtracks.fm",        "prefixname": "Backtracks" },
+  { "prefixpattern": "podroll.fm",           "prefixname": "PodRoll" },
+  { "prefixpattern": "rss.pdrl.fm",          "prefixname": "PodRoll" },
+  { "prefixpattern": "cohostpodcasting.com", "prefixname": "CoHost" },
+  { "prefixpattern": "veritonic.com",        "prefixname": "Veritonic" },
+  { "prefixpattern": "swap.fm",              "prefixname": "Swap.fm" },
+  { "prefixpattern": "tracking.swap.fm",     "prefixname": "Swap.fm" },
+  { "prefixpattern": "pfx.vpixl.com",        "prefixname": "vPixl" },
+  { "prefixpattern": "prfx.byspotify.com",   "prefixname": "Podsights" },
+  { "prefixpattern": "pdrl.fm",              "prefixname": "PodRoll" },
+  { "prefixpattern": "cohst.app",            "prefixname": "CoHost" },
+  { "prefixpattern": "prefix.up.audio",      "prefixname": "Up.Audio" }
+]

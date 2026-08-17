@@ -3,9 +3,22 @@ import UniformTypeIdentifiers
 
 /// Comprehensive settings screen with all app preferences.
 struct SettingsView: View {
+
+    /// The resolved localization's own name for itself — "Deutsch", not
+    /// "German". A user who has the app in a language they read expects to see
+    /// that language named the way they name it.
+    static var currentLanguageName: String {
+        let code = TranslationDisclosurePolicy.resolvedLocalization()
+        let locale = Locale(identifier: code)
+        return locale.localizedString(forIdentifier: code)?.localizedCapitalized
+            ?? Locale.current.localizedString(forIdentifier: code)?.localizedCapitalized
+            ?? code
+    }
     @Environment(SettingsManager.self) private var settings
     @Environment(PodcastManager.self) private var podcastManager
     @Environment(PlayerManager.self) private var playerManager
+    @Environment(DownloadManager.self) private var downloadManager
+    @Environment(SubscriptionManager.self) private var subscriptionManager
     
     @State private var showProfileSelection = false
 
@@ -16,6 +29,12 @@ struct SettingsView: View {
     @State private var isPushing = false
     @State private var isPulling = false
     @State private var showNotificationModePrompt = false
+    @State private var showAutoHideFirstRun = false
+    @State private var autoHideFirstRunCount = 0
+    @State private var autoHideFirstRunComplete = false
+    @State private var autoHideProgressTitle = ""
+    @State private var autoHideProgressIndex = 0
+    @State private var autoHideProgressTotal = 0
     
     var body: some View {
         NavigationStack {
@@ -59,9 +78,8 @@ struct SettingsView: View {
                             isPushing = true
                             // Force Push: push subscriptions AND episode actions to server
                             let conflicts = await podcastManager.forcePushToServer()
-                            if !conflicts.isEmpty {
-                                playerManager.pendingConflicts = conflicts
-                            }
+                            let strategy = settings.syncConflictStrategy
+                            playerManager.deliverConflicts(conflicts, strategy: strategy, bypassStrategyGate: true)
                             isPushing = false
                         }
                     } label: {
@@ -83,8 +101,8 @@ struct SettingsView: View {
                             let conflicts = try? await podcastManager.forcePullFromServer(
                                 strategy: strategy
                             )
-                            if let conflicts, !conflicts.isEmpty, strategy == .ask {
-                                playerManager.pendingConflicts = conflicts
+                            if let conflicts {
+                                playerManager.deliverConflicts(conflicts, strategy: strategy)
                             }
                             isPulling = false
                         }
@@ -117,7 +135,21 @@ struct SettingsView: View {
                         Label("Listening Stats", systemImage: "chart.bar")
                     }
                 } header: {
-                    Label("Account", systemImage: "person.circle")
+                    let header = SettingsAccountHeader.resolve(
+                        profileType: settings.activeProfile?.profileType,
+                        isPro: subscriptionManager.isPro
+                    )
+                    Label {
+                        Text(header.title)
+                    } icon: {
+                        Image(systemName: header.icon)
+                    }
+                }
+                
+                // MARK: - YourPods Pro
+                if SettingsAccountHeader.shouldShowProNudge(isPro: subscriptionManager.isPro,
+                                                            dismissed: settings.proNudgeDismissed) {
+                    ProNudgeRow()
                 }
                 
                 // MARK: - Appearance
@@ -130,7 +162,8 @@ struct SettingsView: View {
                         Text("Light").tag(AppAppearance.light)
                         Text("Dark").tag(AppAppearance.dark)
                     }
-                    
+                    .accessibilityHint("Choose Light, Dark, or follow the system color scheme")
+
                     #if os(iOS)
                     Picker("Tab Bar Style", selection: Binding(
                         get: { settings.tabBarDisplayMode },
@@ -140,6 +173,7 @@ struct SettingsView: View {
                         Text("Icon Only").tag(TabBarDisplayMode.iconOnly)
                         Text("Text & Icon").tag(TabBarDisplayMode.textAndIcon)
                     }
+                    .accessibilityHint("Show tab bar items as text only, icons only, or both")
                     #endif
                     
                     Picker("Start Page", selection: Binding(
@@ -150,10 +184,77 @@ struct SettingsView: View {
                         Text("Library").tag("library")
                         Text("Up Next").tag("upnext")
                     }
+                    .accessibilityHint("The screen YourPods opens to on launch")
+                    
+                    #if os(iOS)
+                    if #available(iOS 26.0, *) {
+                        Picker("Glass Style", selection: Binding(
+                            get: { settings.glassAppearance },
+                            set: { settings.glassAppearance = $0 }
+                        )) {
+                            ForEach(GlassAppearance.allCases, id: \.self) { mode in
+                                Text(mode.displayName).tag(mode)
+                            }
+                        }
+                        .accessibilityLabel("Glass Style")
+                        // "adds extra brightness" was wrong: high-contrast glass
+                        // applies a scheme-aware tint and a legibility scrim
+                        // (YourPodsGlass.swift:134) — it makes surfaces more
+                        // opaque, not brighter, and in light mode the tint is
+                        // black. Four translators independently flagged the
+                        // English as describing the opposite of a contrast
+                        // setting; they were reading it more carefully than
+                        // anyone had in English.
+                        // The hint named three options — "Clear", "High
+                        // Contrast", "Classic" — that the picker does not have.
+                        // The rows are Classic, Clear Glass, Glass and High
+                        // Contrast Glass (GlassAppearance.allCases order), and
+                        // the one it never mentioned, Glass, is the default
+                        // (SettingsManager.glassAppearance:278). A VoiceOver
+                        // user hears the hint and then the rows, so the names
+                        // have to be the row names, in row order.
+                        .accessibilityHint("Choose how translucent surfaces appear. Classic is opaque, Clear Glass is the most transparent, Glass is the default, and High Contrast Glass adds a tint for legibility.")
+                        
+                        Button {
+                            if let url = URL(string: UIApplication.openSettingsURLString) {
+                                UIApplication.shared.open(url)
+                            }
+                        } label: {
+                            Label("Accessibility Settings", systemImage: "accessibility")
+                        }
+                        .accessibilityLabel("Accessibility Settings")
+                        .accessibilityHint("Opens system accessibility settings to enable Reduce Transparency or Increase Contrast")
+                    }
+                    #endif
                 } header: {
                     Label("Appearance", systemImage: "paintbrush")
+                } footer: {
+                    if #available(iOS 26.0, *) {
+                        Text("Glass Style controls custom surfaces like the mini player and cards. System chrome (navigation bars, tabs) always follows the OS setting. Use Accessibility Settings to force reduced transparency system-wide.")
+                    }
                 }
-                
+
+                // MARK: - Episode Swipe Actions
+                Section {
+                    Picker("Right Swipe", selection: Bindable(settings).episodeSwipeLeading) {
+                        ForEach(EpisodeSwipeAction.allCases, id: \.self) { action in
+                            Text(action.displayName).tag(action)
+                        }
+                    }
+                    .accessibilityHint("Action when you swipe an episode row to the right")
+
+                    Picker("Left Swipe", selection: Bindable(settings).episodeSwipeTrailing) {
+                        ForEach(EpisodeSwipeAction.allCases, id: \.self) { action in
+                            Text(action.displayName).tag(action)
+                        }
+                    }
+                    .accessibilityHint("Action when you swipe an episode row to the left")
+                } header: {
+                    Label("Episode Swipe Actions", systemImage: "hand.draw")
+                } footer: {
+                    Text("Choose what swiping an episode row does. Applies to episode lists across the app.")
+                }
+
                 // MARK: - Storage
                 Section {
                     NavigationLink {
@@ -170,7 +271,7 @@ struct SettingsView: View {
                     HStack {
                         Text("Playback Speed")
                         Spacer()
-                        Text("\(settings.playbackSpeed, specifier: "%.1f")×")
+                        Text(DurationFormatting.speed(settings.playbackSpeed))
                             .foregroundStyle(.secondary)
                     }
                     
@@ -301,8 +402,149 @@ struct SettingsView: View {
                         get: { settings.defaultArchiveOnComplete },
                         set: { settings.defaultArchiveOnComplete = $0 }
                     ))
+                    
+                    Toggle("Auto-Hide Old Episodes", isOn: Binding(
+                        get: { settings.autoHideOldEpisodes },
+                        set: { settings.autoHideOldEpisodes = $0 }
+                    ))
+                    .accessibilityLabel("Auto-Hide Old Episodes")
+                    .accessibilityHint("When enabled, hides all but the most recent episodes when you subscribe to a new podcast")
+                    
+                    if settings.autoHideOldEpisodes {
+                        Picker("Keep Recent Episodes", selection: Binding(
+                            get: { settings.autoHideKeepRecentCount },
+                            set: { settings.autoHideKeepRecentCount = $0 }
+                        )) {
+                            // `Text(_:)` over a `FormatStyle` result binds the
+                            // non-localizing overload, so a bare count never
+                            // enters the catalog — and `.formatted()` renders
+                            // the digits in the user's locale, which a
+                            // `verbatim:` literal would not.
+                            Text(1.formatted()).tag(1)
+                            Text(3.formatted()).tag(3)
+                            Text(5.formatted()).tag(5)
+                            Text(10.formatted()).tag(10)
+                            Text(25.formatted()).tag(25)
+                        }
+                        .accessibilityLabel("Keep Recent Episodes")
+                        .accessibilityHint("Choose how many of the most recent episodes to keep visible when auto-hiding")
+                    }
                 } header: {
                     Label("New Podcast Defaults", systemImage: "star")
+                } footer: {
+                    if settings.autoHideOldEpisodes {
+                        Text("When adding a new podcast, hide all but the \(settings.autoHideKeepRecentCount) most recent episodes. Unhide anytime via Show Hidden in the podcast detail.")
+                    }
+                }
+                
+                // MARK: - Feed Management
+                Section {
+                    Toggle("Auto-Hide Unplayed Episodes", isOn: Binding(
+                        get: { settings.autoHideUnplayedEnabled },
+                        set: { newValue in
+                            settings.autoHideUnplayedEnabled = newValue
+                            if newValue {
+                                // First-run: show progress sheet and sweep with callback
+                                autoHideFirstRunCount = 0
+                                autoHideFirstRunComplete = false
+                                autoHideProgressTitle = ""
+                                autoHideProgressIndex = 0
+                                autoHideProgressTotal = podcastManager.subscriptions.count
+                                showAutoHideFirstRun = true
+                                
+                                Task { @MainActor in
+                                    let count = await podcastManager.autoHideUnplayedEpisodes(
+                                        settingsManager: settings,
+                                        downloadManager: downloadManager,
+                                        progressCallback: { title, index, total in
+                                            autoHideProgressTitle = title
+                                            autoHideProgressIndex = index
+                                            autoHideProgressTotal = total
+                                        }
+                                    )
+                                    autoHideFirstRunCount = count
+                                    autoHideFirstRunComplete = true
+                                }
+                            }
+                        }
+                    ))
+                    .accessibilityLabel("Auto-Hide Unplayed Episodes")
+                    .accessibilityHint("Automatically hide older episodes you have never played")
+                    
+                    if settings.autoHideUnplayedEnabled {
+                        Picker("Hide After", selection: Binding(
+                            get: { settings.autoHideUnplayedDays },
+                            set: { settings.autoHideUnplayedDays = $0 }
+                        )) {
+                            Text("7 days").tag(7)
+                            Text("14 days").tag(14)
+                            Text("30 days").tag(30)
+                            Text("60 days").tag(60)
+                            Text("90 days").tag(90)
+                        }
+                        .accessibilityLabel("Hide After")
+                        .accessibilityHint("Unplayed episodes published longer ago than this will be automatically hidden")
+                    }
+                    
+                    Picker("Recently Updated Limit", selection: Binding(
+                        get: { settings.recentlyUpdatedLimit },
+                        set: { settings.recentlyUpdatedLimit = $0 }
+                    )) {
+                        Text(9.formatted()).tag(9)
+                        Text(15.formatted()).tag(15)
+                        Text(21.formatted()).tag(21)
+                        Text(27.formatted()).tag(27)
+                        Text(36.formatted()).tag(36)
+                    }
+                    .accessibilityLabel("Recently Updated Limit")
+                    .accessibilityHint("Maximum episodes shown in the Recently Updated section on Home")
+                } header: {
+                    Label("Feed Management", systemImage: "tray.full")
+                } footer: {
+                    if settings.autoHideUnplayedEnabled {
+                        // "unplayed for more than N days" described a rule the
+                        // app does not implement — it reads as time since you
+                        // last played something. The sweep tests the episode's
+                        // PUBLICATION date against the cutoff
+                        // (PodcastManager.swift:752-761: `pubDate < cutoff`,
+                        // with `!isPlayed` and `listenedSeconds == 0`), which
+                        // is what the per-podcast string next to it already
+                        // said. Two translators noticed the app described one
+                        // feature two different ways.
+                        Text("Unplayed episodes published more than \(settings.autoHideUnplayedDays) days ago will be automatically hidden on each sync. Hidden episodes can always be restored from the podcast detail.")
+                    }
+                }
+                
+                // MARK: - Auto-Hide Log
+                if settings.autoHideUnplayedEnabled {
+                    let log = podcastManager.loadAutoHideLog()
+                    if !log.isEmpty {
+                        Section {
+                            ForEach(log.sorted(by: { $0.value.count > $1.value.count }), id: \.key) { podcastUrl, entry in
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(podcastManager.subscriptions.first(where: { $0.url == podcastUrl })?.title ?? podcastUrl)
+                                            .font(.subheadline)
+                                            .lineLimit(1)
+                                        Text("\(entry.count) auto-hidden")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    Button("Undo All") {
+                                        podcastManager.undoAutoHide(forPodcastUrl: podcastUrl)
+                                    }
+                                    .font(.caption)
+                                    .buttonStyle(.bordered)
+                                    .accessibilityHint("Unhide all \(entry.count) auto-hidden episodes for this podcast")
+                                }
+                            }
+                        } header: {
+                            Label("Auto-Hidden Episodes", systemImage: "eye.slash.circle")
+                        } footer: {
+                            Text("Log entries expire after 30 days. Tap Undo All to restore hidden episodes.")
+                        }
+                    }
                 }
                 
                 // MARK: - Queue Management
@@ -510,84 +752,70 @@ struct SettingsView: View {
                     }
                 }
 
-                
-                // MARK: - Siri Commands
+                // MARK: - Notes
                 Section {
-                    Text("Use these voice commands with Siri to control YourPods hands-free.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .listRowBackground(Color.clear)
-                    
-                    // Playback
-                    SiriCommandRow(
-                        icon: "play.circle.fill",
-                        title: "Play / Resume",
-                        phrases: ["\"Play YourPods\"", "\"Resume YourPods\""]
-                    )
-                    SiriCommandRow(
-                        icon: "pause.circle.fill",
-                        title: "Pause",
-                        phrases: ["\"Pause YourPods\""]
-                    )
-                    SiriCommandRow(
-                        icon: "stop.circle.fill",
-                        title: "Stop",
-                        phrases: ["\"Stop YourPods\""]
-                    )
-                    
-                    // Navigation
-                    SiriCommandRow(
-                        icon: "goforward.30",
-                        title: "Skip Forward",
-                        phrases: ["\"Skip forward in YourPods\""]
-                    )
-                    SiriCommandRow(
-                        icon: "gobackward.15",
-                        title: "Skip Backward",
-                        phrases: ["\"Rewind in YourPods\""]
-                    )
-                    SiriCommandRow(
-                        icon: "forward.end.fill",
-                        title: "Next Episode",
-                        phrases: ["\"Next episode in YourPods\""]
-                    )
-                    SiriCommandRow(
-                        icon: "sparkles",
-                        title: "Play Latest Episode",
-                        phrases: ["\"Play latest episode in YourPods\""]
-                    )
-                    
-                    // Speed
-                    SiriCommandRow(
-                        icon: "gauge.with.dots.needle.67percent",
-                        title: "Set Playback Speed",
-                        phrases: ["\"Set playback speed to 1.5 in YourPods\""]
-                    )
-                    
-                    // Timer
-                    SiriCommandRow(
-                        icon: "moon.zzz.fill",
-                        title: "Set Sleep Timer",
-                        phrases: ["\"Set sleep timer to 30 minutes in YourPods\""]
-                    )
-                    SiriCommandRow(
-                        icon: "moon.fill",
-                        title: "Cancel Sleep Timer",
-                        phrases: ["\"Cancel sleep timer in YourPods\""]
-                    )
-                    
-                    // Info
-                    SiriCommandRow(
-                        icon: "info.circle.fill",
-                        title: "What's Playing",
-                        phrases: ["\"What's playing in YourPods?\""]
-                    )
+                    TextField("Vault Name", text: Binding(
+                        get: { settings.obsidianVaultName },
+                        set: { settings.obsidianVaultName = $0 }
+                    ))
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    #endif
+                    .autocorrectionDisabled()
+
+                    Picker("Export Mode", selection: Binding(
+                        get: { settings.obsidianExportMode },
+                        set: { settings.obsidianExportMode = $0 }
+                    )) {
+                        Text("Per Episode").tag(ObsidianExportMode.perEpisode)
+                        Text("Daily Note (Advanced URI)").tag(ObsidianExportMode.dailyNote)
+                        Text("Share Sheet").tag(ObsidianExportMode.shareSheet)
+                    }
+
+                    if settings.activeProfile?.profileType == .gpodder {
+                        TextField("Nextcloud Folder", text: Binding(
+                            get: { settings.nextcloudNotesFolder },
+                            set: { settings.nextcloudNotesFolder = $0 }
+                        ))
+                        #if os(iOS)
+                        .textInputAutocapitalization(.never)
+                        #endif
+                        .autocorrectionDisabled()
+
+                        Picker("Nextcloud Mode", selection: Binding(
+                            get: { settings.nextcloudNotesMode },
+                            set: { settings.nextcloudNotesMode = $0 }
+                        )) {
+                            Text("WebDAV").tag(NextcloudNotesMode.webdav)
+                            Text("Notes App API").tag(NextcloudNotesMode.notesApi)
+                        }
+
+                        Toggle("Auto-Sync Notes", isOn: Binding(
+                            get: { settings.nextcloudNotesSyncEnabled },
+                            set: { settings.nextcloudNotesSyncEnabled = $0 }
+                        ))
+                    }
                 } header: {
-                    Label("Siri Commands", systemImage: "mic.circle")
+                    Label("Notes", systemImage: "note.text")
                 } footer: {
-                    Text("Say \"Hey Siri\" followed by any command above. You can also add these as Shortcuts in the Shortcuts app.")
+                    if settings.activeProfile?.profileType == .gpodder {
+                        Text("Obsidian vault name for one-tap export. \"Daily Note\" mode requires the Advanced URI plugin in Obsidian.\n\nNextcloud: \"Notes App API\" syncs notes into the Nextcloud Notes app (requires the Notes app on your server). \"WebDAV\" writes .md files to the folder path above.\n\nAuto-sync pushes notes on each sync cycle when enabled.")
+                    } else {
+                        Text("Set your Obsidian vault name to enable export. \"Per Episode\" creates one note per episode. \"Daily Note\" appends to today's daily note (requires the Advanced URI plugin). \"Share Sheet\" lets you save .md files anywhere.\n\nTo sync notes to Nextcloud, connect a Nextcloud account in Manage Profiles.")
+                    }
                 }
                 
+                // MARK: - Siri & Shortcuts
+                Section {
+                    NavigationLink {
+                        SiriShortcutsSettingsView()
+                    } label: {
+                        Label("Siri & Shortcuts", systemImage: "mic.circle")
+                    }
+                    .accessibilityLabel("Siri and Shortcuts")
+                    .accessibilityHint("Voice commands and Shortcuts app actions")
+                }
+
                 // MARK: - About
                 Section {
                     HStack {
@@ -604,6 +832,46 @@ struct SettingsView: View {
                     }
                 } header: {
                     Label("About", systemImage: "info.circle")
+                }
+
+                // MARK: - Language & Translation
+                //
+                // Visible in every locale, English included: one code path and
+                // one test rather than two, and the permanent home of the
+                // report action. The first-run sheet is shown once; this is
+                // where a user goes looking afterwards.
+                Section {
+                    HStack {
+                        Text("Language")
+                        Spacer()
+                        Text(Self.currentLanguageName)
+                            .foregroundStyle(.secondary)
+                    }
+                    .accessibilityElement(children: .combine)
+
+                    #if os(iOS)
+                    Button {
+                        if let url = URL(string: UIApplication.openSettingsURLString) {
+                            UIApplication.shared.open(url)
+                        }
+                    } label: {
+                        Label("Change Language", systemImage: "globe")
+                    }
+                    .accessibilityHint("Opens this app's settings, where iOS lets you pick its language")
+                    #else
+                    Text("To change the app's language, open System Settings → General → Language & Region → Applications.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    #endif
+
+                    Link(destination: AppURLs.support) {
+                        Label("Report a translation issue", systemImage: "exclamationmark.bubble")
+                    }
+                    .accessibilityHint("Opens the support page in your browser")
+                } header: {
+                    Label("Language & Translation", systemImage: "character.bubble")
+                } footer: {
+                    Text("YourPods is written in English. We use AI as part of the development process to translate it into other languages, so some wording might be a bit off.")
                 }
             }
             .formStyle(.grouped)
@@ -625,6 +893,15 @@ struct SettingsView: View {
                 allowsMultipleSelection: false
             ) { result in
                 handleOPMLImport(result)
+            }
+            .sheet(isPresented: $showAutoHideFirstRun) {
+                AutoHideProgressSheet(
+                    isComplete: autoHideFirstRunComplete,
+                    currentPodcastTitle: autoHideProgressTitle,
+                    currentIndex: autoHideProgressIndex,
+                    totalPodcasts: autoHideProgressTotal,
+                    hiddenCount: autoHideFirstRunCount
+                )
             }
         }
     }
@@ -674,30 +951,33 @@ struct SettingsView: View {
                     PodcastGroup.saveGroups(existingGroups, forProfileId: profileId)
                 }
                 
-                // Collect all feed URLs (grouped + ungrouped)
+                // Collect all feed URLs (grouped + ungrouped) into a single
+                // ordered list. Grouped feeds carry their group name via the
+                // lookup below; ungrouped feeds map to nil.
+                //
+                // These are subscribed SEQUENTIALLY via importSubscriptions.
+                // The previous per-URL `Task {}` fan-out ran concurrent
+                // addSubscription/save calls on the shared main ModelContext,
+                // racing Core Data's INSERT bind-variable cleanup
+                // (_clearBindVariablesForInsertedRow → objc_msgSend crash).
                 let allGroupedUrls = importResult.groupedUrls  // [groupName: [url]]
                 let allUngroupedUrls = importResult.ungroupedUrls
-                
-                // Subscribe to grouped podcasts and assign group + settings
+
+                var orderedUrls: [String] = []
+                var groupForUrl: [String: String] = [:]
                 for (groupName, feedUrls) in allGroupedUrls {
                     for feedUrl in feedUrls {
-                        Task {
-                            try? await podcastManager.addSubscription(url: feedUrl)
-                            applyImportSettings(
-                                url: feedUrl, groupName: groupName,
-                                podcastSettings: importResult.podcastSettings,
-                                profileId: profileId
-                            )
-                        }
+                        orderedUrls.append(feedUrl)
+                        groupForUrl[feedUrl] = groupName
                     }
                 }
-                
-                // Subscribe to ungrouped podcasts and apply settings only
-                for feedUrl in allUngroupedUrls {
-                    Task {
-                        try? await podcastManager.addSubscription(url: feedUrl)
+                orderedUrls.append(contentsOf: allUngroupedUrls)
+
+                Task {
+                    await podcastManager.importSubscriptions(orderedUrls) { feedUrl in
                         applyImportSettings(
-                            url: feedUrl, groupName: nil,
+                            url: feedUrl,
+                            groupName: groupForUrl[feedUrl],
                             podcastSettings: importResult.podcastSettings,
                             profileId: profileId
                         )
@@ -795,9 +1075,23 @@ private struct SkipDurationPicker: View {
                 }
             )) {
                 ForEach(Self.presets, id: \.self) { value in
-                    Text("\(value)s").tag(value)
+                    Text(String(localized: "format.seconds.short",
+                                defaultValue: "\(value)s",
+                                comment: "A duration in seconds, abbreviated for a compact picker row — English uses a bare 's'. German writes 'Sek.', French 's'. Argument 1 is the number of seconds."))
+                        .tag(value)
                 }
-                Text("Custom\(isCustom ? " (\(seconds)s)" : "")").tag(-1)
+                // Two whole strings rather than "Custom" plus an optional
+                // suffix: the assembled form gave a translator the word
+                // "Custom" and a parenthesised fragment with no way to see
+                // that they belong to one picker row.
+                Text(isCustom
+                     ? String(localized: "settings.skip.customWithValue",
+                              defaultValue: "Custom (\(seconds)s)",
+                              comment: "Picker row for a user-entered skip duration, showing the current value — 'Custom (12s)'. Argument 1 is the number of seconds.")
+                     : String(localized: "settings.skip.custom",
+                              defaultValue: "Custom",
+                              comment: "Picker row that lets the user type their own skip duration instead of choosing a preset."))
+                    .tag(-1)
             }
             
             if showingCustom || isCustom {
@@ -812,7 +1106,9 @@ private struct SkipDurationPicker: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 80)
                     
-                    Button("Set") {
+                    Button(String(localized: "settings.skip.set",
+                                  defaultValue: "Set",
+                                  comment: "Button that applies the number typed into the adjacent seconds field. An IMPERATIVE VERB meaning 'apply this value'.")) {
                         if let val = Int(customText), val > 0 {
                             seconds = min(val, 300)
                         }
@@ -825,29 +1121,3 @@ private struct SkipDurationPicker: View {
     }
 }
 
-// MARK: - Siri Command Row
-
-/// A row displaying a Siri command with its icon, title, and example phrases.
-private struct SiriCommandRow: View {
-    let icon: String
-    let title: String
-    let phrases: [String]
-    
-    var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: icon)
-                .foregroundStyle(Color.accentColor)
-                .frame(width: 24)
-            
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.subheadline.weight(.medium))
-                
-                Text(phrases.joined(separator: "  ·  "))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .padding(.vertical, 2)
-    }
-}

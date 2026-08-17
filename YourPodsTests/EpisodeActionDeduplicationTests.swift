@@ -92,6 +92,27 @@ final class EpisodeActionDeduplicationTests: XCTestCase {
         )
     }
 
+    /// Refetch episodes for a podcast from the context.
+    /// After SyncStore writes + reconcile, stale object references may not reflect
+    /// background changes. This mirrors production (@Query auto-refetches).
+    /// Queries Episode directly (not via Podcast.episodes relationship) because
+    /// in-memory stores may cache stale relationship arrays.
+    private func refetchEpisodes(forPodcastUrl url: String) -> [Episode] {
+        let descriptor = FetchDescriptor<Episode>(
+            predicate: #Predicate { $0.podcast?.url == url },
+            sortBy: [SortDescriptor(\.guid)]
+        )
+        return (try? context.fetch(descriptor)) ?? []
+    }
+
+    /// Refetch a single episode by GUID.
+    private func refetchEpisode(guid: String) -> Episode? {
+        let descriptor = FetchDescriptor<Episode>(
+            predicate: #Predicate { $0.guid == guid }
+        )
+        return try? context.fetch(descriptor).first
+    }
+
     // MARK: - Parity: sync and async produce identical results
 
     /// Core parity test: serverWins strategy produces same results via sync and async paths.
@@ -121,7 +142,10 @@ final class EpisodeActionDeduplicationTests: XCTestCase {
         let asyncConflicts = await manager.applyEpisodeActionsAsync(strategy: .serverWins)
 
         // THEN: All positions should be 500 — identical to sync
-        for ep in podcast.episodes {
+        // Refetch: async path writes on SyncStore background context;
+        // reconcile refaults objects but we need a fresh reference.
+        let asyncEps = refetchEpisodes(forPodcastUrl: podcast.url)
+        for ep in asyncEps {
             XCTAssertEqual(ep.listenedSeconds, 500, "Async: Episode \(ep.guid) should be at 500")
         }
         XCTAssertTrue(asyncConflicts.isEmpty, "Async serverWins should produce no conflicts")
@@ -161,9 +185,10 @@ final class EpisodeActionDeduplicationTests: XCTestCase {
 
         // Async path
         let asyncConflicts = await manager.applyEpisodeActionsAsync(strategy: .deviceWins)
-        XCTAssertEqual(episodes[0].listenedSeconds, 300, "Async deviceWins: should keep local when ahead")
-        XCTAssertEqual(episodes[1].listenedSeconds, 50, "Async deviceWins: should keep local 50 (device always wins)")
-        XCTAssertEqual(episodes[2].listenedSeconds, 200, "Async deviceWins: should adopt server from 0")
+        let asyncEps = refetchEpisodes(forPodcastUrl: podcast.url)
+        XCTAssertEqual(asyncEps[0].listenedSeconds, 300, "Async deviceWins: should keep local when ahead")
+        XCTAssertEqual(asyncEps[1].listenedSeconds, 50, "Async deviceWins: should keep local 50 (device always wins)")
+        XCTAssertEqual(asyncEps[2].listenedSeconds, 200, "Async deviceWins: should adopt server from 0")
         XCTAssertTrue(asyncConflicts.isEmpty)
     }
 
@@ -202,8 +227,11 @@ final class EpisodeActionDeduplicationTests: XCTestCase {
         let asyncConflicts = await manager.applyEpisodeActionsAsync(strategy: .ask)
         XCTAssertEqual(asyncConflicts.count, 1, "Async: should produce 1 conflict")
         XCTAssertEqual(asyncConflicts.first?.episodeGuid, episodes[0].guid)
-        XCTAssertEqual(episodes[0].listenedSeconds, 300, "Async: conflicted episode should not be overwritten")
-        XCTAssertEqual(episodes[1].listenedSeconds, 305, "Async: auto-resolved should take higher")
+        let asyncEps = refetchEpisodes(forPodcastUrl: podcast.url)
+        let asyncEp0 = asyncEps.first(where: { $0.guid == episodes[0].guid })
+        let asyncEp1 = asyncEps.first(where: { $0.guid == episodes[1].guid })
+        XCTAssertEqual(asyncEp0?.listenedSeconds, 300, "Async: conflicted episode should not be overwritten")
+        XCTAssertEqual(asyncEp1?.listenedSeconds, 305, "Async: auto-resolved should take higher")
     }
 
     // MARK: - WithStats parity
@@ -267,7 +295,9 @@ final class EpisodeActionDeduplicationTests: XCTestCase {
 
         // Async path
         _ = await manager.applyEpisodeActionsAsync(strategy: .serverWins)
-        XCTAssertTrue(episode.isPlayed, "Async: should mark as played at 97%")
+        let asyncEps = refetchEpisodes(forPodcastUrl: podcast.url)
+        let asyncEp = asyncEps.first(where: { $0.guid == episode.guid })
+        XCTAssertTrue(asyncEp?.isPlayed ?? false, "Async: should mark as played at 97%")
     }
 
     // MARK: - Cooperative cancellation still works after dedup

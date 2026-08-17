@@ -89,7 +89,9 @@ struct ManageGroupsView: View {
                         .font(.body.weight(.medium))
                     
                     let count = podcastManager.subscriptions.filter { $0.groupId == group.id }.count
-                    Text("\(count) podcast\(count == 1 ? "" : "s")")
+                    Text(String(localized: "library.group.podcastCount",
+                                defaultValue: "\(count) podcasts",
+                                comment: "How many podcasts are in a group, shown under the group name. Argument 1 is the count. Plural rules live in the catalog."))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

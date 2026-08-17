@@ -1,0 +1,461 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "Cancel sleep timer in ${applicationName}" : {
+      "comment" : "Turns off a running sleep timer so playback continues. Spoken phrase a user says to Siri to run this shortcut. ${applicationName} is replaced with the app's name and must be kept exactly as written, including the braces. Write the most natural way a native speaker would ASK for this out loud — not a translation of the English word order, and not UI copy. Siri matches what the user says against this phrase, so an unnatural phrasing simply never fires. Only this one phrasing per action is localizable: the app declares further English alternates that Xcode does not extract, so this string is the whole voice surface for the action in your language.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringSet" : {
+            "state" : "new",
+            "values" : [
+              "Cancel sleep timer in ${applicationName}",
+              "Turn off sleep timer in ${applicationName}"
+            ]
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sleep-Timer in ${applicationName} beenden"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cancela el temporizador para dormir en ${applicationName}"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Annuler le minuteur de veille dans ${applicationName}"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Annulla il timer di spegnimento in ${applicationName}"
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Annuleer de slaaptimer in ${applicationName}"
+          }
+        }
+      }
+    },
+    "Pause ${applicationName}" : {
+      "comment" : "Pauses playback. Spoken phrase a user says to Siri to run this shortcut. ${applicationName} is replaced with the app's name and must be kept exactly as written, including the braces. Write the most natural way a native speaker would ASK for this out loud — not a translation of the English word order, and not UI copy. Siri matches what the user says against this phrase, so an unnatural phrasing simply never fires. Only this one phrasing per action is localizable: the app declares further English alternates that Xcode does not extract, so this string is the whole voice surface for the action in your language.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringSet" : {
+            "state" : "new",
+            "values" : [
+              "Pause ${applicationName}",
+              "Pause playback in ${applicationName}"
+            ]
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "${applicationName} pausieren"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pausa ${applicationName}"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mettre ${applicationName} en pause"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Metti in pausa ${applicationName}"
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pauzeer ${applicationName}"
+          }
+        }
+      }
+    },
+    "Play latest episode in ${applicationName}" : {
+      "comment" : "Plays the newest episode from the user's subscriptions. Spoken phrase a user says to Siri to run this shortcut. ${applicationName} is replaced with the app's name and must be kept exactly as written, including the braces. Write the most natural way a native speaker would ASK for this out loud — not a translation of the English word order, and not UI copy. Siri matches what the user says against this phrase, so an unnatural phrasing simply never fires. Only this one phrasing per action is localizable: the app declares further English alternates that Xcode does not extract, so this string is the whole voice surface for the action in your language.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringSet" : {
+            "state" : "new",
+            "values" : [
+              "Play latest episode in ${applicationName}",
+              "Play newest episode in ${applicationName}"
+            ]
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Neueste Folge in ${applicationName} abspielen"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pon el último episodio en ${applicationName}"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Lire le dernier épisode dans ${applicationName}"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Riproduci l'ultimo episodio in ${applicationName}"
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Speel de nieuwste aflevering af in ${applicationName}"
+          }
+        }
+      }
+    },
+    "Play my queue in ${applicationName}" : {
+      "comment" : "Starts playing the user's queue (Up Next). Spoken phrase a user says to Siri to run this shortcut. ${applicationName} is replaced with the app's name and must be kept exactly as written, including the braces. Write the most natural way a native speaker would ASK for this out loud — not a translation of the English word order, and not UI copy. Siri matches what the user says against this phrase, so an unnatural phrasing simply never fires. Only this one phrasing per action is localizable: the app declares further English alternates that Xcode does not extract, so this string is the whole voice surface for the action in your language.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringSet" : {
+            "state" : "new",
+            "values" : [
+              "Play my queue in ${applicationName}",
+              "Resume playback in ${applicationName}",
+              "Play ${applicationName}",
+              "Start ${applicationName}",
+              "Resume ${applicationName}",
+              "Continue playing in ${applicationName}",
+              "Unpause ${applicationName}"
+            ]
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Meine Warteliste in ${applicationName} abspielen"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reproduce mi cola en ${applicationName}"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Lire ma file d'attente dans ${applicationName}"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Riproduci la mia coda in ${applicationName}"
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Speel mijn wachtrij af in ${applicationName}"
+          }
+        }
+      }
+    },
+    "Set playback speed in ${applicationName}" : {
+      "comment" : "Changes how fast audio plays, e.g. 1.5×. Spoken phrase a user says to Siri to run this shortcut. ${applicationName} is replaced with the app's name and must be kept exactly as written, including the braces. Write the most natural way a native speaker would ASK for this out loud — not a translation of the English word order, and not UI copy. Siri matches what the user says against this phrase, so an unnatural phrasing simply never fires. Only this one phrasing per action is localizable: the app declares further English alternates that Xcode does not extract, so this string is the whole voice surface for the action in your language.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringSet" : {
+            "state" : "new",
+            "values" : [
+              "Set playback speed in ${applicationName}",
+              "Change speed in ${applicationName}"
+            ]
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Wiedergabegeschwindigkeit in ${applicationName} einstellen"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cambia la velocidad de reproducción en ${applicationName}"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Régler la vitesse de lecture dans ${applicationName}"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Imposta la velocità di riproduzione in ${applicationName}"
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Wijzig de afspeelsnelheid in ${applicationName}"
+          }
+        }
+      }
+    },
+    "Set sleep timer in ${applicationName}" : {
+      "comment" : "Starts a timer that stops playback after a set number of minutes, for listening at bedtime. Spoken phrase a user says to Siri to run this shortcut. ${applicationName} is replaced with the app's name and must be kept exactly as written, including the braces. Write the most natural way a native speaker would ASK for this out loud — not a translation of the English word order, and not UI copy. Siri matches what the user says against this phrase, so an unnatural phrasing simply never fires. Only this one phrasing per action is localizable: the app declares further English alternates that Xcode does not extract, so this string is the whole voice surface for the action in your language.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringSet" : {
+            "state" : "new",
+            "values" : [
+              "Set sleep timer in ${applicationName}",
+              "Sleep timer for ${applicationName}"
+            ]
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sleep-Timer in ${applicationName} stellen"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pon el temporizador para dormir en ${applicationName}"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Régler le minuteur de veille dans ${applicationName}"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Imposta il timer di spegnimento in ${applicationName}"
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zet een slaaptimer in ${applicationName}"
+          }
+        }
+      }
+    },
+    "Skip forward in ${applicationName}" : {
+      "comment" : "Jumps forward within the current episode by the user's configured skip interval — it does NOT move to the next episode. Spoken phrase a user says to Siri to run this shortcut. ${applicationName} is replaced with the app's name and must be kept exactly as written, including the braces. Write the most natural way a native speaker would ASK for this out loud — not a translation of the English word order, and not UI copy. Siri matches what the user says against this phrase, so an unnatural phrasing simply never fires. Only this one phrasing per action is localizable: the app declares further English alternates that Xcode does not extract, so this string is the whole voice surface for the action in your language.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringSet" : {
+            "state" : "new",
+            "values" : [
+              "Skip forward in ${applicationName}",
+              "Fast forward in ${applicationName}"
+            ]
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "In ${applicationName} vorspulen"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Avanza en ${applicationName}"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Avancer dans ${applicationName}"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vai avanti in ${applicationName}"
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Spoel vooruit in ${applicationName}"
+          }
+        }
+      }
+    },
+    "Skip to next in ${applicationName}" : {
+      "comment" : "Moves to the next episode in the queue — as distinct from skipping forward within the current one. Spoken phrase a user says to Siri to run this shortcut. ${applicationName} is replaced with the app's name and must be kept exactly as written, including the braces. Write the most natural way a native speaker would ASK for this out loud — not a translation of the English word order, and not UI copy. Siri matches what the user says against this phrase, so an unnatural phrasing simply never fires. Only this one phrasing per action is localizable: the app declares further English alternates that Xcode does not extract, so this string is the whole voice surface for the action in your language.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringSet" : {
+            "state" : "new",
+            "values" : [
+              "Skip to next in ${applicationName}",
+              "Next episode in ${applicationName}"
+            ]
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "In ${applicationName} zur nächsten Folge springen"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pasa al siguiente episodio en ${applicationName}"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Passer à l'épisode suivant dans ${applicationName}"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vai al prossimo episodio in ${applicationName}"
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ga naar de volgende aflevering in ${applicationName}"
+          }
+        }
+      }
+    },
+    "Stop ${applicationName}" : {
+      "comment" : "Stops playback entirely, rather than pausing it. Spoken phrase a user says to Siri to run this shortcut. ${applicationName} is replaced with the app's name and must be kept exactly as written, including the braces. Write the most natural way a native speaker would ASK for this out loud — not a translation of the English word order, and not UI copy. Siri matches what the user says against this phrase, so an unnatural phrasing simply never fires. Only this one phrasing per action is localizable: the app declares further English alternates that Xcode does not extract, so this string is the whole voice surface for the action in your language.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringSet" : {
+            "state" : "new",
+            "values" : [
+              "Stop ${applicationName}",
+              "Stop playing in ${applicationName}"
+            ]
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "${applicationName} stoppen"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Detén ${applicationName}"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Arrêter ${applicationName}"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ferma ${applicationName}"
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Stop ${applicationName}"
+          }
+        }
+      }
+    },
+    "What's playing in ${applicationName}" : {
+      "comment" : "Asks what is currently playing; Siri answers with the episode and podcast. Phrase it as a QUESTION. Spoken phrase a user says to Siri to run this shortcut. ${applicationName} is replaced with the app's name and must be kept exactly as written, including the braces. Write the most natural way a native speaker would ASK for this out loud — not a translation of the English word order, and not UI copy. Siri matches what the user says against this phrase, so an unnatural phrasing simply never fires. Only this one phrasing per action is localizable: the app declares further English alternates that Xcode does not extract, so this string is the whole voice surface for the action in your language.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringSet" : {
+            "state" : "new",
+            "values" : [
+              "What's playing in ${applicationName}",
+              "What am I listening to in ${applicationName}"
+            ]
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Was läuft gerade in ${applicationName}"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "¿Qué se está reproduciendo en ${applicationName}?"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Qu'est-ce que j'écoute dans ${applicationName}"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cosa sto ascoltando in ${applicationName}"
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Wat speelt er in ${applicationName}"
+          }
+        }
+      }
+    }
+  },
+  "version" : "1.0"
+}

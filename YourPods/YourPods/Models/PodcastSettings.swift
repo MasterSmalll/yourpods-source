@@ -106,6 +106,8 @@ struct PodcastSettings: Codable, Hashable {
     /// Per-podcast notification override. nil/false = don't notify, true = notify.
     /// Opt-in model: users must explicitly enable per podcast.
     var notificationsEnabled: Bool? = nil
+    /// Per-podcast auto-hide override. nil = use global, 0 = disabled, N = custom days.
+    var autoHideUnplayedDays: Int? = nil
     
     /// Whether any setting is overridden from defaults.
     var hasOverrides: Bool {
@@ -119,7 +121,8 @@ struct PodcastSettings: Codable, Hashable {
         autoDownloadEpisodeLimit != nil ||
         markedPlayedBefore != nil ||
         privacyMode != nil ||
-        notificationsEnabled != nil
+        notificationsEnabled != nil ||
+        autoHideUnplayedDays != nil
     }
     
     static let useDefaults = PodcastSettings()
@@ -130,7 +133,7 @@ struct PodcastSettings: Codable, Hashable {
         case autoQueueMode, skipIntroSeconds, skipOutroSeconds, archiveOnComplete
         case playbackSpeed, autoDownloadNewEpisodes, downloadCleanupPolicy
         case autoDownloadEpisodeLimit, markedPlayedBefore
-        case privacyMode, notificationsEnabled
+        case privacyMode, notificationsEnabled, autoHideUnplayedDays
         case serverExtras
         case removeDownloadAfterPlay // legacy key for migration
     }
@@ -147,6 +150,7 @@ struct PodcastSettings: Codable, Hashable {
         markedPlayedBefore = try container.decodeIfPresent(Date.self, forKey: .markedPlayedBefore)
         privacyMode = try container.decodeIfPresent(Bool.self, forKey: .privacyMode)
         notificationsEnabled = try container.decodeIfPresent(Bool.self, forKey: .notificationsEnabled)
+        autoHideUnplayedDays = try container.decodeIfPresent(Int.self, forKey: .autoHideUnplayedDays)
         serverExtras = (try container.decodeIfPresent([String: AnyCodableValue].self, forKey: .serverExtras)) ?? [:]
         
         // Try new key first, fall back to legacy Bool
@@ -170,6 +174,7 @@ struct PodcastSettings: Codable, Hashable {
         try container.encodeIfPresent(markedPlayedBefore, forKey: .markedPlayedBefore)
         try container.encodeIfPresent(privacyMode, forKey: .privacyMode)
         try container.encodeIfPresent(notificationsEnabled, forKey: .notificationsEnabled)
+        try container.encodeIfPresent(autoHideUnplayedDays, forKey: .autoHideUnplayedDays)
         if !serverExtras.isEmpty {
             try container.encode(serverExtras, forKey: .serverExtras)
         }
@@ -195,9 +200,11 @@ struct PodcastSettings: Codable, Hashable {
         if let playbackSpeed { payload["playbackSpeed"] = .double(playbackSpeed) }
         if let autoDownloadNewEpisodes { payload["autoDownload"] = .bool(autoDownloadNewEpisodes) }
         if let downloadCleanupPolicy { payload["downloadCleanup"] = .string(downloadCleanupPolicy.serverValue) }
+        if let autoDownloadEpisodeLimit { payload["autoDownloadEpisodeLimit"] = .int(autoDownloadEpisodeLimit) }
         if let archiveOnComplete { payload["archiveOnComplete"] = .bool(archiveOnComplete) }
         if let privacyMode { payload["privacyMode"] = .bool(privacyMode) }
         if let notificationsEnabled { payload["notifications"] = .bool(notificationsEnabled) }
+        if let autoHideUnplayedDays { payload["autoHideUnplayedDays"] = .int(autoHideUnplayedDays) }
         
         // Merge unknown keys for round-tripping
         for (key, value) in serverExtras {
@@ -212,8 +219,8 @@ struct PodcastSettings: Codable, Hashable {
     static func fromServerPayload(_ payload: [String: AnyCodableValue]) -> PodcastSettings {
         let knownKeys: Set<String> = [
             "skipIntroSec", "skipOutroSec", "autopilot", "playbackSpeed",
-            "autoDownload", "downloadCleanup", "archiveOnComplete", "privacyMode",
-            "notifications"
+            "autoDownload", "downloadCleanup", "autoDownloadEpisodeLimit",
+            "archiveOnComplete", "privacyMode", "notifications", "autoHideUnplayedDays"
         ]
         
         var settings = PodcastSettings()
@@ -229,9 +236,11 @@ struct PodcastSettings: Codable, Hashable {
         else if case .int(let v) = payload["playbackSpeed"] { settings.playbackSpeed = Double(v) }
         if case .bool(let v) = payload["autoDownload"] { settings.autoDownloadNewEpisodes = v }
         if case .string(let v) = payload["downloadCleanup"] { settings.downloadCleanupPolicy = DownloadCleanupPolicy.fromServerValue(v) }
+        if case .int(let v) = payload["autoDownloadEpisodeLimit"] { settings.autoDownloadEpisodeLimit = v }
         if case .bool(let v) = payload["archiveOnComplete"] { settings.archiveOnComplete = v }
         if case .bool(let v) = payload["privacyMode"] { settings.privacyMode = v }
         if case .bool(let v) = payload["notifications"] { settings.notificationsEnabled = v }
+        if case .int(let v) = payload["autoHideUnplayedDays"] { settings.autoHideUnplayedDays = v }
         
         // Preserve unknown keys for round-tripping
         for (key, value) in payload where !knownKeys.contains(key) {
@@ -261,6 +270,7 @@ struct PodcastSettings: Codable, Hashable {
         if result.autoDownloadEpisodeLimit == nil { result.autoDownloadEpisodeLimit = serverSettings.autoDownloadEpisodeLimit }
         if result.privacyMode == nil { result.privacyMode = serverSettings.privacyMode }
         if result.notificationsEnabled == nil { result.notificationsEnabled = serverSettings.notificationsEnabled }
+        if result.autoHideUnplayedDays == nil { result.autoHideUnplayedDays = serverSettings.autoHideUnplayedDays }
         // markedPlayedBefore is local-only (not synced) — don't merge
         
         // Merge server extras: server values fill gaps, local extras take priority

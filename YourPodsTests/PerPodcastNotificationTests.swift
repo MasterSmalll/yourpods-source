@@ -7,8 +7,8 @@ import UserNotifications
 
 /// Tests for per-podcast notification controls.
 ///
-/// TDD Phase 1: These tests define the expected behavior for the opt-in
-/// per-podcast notification model. All tests should FAIL against stubs.
+/// These define the expected behavior for the opt-in per-podcast
+/// notification model.
 @MainActor
 final class PerPodcastNotificationTests: XCTestCase {
     

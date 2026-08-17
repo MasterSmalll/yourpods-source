@@ -1,0 +1,41 @@
+YourPods spreekt nu jouw taal.
+
+Duits, Spaans, Frans, Italiaans en Nederlands. De app volgt gewoon de taal die je apparaat al gebruikt, en je kunt die altijd wijzigen in Instellingen. Elk scherm is vertaald — ook alles wat VoiceOver voorleest en alles wat Siri terugzegt. Datums, tijdsduren, afspeelsnelheden en percentages volgen de notatie van jouw regio.
+
+De vertalingen zijn met AI gemaakt, en de app zegt dat er zelf bij. Zie je YourPods voor het eerst in een nieuwe taal, dan legt een scherm uit dat we vanuit het Engels vertalen met AI, dat een formulering er soms naast kan zitten, en hoe je meldt wat niet lekker loopt. Diezelfde uitleg staat blijvend in Instellingen.
+
+NIEUW
+- Hoofdstukafbeeldingen, en hoofdstukken rechtstreeks uit het audiobestand — ook uit bestanden waarbij andere apps geen hoofdstukken tonen
+- Notities: maak aantekeningen tijdens het luisteren en exporteer ze naar Markdown, Obsidian of Nextcloud
+- Een complete catalogus met Opdrachten voor automatiseringen en Siri
+- Apple Watch: een volwaardige speler, met het Speelt nu-scherm van het systeem, snelheidsregeling, slaaptimer en zelf gekozen sprongintervallen
+- Afleveringenweergave in je bibliotheek: al je abonnementen als één doorlopende, filterbare lijst
+- Afspeelwidget voor je beginscherm, en AirPlay- en Bluetooth-uitvoer kiezen vanuit de mini-speler
+- Zijn twee apparaten het oneens over waar je gebleven was, dan vraagt YourPods het je — en je kunt je antwoord meteen daar als standaard instellen
+- Verberg en toon afleveringen overal, verberg ze op lengte, en verberg oude afleveringen zodra je je abonneert
+- Groepeer je podcasts en geef een groep voorrang in je wachtrij
+- Exporteer mijn gegevens
+- Liquid Glass-vormgeving op iOS 26, met vier stijlen om uit te kiezen
+- Zoeken in transcripten, zoeken in afleveringen, en inloggen via Nextcloud Login Flow v2 met 2FA en SSO
+- YourPods Pro is nu verkrijgbaar als abonnement in de app. Het blijft optioneel — elke functie van de speler zit al in de app die je hebt gekocht
+
+OPGELOST
+- Afgespeeld-status, luisterpositie en je wachtrij komen nu overeen op al je apparaten: een aflevering die je op het web begon loopt op je telefoon door, het weghalen van "afgespeeld" blijft staan, en een aflevering die je op het web afmaakte blijft niet meer in de mini-speler hangen
+- Een aflevering die je halverwege pauzeerde wordt niet meer als afgespeeld gemarkeerd door een synchronisatie op de achtergrond, en doorspringen markeert de overgeslagen aflevering niet meer
+- Als je een andere aflevering aantikt, verdwijnt de aflevering waar je naar luisterde niet meer uit je wachtrij
+- "Synchroniseer nu" synchroniseert nu echt alles — het deed er maar twee van de zeven
+- Feeds worden betrouwbaar bijgewerkt bij synchroniseren, bij omlaag trekken om te verversen en bij verversen op de achtergrond
+- De kernfuncties van de Apple Watch-app werken: door je bibliotheek bladeren, verversen op de achtergrond, markeren als afgespeeld en de complicatie
+- Knoppen in de widget op je beginscherm bedienen het afspelen in plaats van de app te openen, en de widget toont weer de afbeelding
+- Het afspelen valt niet meer stil wanneer de volgende aflevering automatisch begint, en de afbeelding op het toegangsscherm, in de Dynamic Island en in CarPlay verandert netjes mee
+- Notities komen aan op het web, en het verwijderen van een notitie werkt door
+- De crashes en afsluitingen op de achtergrond die verloren sync veroorzaakten, zijn verholpen — beschadigde database, afsluitingen tijdens opschorting en watchdog-time-outs
+- De app sluit niet meer af als je op Herstel aankoop of Abonneer tikt
+
+SNELLER
+- Veel minder radio- en batterijgebruik op de Apple Watch tijdens het afspelen
+- Het verversen slaat ongewijzigde RSS-feeds over, en onafhankelijke synchronisatiestappen lopen naast elkaar
+
+YourPods vereist nu iOS 18.
+
+Bedankt aan iedereen die ons schreef. Hulp nodig of een functie op je verlanglijstje? https://asc.is/support/

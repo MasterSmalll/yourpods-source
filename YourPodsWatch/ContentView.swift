@@ -1,11 +1,28 @@
 import SwiftUI
+import WatchKit
 
 struct ContentView: View {
+
+    /// The final word of the watch's Now Playing VoiceOver labels.
+    ///
+    /// These were bare `"playing"` / `"paused"` literals interpolated into the
+    /// label. The label itself is a `LocalizedStringKey` and extracts fine, but
+    /// a literal inside an interpolation is a plain Swift `String` — so the one
+    /// word that says whether audio is actually running stayed English in every
+    /// language, inside a sentence that was otherwise translated.
+    private static func spokenPlaybackState(isPlaying: Bool) -> String {
+        isPlaying
+            ? String(localized: "a11y.playbackState.playing", defaultValue: "playing",
+                     comment: "Spoken by VoiceOver at the end of the watch's Now Playing label: '<title>, <show>, playing'. Lower case, mid-sentence — a state, not a command.")
+            : String(localized: "a11y.playbackState.paused", defaultValue: "paused",
+                     comment: "Spoken by VoiceOver at the end of the watch's Now Playing label: '<title>, <show>, paused'. Lower case, mid-sentence — a state, not a command.")
+    }
     @EnvironmentObject var sessionManager: WatchSessionManager
     @EnvironmentObject var audioManager: WatchAudioManager
-    
+
     var body: some View {
-        NavigationView {
+        TabView {
+            NavigationStack {
             List {
                 // MARK: - Now Playing on Watch (local playback)
                 if let currentEpisode = audioManager.currentEpisode {
@@ -31,7 +48,7 @@ struct ContentView: View {
                                 }
                             }
                             .accessibilityElement(children: .combine)
-                            .accessibilityLabel("Now Playing on Watch, \(currentEpisode.title), \(currentEpisode.album), \(audioManager.isPlaying ? "playing" : "paused")")
+                            .accessibilityLabel("Now Playing on Watch, \(currentEpisode.title), \(currentEpisode.album), \(Self.spokenPlaybackState(isPlaying: audioManager.isPlaying))")
                         }
                     }
                 }
@@ -58,10 +75,12 @@ struct ContentView: View {
                                         .lineLimit(1)
                                 }
                             }
+                            .accessibilityElement(children: .combine)
+                            .accessibilityLabel("Now Playing on iPhone, \(sessionManager.remoteTitle), \(sessionManager.remoteArtist), \(Self.spokenPlaybackState(isPlaying: sessionManager.remoteIsPlaying))")
                         }
                     }
                 }
-                
+
                 // MARK: - Quick Actions
                 Section {
                     Button(action: {
@@ -75,8 +94,9 @@ struct ContentView: View {
                                 .font(.headline)
                         }
                     }
+                    .accessibilityLabel("Play queue on iPhone")
                 }
-                
+
                 // MARK: - Library
                 Section {
                     NavigationLink(destination: WatchLibraryView()) {
@@ -88,6 +108,7 @@ struct ContentView: View {
                                 .font(.headline)
                         }
                     }
+                    .accessibilityLabel("Library, \(sessionManager.library.count) podcasts")
                 }
                 
                 // MARK: - Recently Updated
@@ -103,7 +124,7 @@ struct ContentView: View {
                             Spacer()
                             
                             if !sessionManager.recentEpisodes.isEmpty {
-                                Text("\(sessionManager.recentEpisodes.count)")
+                                Text(sessionManager.recentEpisodes.count, format: .number)
                                     .font(.caption2.bold())
                                     .foregroundColor(.white)
                                     .padding(.horizontal, 6)
@@ -148,9 +169,13 @@ struct ContentView: View {
                                     }
                                     
                                     Spacer()
-                                    
+
                                     episodeStatusView(for: episode)
                                 }
+                                .accessibilityElement(children: .combine)
+                                .accessibilityLabel(String(localized: "a11y.watch.queueRow",
+                                                           defaultValue: "\(episode.title), \(episode.album), \(queueStatusDescription(for: episode))",
+                                                           comment: "VoiceOver label for a queue row on the watch. Argument 1 is the episode title, 2 the show, 3 its download or playback state."))
                             }
                             .swipeActions(edge: .trailing) {
                                 Button {
@@ -165,10 +190,16 @@ struct ContentView: View {
                 }
             }
             .navigationTitle("YourPods")
+            }
+
+            // System Now Playing page: crown volume, play/pause/skip, output route.
+            // Apple: present full-screen in a non-scrolling container, nothing else on it.
+            NowPlayingView()
         }
+        .tabViewStyle(.verticalPage)
     }
-    
-    
+
+
     /// Routes Now Playing to PlayerView when the episode is available locally
     /// (downloaded file or streamable), otherwise falls back to RemotePlayerView
     /// for iPhone remote control. This prevents stalled playback when the episode
@@ -208,5 +239,12 @@ struct ContentView: View {
             Image(systemName: "exclamationmark.triangle")
                 .foregroundColor(.gray)
         }
+    }
+
+    private func queueStatusDescription(for episode: WatchEpisode) -> String {
+        if episode.localPath != nil { return "downloaded" }
+        if sessionManager.isDownloading(episodeId: episode.id) { return "downloading" }
+        if episode.streamUrl != nil { return "will stream" }
+        return "no audio source"
     }
 }

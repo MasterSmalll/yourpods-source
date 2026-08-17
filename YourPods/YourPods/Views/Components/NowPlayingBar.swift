@@ -11,6 +11,7 @@ struct NowPlayingBar: View {
     @Environment(DownloadManager.self) private var downloadManager
     @Environment(NavigationState.self) private var navigationState
     @Environment(\.modelContext) private var modelContext
+    @Environment(ChapterCoordinator.self) private var chapterCoordinator
     @State private var showFullPlayer = false
     @State private var episodeSheetItem: EpisodeSheetItem?
     @State private var showSpeedPicker = false
@@ -20,9 +21,15 @@ struct NowPlayingBar: View {
 
     @State private var isDraggingSeekBar = false
     @State private var dragProgress: Double = 0
-    @State private var chapters: [Chapter] = []
     @State private var transcript: Transcript?
-    
+    @State private var showAddNote = false
+
+    /// Chapters for the currently playing item, owned by `ChapterCoordinator`
+    /// rather than fetched independently here — see the
+    /// coordinator's own doc comment for the full embedded → feed fallback
+    /// chain and why it ranks embedded chapters first.
+    private var chapters: [Chapter] { chapterCoordinator.visibleChapters }
+
     /// Resolve the current Episode model from the QueueItem GUID.
     /// Searches subscriptions first, then falls back to creating a transient
     /// Episode from the QueueItem's data so the full detail sheet can be shown
@@ -42,7 +49,26 @@ struct NowPlayingBar: View {
         let pos = playerManager.currentPosition
         return chapters.last(where: { $0.startTime <= pos })
     }
-    
+
+    /// Mini-player thumbnail: the current chapter's own art when the chapter
+    /// declares one, otherwise the episode's artwork. Routes through the shared
+    /// `ChapterArtworkView.selection` gate — reading the coordinator's owned
+    /// `currentChapter` rather than recomputing selection here — so the
+    /// thumbnail swaps in lockstep with the full-screen player's main artwork.
+    @ViewBuilder
+    private func miniPlayerArtwork(episodeArtworkUrl: String?) -> some View {
+        switch ChapterArtworkView.selection(forCurrentChapter: chapterCoordinator.currentChapter) {
+        case .chapter(let chapter):
+            ChapterArtworkView(chapter: chapter, size: 44, cornerRadius: 6)
+        case .episode:
+            CachedAsyncImage(url: URL(string: episodeArtworkUrl ?? "")) { image in
+                image.resizable().aspectRatio(contentMode: .fill)
+            } placeholder: {
+                RoundedRectangle(cornerRadius: 6).fill(.quaternary)
+            }
+        }
+    }
+
     var body: some View {
         if let item = playerManager.audioManager.currentItem {
             VStack(spacing: 0) {
@@ -82,12 +108,10 @@ struct NowPlayingBar: View {
                 .animation(.easeInOut(duration: 0.15), value: isDraggingSeekBar)
                 .accessibilityElement()
                 .accessibilityLabel("Playback progress")
-                .accessibilityValue({
-                    let pos = Int(playerManager.currentPosition)
-                    let dur = Int(playerManager.currentDuration)
-                    guard dur > 0 else { return "" }
-                    return "\(EpisodeAccessibility.spokenDuration(pos)) of \(EpisodeAccessibility.spokenDuration(dur))"
-                }())
+                .accessibilityValue(EpisodeAccessibility.progressValue(
+                    position: Int(playerManager.currentPosition),
+                    duration: Int(playerManager.currentDuration)
+                ))
                 .accessibilityAdjustableAction { direction in
                     switch direction {
                     case .increment:
@@ -112,11 +136,11 @@ struct NowPlayingBar: View {
                     }
                     Spacer()
                     if isDraggingSeekBar {
-                        Text("-\(PlayerManager.formatTimestamp((1 - dragProgress) * playerManager.currentDuration))")
+                        Text(DurationFormatting.remainingTimestamp((1 - dragProgress) * playerManager.currentDuration))
                             .font(.system(size: 9).monospacedDigit())
                             .foregroundStyle(.secondary)
                     } else {
-                        Text("-\(PlayerManager.formatTimestamp(max(0, playerManager.currentDuration - playerManager.currentPosition)))")
+                        Text(DurationFormatting.remainingTimestamp(max(0, playerManager.currentDuration - playerManager.currentPosition)))
                             .font(.system(size: 9).monospacedDigit())
                             .foregroundStyle(.secondary)
                     }
@@ -126,27 +150,37 @@ struct NowPlayingBar: View {
                 
                 // Main row: artwork + title + controls + overflow menu
                 HStack(spacing: 10) {
-                    // Artwork (tapping opens episode details)
-                    CachedAsyncImage(url: URL(string: item.artworkUrl ?? "")) { image in
-                        image.resizable().aspectRatio(contentMode: .fill)
-                    } placeholder: {
-                        RoundedRectangle(cornerRadius: 6).fill(.quaternary)
-                    }
+                    // Artwork (tapping opens the full player — its big chapter
+                    // artwork is the point; the title tap below opens details).
+                    // The thumbnail itself now follows the current chapter's art
+                    // when the chapter declares one, falling back to episode art
+                    // via the same gate the full-screen player uses.
+                    miniPlayerArtwork(episodeArtworkUrl: item.artworkUrl)
                     .frame(width: 44, height: 44)
+                    .clipped()
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                     .onTapGesture {
-                        if let ep = currentEpisode {
-                            episodeSheetItem = EpisodeSheetItem(episode: ep)
-                        } else {
-                            showFullPlayer = true
-                        }
+                        showFullPlayer = true
                     }
+                    .accessibilityElement()
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityLabel("Open full player")
+                    .accessibilityHint("Double tap, to open the full player with chapter artwork and controls")
                     .contextMenu {
                         if let ep = currentEpisode {
                             Button {
                                 episodeSheetItem = EpisodeSheetItem(episode: ep)
                             } label: {
                                 Label("Details", systemImage: "info.circle")
+                            }
+                            
+                            Button {
+                                podcastManager.toggleHidden(episode: ep)
+                            } label: {
+                                Label(
+                                    podcastManager.episodeActionSync.isHidden(guid: ep.guid) ? "Unhide" : "Hide",
+                                    systemImage: podcastManager.episodeActionSync.isHidden(guid: ep.guid) ? "eye" : "eye.slash"
+                                )
                             }
                         }
                     }
@@ -189,6 +223,15 @@ struct NowPlayingBar: View {
                         isPlaying: playerManager.isPlaying
                     ))
                     .accessibilityHint("Double tap, to show episode details")
+                    .accessibilityAction(named: EpisodeAccessibility.hideActionName(
+                        isHidden: currentEpisode.map {
+                            podcastManager.episodeActionSync.isHidden(guid: $0.guid)
+                        } ?? false
+                    )) {
+                        if let ep = currentEpisode {
+                            podcastManager.toggleHidden(episode: ep)
+                        }
+                    }
                     
                     Spacer()
                     
@@ -243,6 +286,19 @@ struct NowPlayingBar: View {
                                 .font(.body)
                         }
                         .accessibilityLabel("Skip forward \(settings.skipForwardSeconds) seconds")
+
+                        // AirPlay / Bluetooth output picker.
+                        // The VoiceOver label is set once, on the UIKit view inside
+                        // RoutePickerView.makeUIView ("Audio output"); SwiftUI surfaces
+                        // that element, so we do NOT add a second .accessibilityLabel
+                        // here (a redundant one produces a phantom second VoiceOver stop).
+                        #if os(iOS)
+                        RoutePickerView(
+                            tint: UIColor.label,
+                            activeTint: UIColor.tintColor
+                        )
+                        .frame(width: 28, height: 28)
+                        #endif
                     }
                     .foregroundStyle(.primary)
                     
@@ -265,7 +321,7 @@ struct NowPlayingBar: View {
                                     .font(.system(size: 10, weight: .medium))
                                     .padding(.horizontal, 10)
                                     .padding(.vertical, 4)
-                                    .background(.ultraThinMaterial)
+                                    .yourPodsGlass(role: .floatingChrome, cornerRadius: 20)
                                     .clipShape(Capsule())
                             }
                             .buttonStyle(.plain)
@@ -280,7 +336,7 @@ struct NowPlayingBar: View {
                                     .font(.system(size: 10, weight: .medium))
                                     .padding(.horizontal, 10)
                                     .padding(.vertical, 4)
-                                    .background(.ultraThinMaterial)
+                                    .yourPodsGlass(role: .floatingChrome, cornerRadius: 20)
                                     .clipShape(Capsule())
                             }
                             .buttonStyle(.plain)
@@ -293,7 +349,7 @@ struct NowPlayingBar: View {
                     .padding(.bottom, 6)
                 }
             }
-            .background(.ultraThinMaterial)
+            .yourPodsGlass(role: .floatingChrome, cornerRadius: 0)
             // Episode detail sheet (mini player tap)
             .sheet(item: $episodeSheetItem) { item in
                 EpisodeDetailSheet(episode: item.episode)
@@ -326,7 +382,9 @@ struct NowPlayingBar: View {
             .sheet(isPresented: $showSleepTimer) {
                 SleepTimerSheet()
                     .environment(sleepTimer)
-                    .presentationDetents([.medium])
+                    .environment(settings)
+                    .presentationDetents([.medium, .large])
+                    .presentationBackground(.regularMaterial)
             }
             .sheet(isPresented: $showChapters) {
                 ChapterListSheet(chapters: chapters, currentPosition: playerManager.currentPosition) { chapter in
@@ -351,8 +409,26 @@ struct NowPlayingBar: View {
                     #endif
                 }
             }
+            .sheet(isPresented: $showAddNote) {
+                if let item = playerManager.audioManager.currentItem {
+                    AddEditNoteSheet(
+                        episodeUrl: item.audioUrl,
+                        podcastUrl: item.podcastUrl,
+                        episodeGuid: item.id,
+                        timestampSec: playerManager.currentPosition,
+                        podcastTitle: item.podcastTitle,
+                        episodeTitle: item.title,
+                        artUrl: item.artworkUrl,
+                        durationSec: playerManager.currentDuration > 0 ? playerManager.currentDuration : nil,
+                        transcriptUrl: item.transcriptUrl
+                    )
+                    .environment(podcastManager)
+                    #if os(iOS)
+                    .presentationDetents([.medium, .large])
+                    #endif
+                }
+            }
             .task(id: playerManager.currentEpisodeGuid) {
-                await loadChapters()
                 await loadTranscript()
             }
         }
@@ -366,7 +442,10 @@ struct NowPlayingBar: View {
             Button {
                 showSpeedPicker = true
             } label: {
-                Label("Speed: \(settings.playbackSpeed, specifier: "%.1f")×", systemImage: "gauge.with.needle")
+                Label(String(localized: "player.speedMenuItem",
+                             defaultValue: "Speed: \(DurationFormatting.speed(settings.playbackSpeed))",
+                             comment: "Menu item opening the playback-speed picker. The argument is the current rate, e.g. '1.5×'."),
+                      systemImage: "gauge.with.needle")
             }
             
             // Trim Silence
@@ -412,6 +491,13 @@ struct NowPlayingBar: View {
                     Label("Episode Details", systemImage: "info.circle")
                 }
             }
+
+            // Add Note
+            Button {
+                showAddNote = true
+            } label: {
+                Label("Add Note", systemImage: "note.text.badge.plus")
+            }
             
             // Mark as Played
             Button(role: .destructive) {
@@ -420,43 +506,56 @@ struct NowPlayingBar: View {
                 Label("Mark as Played", systemImage: "checkmark.circle")
             }
             
+            // Hide/Unhide
+            if let ep = currentEpisode {
+                Button {
+                    podcastManager.toggleHidden(episode: ep)
+                } label: {
+                    Label(
+                        podcastManager.episodeActionSync.isHidden(guid: ep.guid) ? "Unhide" : "Hide",
+                        systemImage: podcastManager.episodeActionSync.isHidden(guid: ep.guid) ? "eye" : "eye.slash"
+                    )
+                }
+            }
+            
             Divider()
             
             // Share sub-menu
             if let item = playerManager.audioManager.currentItem {
                 Menu {
                     Button {
-                        SharePresenter.present(items: ShareService.shareEpisode(
-                            title: item.title,
-                            podcastTitle: item.podcastTitle,
-                            link: currentEpisode?.link,
-                            audioUrl: item.audioUrl
-                        ))
-                    } label: {
-                        Label("Share Episode", systemImage: "waveform")
-                    }
-                    
+                        Task { @MainActor in
+                            let items = await ShareLinkBuilder.shared.makeItems(for: ShareRequest(
+                                kind: .episode, podcastUrl: item.podcastUrl,
+                                episodeUrl: item.audioUrl, episodeGuid: item.id, startSec: nil,
+                                episodeTitle: item.title, podcastTitle: item.podcastTitle,
+                                episodeLink: currentEpisode?.link))
+                            SharePresenter.present(items: items)
+                        }
+                    } label: { Label("Share Episode", systemImage: "waveform") }
+
                     Button {
-                        SharePresenter.present(items: ShareService.sharePodcast(
-                            title: item.podcastTitle,
-                            website: currentEpisode?.podcast?.website,
-                            feedUrl: item.podcastUrl
-                        ))
-                    } label: {
-                        Label("Share Podcast", systemImage: "antenna.radiowaves.left.and.right")
-                    }
-                    
+                        Task { @MainActor in
+                            let items = await ShareLinkBuilder.shared.makeItems(for: ShareRequest(
+                                kind: .podcast, podcastUrl: item.podcastUrl,
+                                episodeUrl: nil, episodeGuid: nil, startSec: nil,
+                                episodeTitle: nil, podcastTitle: item.podcastTitle,
+                                episodeLink: currentEpisode?.podcast?.website))
+                            SharePresenter.present(items: items)
+                        }
+                    } label: { Label("Share Podcast", systemImage: "antenna.radiowaves.left.and.right") }
+
                     Button {
-                        SharePresenter.present(items: ShareService.sharePosition(
-                            episodeTitle: item.title,
-                            podcastTitle: item.podcastTitle,
-                            position: playerManager.currentPosition,
-                            link: currentEpisode?.link,
-                            audioUrl: item.audioUrl
-                        ))
-                    } label: {
-                        Label("Share Position", systemImage: "clock")
-                    }
+                        Task { @MainActor in
+                            let items = await ShareLinkBuilder.shared.makeItems(for: ShareRequest(
+                                kind: .episode, podcastUrl: item.podcastUrl,
+                                episodeUrl: item.audioUrl, episodeGuid: item.id,
+                                startSec: Int(playerManager.currentPosition),
+                                episodeTitle: item.title, podcastTitle: item.podcastTitle,
+                                episodeLink: currentEpisode?.link))
+                            SharePresenter.present(items: items)
+                        }
+                    } label: { Label("Share Position", systemImage: "clock") }
                 } label: {
                     Label("Share…", systemImage: "square.and.arrow.up")
                 }
@@ -475,26 +574,19 @@ struct NowPlayingBar: View {
         transcript != nil && !(transcript?.items.isEmpty ?? true)
     }
     
-    // MARK: - Chapter Loading
-    
-    private func loadChapters() async {
-        chapters = []
-        guard let item = playerManager.audioManager.currentItem else { return }
-        chapters = await ChapterService.shared.fetchAllChapters(
-            chaptersUrl: item.chaptersUrl,
-            chaptersJSON: item.chaptersJSON,
-            description: item.episodeDescription
-        )
-    }
-    
     // MARK: - Transcript Loading
     
     private func loadTranscript() async {
         transcript = nil
-        guard let item = playerManager.audioManager.currentItem,
-              let transcriptUrl = item.transcriptUrl,
-              !transcriptUrl.isEmpty else { return }
-        transcript = await TranscriptService.shared.fetchTranscript(url: transcriptUrl)
+        guard let item = playerManager.audioManager.currentItem else { return }
+        // Prefer the live episode over the QueueItem's enqueue-time snapshot, which
+        // misses transcripts the feed published after the episode was queued.
+        let live = podcastManager.episodes(withGuids: [item.id]).first
+        guard let source = TranscriptService.resolveSource(
+            snapshotUrl: item.transcriptUrl, snapshotType: item.transcriptType,
+            liveUrl: live?.transcriptUrl, liveType: live?.transcriptType
+        ) else { return }
+        transcript = await TranscriptService.shared.fetchTranscript(url: source.url, type: source.type)
     }
 }
 
@@ -519,7 +611,7 @@ private struct SpeedPickerSheet: View {
                     Button {
                         playerManager.setPlaybackRate(Float(speed))
                     } label: {
-                        Text("\(speed, specifier: "%.2g")×")
+                        Text(DurationFormatting.speed(speed))
                             .font(.subheadline.bold())
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 12)

@@ -50,6 +50,11 @@ protocol SyncClient: Actor {
     /// - Returns: Array of episode actions from the server.
     func getEpisodeActions(since: Int) async throws -> [EpisodeAction]
     
+    /// Fetch episode actions with server-provided timestamp for since advancement.
+    /// Default implementation wraps `getEpisodeActions` with nil server timestamp.
+    /// Clients that parse server timestamps should override this method.
+    func getEpisodeActionsPage(since: Int) async throws -> EpisodeActionsPage
+    
     // MARK: - Queue Sync (YourPods Pro only)
     
     /// Whether this sync backend supports full queue synchronization.
@@ -65,17 +70,51 @@ protocol SyncClient: Actor {
     /// Pull the server queue.
     /// Only call when `supportsQueueSync` is `true`.
     func getQueue() async throws -> [QueueSyncItem]
-    
+
+    /// Push the full queue with an optimistic-concurrency base version.
+    /// The server applies only if `baseVersion` matches its current queue version,
+    /// otherwise it returns 409 → `YourPodsProError.conflict`. `nil` = unconditional
+    /// full-replace (legacy / no CAS). The default impl ignores the version, so the
+    /// many test spies and gPodder need not implement it.
+    @discardableResult
+    func syncQueue(items: [QueueSyncItem], baseVersion: Int64?) async throws -> QueueSyncResult
+
+    /// Pull the server queue together with its current version token.
+    /// The default impl returns `getQueue()`'s items with `version: nil`.
+    func getQueueWithVersion() async throws -> QueueSyncPullResult
+
     /// Delete a single queue item on the server (tombstone).
     /// Called when the user removes an episode from the queue on a Pro account.
     /// Only call when `supportsQueueSync` is `true`.
     func deleteQueueItem(episodeUrl: String) async throws
-    
+
+    /// Additively add a single episode to the server queue (explicit user re-add).
+    /// Goes through POST /queue/add, which server-side clears completed + the deletion
+    /// tombstone and resets position — unlike the full-replace syncQueue, this is
+    /// additive so it can't clobber an item another device just added. No-op default.
+    func addToQueue(item: QueueSyncItem, addToTop: Bool) async throws
+
     // MARK: - Playback Sync (YourPods Sync / Pro)
     
     /// Push current playback state for a specific episode.
     /// Used by the orchestrator to push `nowPlaying: true` with `deviceId`
     /// before queue sync, enabling cross-device handoff.
+    ///
+    /// `baseVersion` is the CAS baseline (per the sync contract) and is **required at every call
+    /// site** — deliberately not defaulted. Swift protocol requirements cannot carry
+    /// default values, so a defaulted parameter on the concrete type would stop it
+    /// witnessing this requirement and dispatch silently to the no-op below. That has
+    /// shipped twice. It also means every push has to make a conscious baseline decision
+    /// at compile time rather than inheriting the legacy last-write-wins path by omission:
+    ///
+    /// - `nil` → legacy LWW. Correct only where no baseline is tracked yet.
+    /// - `0`   → "I believe no row exists" (`PlaybackReconciler.baseVersionForPush`).
+    /// - `N`   → the version last agreed with the server.
+    ///
+    /// Returns the per-episode outcome, or `nil` for clients/servers that do not answer
+    /// with one. `conflicts[]` is the caller's work: a conflict nobody reads is a conflict
+    /// nobody resolves, and the divergence it reported stays on screen.
+    @discardableResult
     func syncPlayback(
         podcastUrl: String,
         episodeUrl: String,
@@ -84,14 +123,53 @@ protocol SyncClient: Actor {
         durationSec: Double?,
         nowPlaying: Bool?,
         completed: Bool?,
-        deviceId: String?
-    ) async throws
-    
+        deviceId: String?,
+        clientUpdatedAt: Date?,
+        baseVersion: Int64?
+    ) async throws -> ProPlaybackSyncResponse?
+
+    /// Push episode actions and report the `version` each accepted write earned, per the sync contract.
+    ///
+    /// On Pro these actions are `POST /playback/sync` items, so every one of them bumps
+    /// the row's version — this is the highest-frequency writer there is, firing on the
+    /// user's sync interval throughout playback. Discarding the answer is what left every
+    /// baseline stale from the first progress ping onward.
+    ///
+    /// They go out versionless on purpose and stay that way: they are gPodder-shaped rows
+    /// replayed from an outbox, carrying their own (often old) event times and no
+    /// per-episode baseline to speak for. Making them conditional would strand them.
+    /// The ack is the part that was missing, not the baseline.
+    func uploadEpisodeActionsRecordingVersions(
+        _ actions: [EpisodeAction]
+    ) async throws -> [ProPlaybackSyncResponse.Accepted]
+
     /// Get the most recent playback state from the server.
     /// Used by `reconcileNowPlayingWithServer()` to detect cross-device completion.
     /// Returns nil for gPodder/Vault (default no-op).
     func getCurrentPlayback() async throws -> ProPlaybackState?
-    
+
+    /// Authoritatively mark an episode unplayed on the server (relisten / mark-unplayed):
+    /// clears completed + now-playing, resets position to 0, propagates via the delta.
+    /// No-op for gPodder/Vault (default).
+    func uncompletePlayback(
+        podcastUrl: String,
+        episodeUrl: String,
+        episodeGuid: String?,
+        clientUpdatedAt: Date?
+    ) async throws
+
+    /// Resolve a proposed feed-URL rewrite.
+    ///
+    /// `accept` is a required part of the wire shape, not a convenience: the handler renames
+    /// the subscription only when it is true, and Go decodes an absent bool to `false`, so
+    /// omitting it turns the user's Accept into a Reject.
+    ///
+    /// **Throws on failure, and the caller must treat that as "not resolved."** The local
+    /// rename may only be committed after this returns, or the library and the server end up
+    /// permanently disagreeing about the feed with no way to retry.
+    @discardableResult
+    func resolveUrlRewrite(oldUrl: String, newUrl: String, accept: Bool) async throws -> ProResolveUrlRewriteResponse
+
     /// Whether this client supports cross-device playback reconciliation.
     /// `true` for YourPods Pro (has `/playback/current` endpoint).
     /// `false` for gPodder/Vault (default).
@@ -154,6 +232,14 @@ protocol SyncClient: Actor {
     func unhideEpisode(episodeUrl: String) async throws
 }
 
+/// Paginated response from getEpisodeActions, with an optional server-provided timestamp.
+/// When the server provides a timestamp, use it for `since` advancement (spec-compliant).
+/// When nil (mock/legacy), fall back to the newest action timestamp or wall-clock.
+struct EpisodeActionsPage {
+    let actions: [EpisodeAction]
+    let serverTimestamp: Int?   // nil when backend/mock didn't provide one
+}
+
 // MARK: - Default No-Op Implementations
 
 /// Default no-op for methods that only apply to YourPods Pro.
@@ -161,10 +247,31 @@ protocol SyncClient: Actor {
 extension SyncClient {
     var returnsFullSubscriptionList: Bool { false }
     
+    /// Default implementation wraps getEpisodeActions with nil server timestamp.
+    /// Clients that provide server timestamps should override this method.
+    func getEpisodeActionsPage(since: Int) async throws -> EpisodeActionsPage {
+        EpisodeActionsPage(actions: try await getEpisodeActions(since: since), serverTimestamp: nil)
+    }
+
+    /// Default: upload and report no versions. Same shape as `syncQueue(items:baseVersion:)`
+    /// — a separate entry point so gPodder and the ~10 test spies keep witnessing the
+    /// original `uploadEpisodeActions` requirement without change.
+    func uploadEpisodeActionsRecordingVersions(
+        _ actions: [EpisodeAction]
+    ) async throws -> [ProPlaybackSyncResponse.Accepted] {
+        _ = try await uploadEpisodeActions(actions)
+        return []
+    }
+    
     func deleteQueueItem(episodeUrl: String) async throws {
         // No-op for gPodder / non-Pro clients
     }
-    
+
+    func addToQueue(item: QueueSyncItem, addToTop: Bool) async throws {
+        // No-op for gPodder / non-Pro clients
+    }
+
+    @discardableResult
     func syncPlayback(
         podcastUrl: String,
         episodeUrl: String,
@@ -173,16 +280,36 @@ extension SyncClient {
         durationSec: Double?,
         nowPlaying: Bool?,
         completed: Bool?,
-        deviceId: String?
-    ) async throws {
+        deviceId: String?,
+        clientUpdatedAt: Date?,
+        baseVersion: Int64?
+    ) async throws -> ProPlaybackSyncResponse? {
         // No-op for gPodder / non-Pro clients
+        return nil
     }
     
     func getCurrentPlayback() async throws -> ProPlaybackState? {
         // No-op for gPodder / non-Pro clients — returns nil
         return nil
     }
-    
+
+    func uncompletePlayback(
+        podcastUrl: String,
+        episodeUrl: String,
+        episodeGuid: String?,
+        clientUpdatedAt: Date?
+    ) async throws {
+        // No-op for gPodder / non-Pro clients
+    }
+
+    /// gPodder / Vault have no rewrite endpoint. Succeeding is correct: the decision is
+    /// purely local for them, so Accept must still rename the feed. Failing here would make
+    /// Accept a no-op for every non-Pro user.
+    @discardableResult
+    func resolveUrlRewrite(oldUrl: String, newUrl: String, accept: Bool) async throws -> ProResolveUrlRewriteResponse {
+        ProResolveUrlRewriteResponse(message: "no rewrite endpoint for this profile", updated: nil)
+    }
+
     var supportsPlaybackReconciliation: Bool { false }
     
     func patchProfileSettings(profileName: String, payload: [String: AnyCodableValue]) async throws {
@@ -219,6 +346,22 @@ extension SyncClient {
     
     func unhideEpisode(episodeUrl: String) async throws {
         // No-op for gPodder / non-Pro clients
+    }
+
+    // MARK: - Queue version / CAS — default no-CAS behavior
+
+    /// Default: ignore the base version and do an unconditional full-replace
+    /// (legacy behavior). `YourPodsProClient` overrides this to send `baseVersion`
+    /// and map a 409 to `YourPodsProError.conflict`. Keeps the ~29 test spies and
+    /// gPodder working unchanged (they only implement `syncQueue(items:)`).
+    @discardableResult
+    func syncQueue(items: [QueueSyncItem], baseVersion: Int64?) async throws -> QueueSyncResult {
+        try await syncQueue(items: items)
+    }
+
+    /// Default: pull via `getQueue()` and report no version.
+    func getQueueWithVersion() async throws -> QueueSyncPullResult {
+        QueueSyncPullResult(items: try await getQueue(), version: nil)
     }
 }
 
@@ -266,4 +409,20 @@ struct QueueDroppedItem {
 struct QueueSyncResult {
     let items: [QueueSyncItem]
     let droppedItems: [QueueDroppedItem]
+    /// Server's queue version after this write. `nil` for non-Pro
+    /// backends or a server that predates the version token.
+    let version: Int64?
+
+    init(items: [QueueSyncItem], droppedItems: [QueueDroppedItem], version: Int64? = nil) {
+        self.items = items
+        self.droppedItems = droppedItems
+        self.version = version
+    }
+}
+
+/// Return type for a queue pull that also carries the server's current version
+/// token. `version` is `nil` for non-Pro / legacy servers.
+struct QueueSyncPullResult {
+    let items: [QueueSyncItem]
+    let version: Int64?
 }

@@ -22,14 +22,20 @@ final class CarPlayService: NSObject {
     weak var playerManager: PlayerManager?
     weak var audioManager: AudioManager?
     var networkMonitor: NetworkMonitor?
-    
+    /// Owns chapter state for the currently playing item. Set by
+    /// YourPodsApp alongside the other dependencies above — CarPlayService is
+    /// a singleton (`static let shared`) and can't take constructor args, so
+    /// property injection is the established pattern here (see the other
+    /// `weak var`s). `ChapterCoordinator` is `@MainActor`, and so is this
+    /// class (`@MainActor final class CarPlayService`), so reading
+    /// `chapterCoordinator?.visibleChapters` below is already on the right
+    /// actor — no `MainActor.run` needed.
+    weak var chapterCoordinator: ChapterCoordinator?
+
     // CarPlay state
     private var interfaceController: CPInterfaceController?
     private var tabBarTemplate: CPTabBarTemplate?
-    
-    // Chapter state for the current episode
-    private var currentChapters: [Chapter]?
-    
+
     // Image cache — uses shared ImageCacheStore for disk cache fallback.
     // Previously this was a CarPlay-local NSCache that was wiped on every
     // CarPlay connect, causing missing artwork on low/no network.
@@ -102,16 +108,15 @@ final class CarPlayService: NSObject {
             self?.updateCarPlayButtons()
         }
         
-        // Load chapters when episode changes
-        let existingItemHandler = audioManager?.onItemChanged
-        audioManager?.onItemChanged = { [weak self] item in
-            existingItemHandler?(item)
-            self?.loadChaptersForCurrentEpisode(item)
-        }
-        
-        // Load chapters for already-playing episode
-        loadChaptersForCurrentEpisode(audioManager?.currentItem)
-        
+        // Chapters no longer need their own onItemChanged wrap here:
+        // ChapterCoordinator.attach(to:), wired once in YourPodsApp.init(),
+        // already reloads `chapters` on every item change independent of
+        // CarPlay's connection state. seekToPreviousChapter/seekToNextChapter
+        // read chapterCoordinator?.visibleChapters directly at the moment the
+        // user presses the button, which is always well after the coordinator
+        // has resolved the current item — so there is nothing to snapshot or
+        // pre-load here.
+
         updateContent()
     }
     
@@ -181,7 +186,7 @@ final class CarPlayService: NSObject {
         RecentlyUpdatedFilter.filter(
             episodes: subscriptions.flatMap { $0.episodes },
             limit: 20
-        )
+        ).episodes
     }
     
     // MARK: - Now Playing Tab
@@ -241,7 +246,7 @@ final class CarPlayService: NSObject {
                 var detail = queueItem.podcastTitle
                 if queueItem.positionSeconds > 0, let dur = queueItem.durationSeconds, dur > 0 {
                     let remaining = max(0, dur - queueItem.positionSeconds)
-                    detail += " • \(PlayerManager.formatDuration(TimeInterval(remaining))) left"
+                    detail += " • \(DurationFormatting.remaining(TimeInterval(remaining)))"
                 }
                 
                 let item = CPListItem(text: queueItem.title, detailText: detail)
@@ -353,7 +358,7 @@ final class CarPlayService: NSObject {
     // MARK: - Episode List (pushed)
     
     private func showEpisodes(for podcast: Podcast) {
-        let sorted = podcast.episodes.sorted { ($0.pubDate ?? .distantPast) > ($1.pubDate ?? .distantPast) }
+        let sorted = podcast.episodes.sorted(by: episodesByFeedOrder)
         
         let items = sorted.prefix(50).map { episode -> CPListItem in
             var detail = ""
@@ -507,34 +512,22 @@ final class CarPlayService: NSObject {
     }
     
     // MARK: - Chapter Navigation
-    
-    private func loadChaptersForCurrentEpisode(_ item: QueueItem?) {
-        currentChapters = nil
-        guard let item else { return }
-        
-        Task {
-            var chapters: [Chapter] = []
-            
-            // Try Podcasting 2.0 chapters URL first
-            if let chaptersUrl = item.chaptersUrl, !chaptersUrl.isEmpty {
-                chapters = await ChapterService.shared.fetchChapters(url: chaptersUrl)
-            }
-            
-            // Fall back to description-parsed chapters
-            if chapters.isEmpty, let description = item.episodeDescription {
-                chapters = ChapterService.parseChaptersFromDescription(description)
-            }
-            
-            self.currentChapters = chapters
-            if !chapters.isEmpty {
-                self.logger.info("Loaded \(chapters.count) chapters for CarPlay")
-            }
-        }
-    }
-    
+    //
+    // Reads straight from ChapterCoordinator.visibleChapters rather
+    // than hand-rolling a fallback chain — the old chain here called only
+    // `ChapterService.shared.fetchChapters(url:)` then description parsing,
+    // silently skipping inline Podlove `chaptersJSON`, so a Podlove-only feed
+    // showed no chapters at all in CarPlay. The coordinator's own fallback
+    // chain (embedded → podcast:chapters JSON → inline Podlove → description)
+    // fixes that. See `chapterCoordinator`'s doc comment above for why no
+    // `MainActor.run` is needed here.
+
     private func seekToPreviousChapter() {
-        guard let chapters = currentChapters, !chapters.isEmpty,
-              let audio = audioManager else { return }
+        guard let chapters = chapterCoordinator?.visibleChapters, !chapters.isEmpty,
+              let audio = audioManager else {
+            logger.debug("CarPlay: no chapters available for previous-chapter seek")
+            return
+        }
         let pos = audio.currentPosition
         let currentIdx = chapters.lastIndex(where: { $0.startTime <= pos }) ?? 0
         // If within first 3s of current chapter, go to previous; otherwise restart current
@@ -542,10 +535,13 @@ final class CarPlayService: NSObject {
         audio.seek(to: chapters[targetIdx].startTime)
         logger.info("CarPlay seek to chapter: \(chapters[targetIdx].title)")
     }
-    
+
     private func seekToNextChapter() {
-        guard let chapters = currentChapters, !chapters.isEmpty,
-              let audio = audioManager else { return }
+        guard let chapters = chapterCoordinator?.visibleChapters, !chapters.isEmpty,
+              let audio = audioManager else {
+            logger.debug("CarPlay: no chapters available for next-chapter seek")
+            return
+        }
         let pos = audio.currentPosition
         let currentIdx = chapters.lastIndex(where: { $0.startTime <= pos }) ?? 0
         guard currentIdx + 1 < chapters.count else {

@@ -17,7 +17,16 @@ import SwiftUI
 ///     .textFieldStyle(.roundedBorder)
 /// ```
 struct RevealableSecureField: View {
-    let label: String
+    /// `LocalizedStringKey`, not `String`.
+    ///
+    /// As a `String` this took the non-localizing overload of `TextField` and
+    /// `SecureField`, so every visible placeholder passed in here — "Current
+    /// Password", "New Password", "Confirm New Password", "App Password" —
+    /// was never extracted and stayed English in every language. The
+    /// `.accessibilityLabel` copies at those call sites *were* in the catalog,
+    /// so the fields read correctly to VoiceOver while showing English on
+    /// screen, which is why nothing looked wrong.
+    let label: LocalizedStringKey
     @Binding var text: String
 
     @State private var isRevealed = false

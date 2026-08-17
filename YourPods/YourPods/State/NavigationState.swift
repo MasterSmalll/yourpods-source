@@ -32,4 +32,30 @@ final class NavigationState {
         podcastToNavigate = podcast
         selectedTab = 1
     }
+
+    // MARK: - Deep-link share presentation
+
+    /// Preview sheets for not-followed shared content (root view observes these).
+    var pendingSharedEpisode: SharedEpisode?
+    var pendingSharedPodcast: SharedPodcast?
+    /// Known (followed) shared episode → present the real EpisodeDetailSheet at root.
+    var deepLinkEpisode: GuidSheetItem?
+    /// Known podcast deep link → ContentView routes to Library.
+    var knownPodcastFeedToOpen: String?
+    /// A deep link couldn't be resolved → ContentView shows a brief alert.
+    var deepLinkFailed = false
+
+    /// Apply a router outcome to the presentation state.
+    func apply(_ outcome: DeepLinkOutcome) {
+        switch outcome {
+        case .knownEpisode(let guid):   deepLinkEpisode = GuidSheetItem(id: guid)
+        case .previewEpisode(let s):    pendingSharedEpisode = s
+        case .knownPodcast(let feed):   knownPodcastFeedToOpen = feed
+        case .previewPodcast(let s):    pendingSharedPodcast = s
+        case .failed:                   deepLinkFailed = true
+        }
+    }
 }
+
+/// Identity wrapper so a known-episode deep-link guid can drive `.sheet(item:)`.
+struct GuidSheetItem: Identifiable, Equatable { let id: String }

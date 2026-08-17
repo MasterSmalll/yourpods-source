@@ -1,25 +1,39 @@
 # YourPods
 
-> YourPods is a gPodder-compatible, privacy-first, self-hosted podcast player for iOS, macOS, watchOS, and Apple Watch — built natively in Swift and SwiftUI. Sync your subscriptions and listening progress across all your devices using your own Nextcloud server. Version 2.0.4.
+> YourPods is a gPodder-compatible, privacy-first, self-hosted podcast player for iOS, macOS, watchOS, and Apple Watch — built natively in Swift and SwiftUI. Sync your subscriptions and listening progress across all your devices using your own Nextcloud server. Version 26.8.0.
+
+## Versioning
+
+Versions follow a calendar scheme, `yy.mm.vv` — year, month, and the release's index within that month. It supersedes the 2.0.x semver line as of August 2026; 26.8.0 is what 2.0.5 would have been.
+
+## Licensing & Cost
+
+gPodder sync, Nextcloud sync, and local Vault Mode are subscription-free and always will be. There is no account to create and no feature behind a paywall on the self-hosted path. YourPods separately offers an optional hosted account, YourPods Cloud: a free tier (subscriptions and listen positions) and a paid YourPods Pro tier (web player, cross-device Up Next handoff, notes sync). Pricing is on the App Store listing only. The app itself is GPLv3.
 
 ## Project Info
 
 - [README](README.md): Main documentation and feature overview
 - [Contributing](CONTRIBUTING.md): Developer guide and contribution rules
 - [License](LICENSE): GNU General Public License v3.0
+- [Notice](NOTICE.md): Third-party attribution — OPAWG tracker prefix list (MIT), Auphonic chapter test fixtures (CC BY 3.0 AT)
 
 ## Core Features
 
-- **Native Apple App**: Built in Swift 5.9 and SwiftUI, targeting iOS 17+, macOS 14+, watchOS 10+, and with native CarPlay integrations.
+- **Native Apple App**: Built in Swift 5.10 and SwiftUI, targeting iOS 18+, macOS 14+, watchOS 10+, and with native CarPlay integrations.
 - **Privacy**: No tracking, analytics, or ads. Fully self-hosted sync via Nextcloud/gPodder.
-- **P3 (Privacy Preserving Playback)**: Blocks 30+ tracking and ad-insertion domains from episode URLs before playback. Enable globally or per-podcast. Green shield icon on Now Playing when active.
+- **P3 (Privacy Preserving Playback)**: Strips 39 tracking prefixes covering 25 analytics services from episode URLs before playback, from a bundled snapshot of the OPAWG public prefix registry plus a curated supplement. Matched by host, so a tracker changing its URL shape doesn't defeat it. Also strips `utm_*` and AdsWizz attribution parameters while leaving signed playback parameters intact. Dynamic ad-insertion URLs (Megaphone, AdsWizz) are deliberately passed through untouched — P3 is a privacy tool, not an ad blocker. Enable globally or per-podcast. Green shield icon on Now Playing when active.
+- **Episode Notes**: Timestamped notes at any point in an episode, with colours and tags, anchored optionally to a chapter or a transcript line. Browsable and filterable from the Library. Free for all users on iPhone, iPad, and Mac.
+- **Notes Export**: Markdown file with YAML frontmatter, Obsidian vault (per-episode note, daily-note append, or share sheet), or your own Nextcloud (Markdown files or real Nextcloud Notes, filed by podcast).
+- **Localization**: English, German, Spanish, French, Italian, and Dutch — over 1,080 strings translated per language, covering the app, Apple Watch, widgets, Live Activity, complication, Siri phrases and replies, and VoiceOver. Follows the per-app language set in iOS/macOS Settings; no in-app picker.
 - **New Episode Notifications**: Local push notifications when background refresh discovers new episodes. Per-podcast controls. 100% local — no push servers.
 - **Hidden Episodes**: Hide episodes to declutter feeds without affecting listening stats. Batch-hide old episodes. Hidden state syncs across devices.
 - **Podcast Groups**: Organize subscriptions into named folders. Bulk-move shows. Browse groups in CarPlay.
 - **Multi-Profile**: Switch between different servers or user accounts instantly. Local-only accounts (Vault Mode) supported.
 - **Sync Conflict Management**: Smart conflict resolution with options to keep local state or overwrite from server.
 - **Last Synced Timestamp**: Displays the last sync time in settings for transparency.
-- **Cross-Device Queue Sync**: Queue syncs across devices via your gPodder server automatically.
+- **Cross-Device Sync**: Subscriptions, listening positions, played state, and hidden episodes sync via your gPodder server automatically, with per-episode version checks so two devices can't overwrite each other's position. The gPodder protocol does not carry a queue, so Up Next stays per-device on a self-hosted server; cross-device Up Next handoff is a YourPods Pro feature.
+- **Sign in with Nextcloud**: Browser-based Nextcloud Login Flow v2 instead of manually created app passwords, with one-tap re-authentication when access expires. Manual app-password entry remains available.
+- **Share Links**: Share an episode, a podcast, or the current playback position as a share.yourpods.app link, minted with Apple device attestation (App Attest on iOS/iPadOS, DeviceCheck on macOS) so no account is required. Opening a link resolves to the episode, or to a preview sheet with Play, Add to Queue, and Follow Show.
 - **OPML Import & Export**: Migrate subscriptions to or from other apps, or back up your library. Enriched export preserves Podcast Groups and Listening Profiles.
 - **Password-Protected Feeds**: Subscribe to private RSS feeds (Patreon, premium podcasts). Credentials stored securely on-device.
 - **Local Accounts (Vault Mode)**: Use YourPods without a sync server for fully offline, on-device podcast management.
@@ -29,8 +43,8 @@
 ## Player & Audio
 
 - **Native AVFoundation Audio Engine**: Built on AVAudioEngine for low-latency, reliable playback with Bluetooth, CarPlay, and Siri interruption recovery.
-- **Live Transcripts**: Interactive, searchable transcripts with auto-scroll.
-- **Smart Chapters**: Embedded chapter support (RSS Podcasting 2.0 and description-parsed) for easy navigation.
+- **Live Transcripts**: Interactive transcripts with auto-scroll and in-transcript search with match navigation. Formats: SRT, VTT, JSON, plain text, HTML, Markdown, RTF.
+- **Smart Chapters**: Chapters embedded in the audio file itself (ID3 CHAP in MP3, chapter atoms in MP4/M4A) are preferred over feed chapters because they stay aligned after dynamic ad insertion. Podcasting 2.0, RSS, and description-parsed chapters also supported. Chapter artwork follows playback on the player, lock screen, Control Center, and CarPlay.
 - **Smart Queue**: Drag-and-drop reordering with "Now Playing" and "Up Next" sections, visible episode lengths.
 - **Precision Control**: Granular playback speed (0.5×–3×) and custom sleep timers.
 - **Skip Intro/Outro**: Configurable per-second precision (0–120s).
@@ -40,6 +54,16 @@
 - **Clear Queue**: One-tap clear from Up Next overflow menu with keep-current or stop-all options.
 - **App Icon Badge**: Show unplayed episode count on the app icon.
 - **Trim Silence**: Skip silent passages during playback.
+- **AirPlay Picker**: Output-device picker in the mini player for AirPlay and Bluetooth routes.
+- **Pause on Disconnect**: Playback pauses when headphones are unplugged or a Bluetooth/AirPlay device drops.
+
+## Library & Browsing
+
+- **Library Episodes View**: Switch the Library between Podcasts and Episodes — one flat episode list across every subscription, honouring the All / Downloaded / Unplayed / In Progress filters, arranged Newest First, By Date, or By Show.
+- **Episode Search**: Library search covers episode titles across every subscription, with a Search Details option that extends it to episode descriptions and shows the matching snippet.
+- **Episode Swipe Actions**: Assign Add to Queue, Play Next, Mark as Played, Hide, or Play Now to left and right swipe (Settings → Episode Swipe Actions).
+- **Auto-Hide Unplayed Episodes**: Optionally hide unplayed episodes older than 7–90 days, on launch and every refresh, with a per-podcast override, a per-podcast log, and Undo All for 30 days. Downloaded and part-listened episodes are exempt.
+- **Recently Updated**: Home section guarantees each podcast's newest episode a slot before a prolific show fills the rest; three-month window, configurable count (9–36, default 27), with a full All Recent Episodes list.
 
 ## Discovery
 
@@ -53,33 +77,42 @@
 - **CarPlay**: Full queue management, Recently Updated episodes tab, Now Playing with chapter navigation, playback speed and trim-silence controls. Artwork with placeholder loading.
 - **Apple Watch**: Standalone playback, offline episode transfer, configurable podcast sync limit, complications showing playback status, true background audio with auto-advance, Recently Updated home screen, and watch-specific Wi-Fi-only download toggle.
 - **Dynamic Island**: Real-time playback status via Live Activities on supported iPhones.
-- **Siri & App Intents**: 10 native voice commands — play, pause, stop, resume, skip forward/backward, next episode, play latest, play specific podcast, set playback speed. All available as Shortcuts.
-- **VoiceOver**: Comprehensive accessibility support — custom rotor actions, adjustable seek bars, descriptive labels on every control.
-- **Widgets & Complications**: Lock screen and watch face widgets showing current playback.
+- **Siri & App Intents**: 32 Shortcuts actions — playback control, chapter navigation, sleep timer, downloads, queue management, bookmarking the current moment, share links, and value-returning actions (Get Current Episode, Get Queue, Get Podcasts, What's Next, Get Listening Stats, Get Share Link) that chain into automations. Ten of the 32 carry "Hey Siri" voice phrases — Apple caps `AppShortcutsProvider` at 10. Podcast parameters resolve against your library with an artwork picker rather than typed text.
+- **VoiceOver**: Comprehensive accessibility support — custom rotor actions, adjustable seek bars, descriptive labels on every control, all localized.
+- **Widgets & Complications**: Now Playing Home Screen widget in small, medium, and large — artwork, titles, progress with a live elapsed clock; play/pause and skip controls on medium and large; Up Next list on large. Plus Lock Screen widgets and watch face complications showing current playback, up next, and queue count.
+- **Liquid Glass**: On iOS 26, the mini player, player controls, Home cards, search cards, and stat cards use Apple's Liquid Glass material. Glass Style setting (Settings → Appearance): Classic, Clear Glass, Glass, High Contrast Glass. Reduce Transparency and Increase Contrast override the choice. Pre-iOS 26 builds keep classic materials.
 
 ## Technical
 
-- **Language**: Swift 5.9
+- **Language**: Swift 5.10
 - **UI Framework**: SwiftUI
-- **Storage**: SwiftData (iOS 17+)
+- **Storage**: SwiftData
 - **Audio**: AVFoundation / AVAudioEngine
-- **Sync**: gPodder-compatible (Nextcloud gpodder-sync). Implements Open Podcast Sync protocol for subscriptions (SubscriptionDelta) and actions (EpisodeAction).
+- **Sync**: gPodder-compatible (Nextcloud gpodder-sync). Implements Open Podcast Sync protocol for subscriptions (SubscriptionDelta) and actions (EpisodeAction). Nextcloud Login Flow v2 for browser sign-in. Optional YourPods Cloud backend.
+- **Localization**: String Catalogs (`.xcstrings`), English source, localized to de/es/fr/it/nl
 - **Build System**: XcodeGen (`project.yml`) + Swift Package Manager (`Package.swift`)
-- **Minimum Targets**: iOS 17.0, watchOS 10.0
-- **Targets**: YourPods (iOS app), YourPodsWatch (watchOS app), YourPodsWidgets (Live Activities), YourPodsComplication (watch complications), YourPodsTests (unit tests)
+- **Dependencies**: Firebase (Auth + App Check) and RevenueCat — used only to authenticate and entitle the optional YourPods Cloud account; unused on the gPodder, Nextcloud, and Vault Mode paths
+- **Minimum Targets**: iOS 18.0, macOS 14.0, watchOS 10.0
+- **Toolchain**: Xcode 26
+- **Targets**: YourPods (iOS app), YourPodsMac (macOS app), YourPodsWatch (watchOS app), YourPodsWidgets (Now Playing widget, Live Activities, Lock Screen widgets), YourPodsComplication (watch complications), YourPodsTests (unit tests)
 
 ## Architecture
 
 - `YourPods/YourPods/Audio/` — Audio playback engine (AudioManager: AVAudioEngine-based)
-- `YourPods/YourPods/Models/` — SwiftData models (Podcast, Episode, ServerProfile, Chapter, EpisodeAction, PodcastSettings)
-- `YourPods/YourPods/Networking/` — gPodder API client (GPodderClient), RSS feed parser (RSSService), URL resolver
-- `YourPods/YourPods/Services/` — CarPlay, Siri (AppIntents), Live Activities, Chapters, Transcripts, Watch connectivity, Downloads, Background Refresh, Listening Stats, OPML import/export
+- `YourPods/YourPods/Models/` — SwiftData models (Podcast, Episode, ServerProfile, Chapter, EpisodeAction, PodcastSettings, Annotation)
+- `YourPods/YourPods/Networking/` — gPodder API client (GPodderClient), RSS feed parser (RSSService), URL resolver, P3 tracker stripper (TrackingURLStripper)
+- `YourPods/YourPods/Networking/Resources/` — Bundled OPAWG tracker-prefix snapshot and curated supplement (JSON)
+- `YourPods/YourPods/Services/` — CarPlay, Live Activities, Transcripts, Watch connectivity, Downloads, Background Refresh, Listening Stats, OPML import/export, notes export (Markdown, Obsidian, Nextcloud Notes), share links, subscriptions
+- `YourPods/YourPods/Services/Chapters/` — Embedded chapter extraction (ID3 CHAP, MP4/M4A chapter atoms) and chapter artwork
+- `YourPods/YourPods/Services/Intents/` — App Intents, entities, and the Siri handler (replaces the former SiriIntents.swift)
+- `YourPods/YourPods/Services/Sync/` — Sync orchestrators (gPodder, YourPods Cloud, Vault), playback reconciler, baseline store
 - `YourPods/YourPods/State/` — Observable state managers: PlayerManager, PodcastManager, SettingsManager, NavigationState, SleepTimerManager
-- `YourPods/YourPods/Views/` — SwiftUI views: Home, Library, Player, Queue, Settings, Search, History, Profile Selection, Downloads, Import, Episode Detail, Podcast Detail, and reusable Components (NowPlayingBar, ChapterListSheet, TranscriptListSheet, SleepTimerSheet, PodcastSettingsSheet)
-- `YourPods/YourPods/Utils/` — Utility extensions (String+HTML)
-- `YourPodsWatch/` — watchOS app (standalone playback, library sync, remote player, episode browsing)
-- `YourPodsWidgets/` — Live Activities and widget extension
+- `YourPods/YourPods/Views/` — SwiftUI views: Home, Library, Player, Queue, Notes, Settings, Search, History, Profile Selection, Downloads, Import, Episode Detail, Podcast Detail, and reusable Components (NowPlayingBar, ChapterListSheet, TranscriptListSheet, SleepTimerSheet, PodcastSettingsSheet)
+- `YourPods/YourPods/Utilities/`, `YourPods/YourPods/Utils/` — Shared helpers and utility extensions
+- `YourPodsWatch/` — watchOS app (standalone playback, library sync, remote player, episode browsing, sleep timer, playback speed)
+- `YourPodsWidgets/` — Now Playing widget, Live Activities, and Lock Screen widgets
 - `YourPodsComplication/` — watchOS complication widget
+- `YourPodsTests/` — Unit tests
 
 ## Per-Podcast Settings
 

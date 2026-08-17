@@ -369,11 +369,14 @@ final class PullToRefreshSyncTests: XCTestCase {
             strategy: .serverWins
         )
 
-        // THEN: Server queue items are adopted via fresh-device path
-        // sortOrder 0 becomes currentItem (Bug 3 fix)
-        XCTAssertEqual(audioManager.currentItem?.id, "server-ep-1",
-                       "Pull-to-refresh via refreshAndSync must pull server queue items")
-        XCTAssertEqual(audioManager.currentItem?.positionSeconds, 300)
+        // THEN: server queue items are adopted into Up Next via the fresh-device path.
+        // Per the sync contract: a sortOrder-0 item is Up Next (web "add to top"),
+        // not now-playing; now-playing is restored from the playback channel (none here).
+        XCTAssertEqual(audioManager.queue.map(\.id), ["server-ep-1"],
+                       "Pull-to-refresh via refreshAndSync must pull server queue items into Up Next")
+        XCTAssertEqual(audioManager.queue.first?.positionSeconds, 300)
+        XCTAssertNil(audioManager.currentItem,
+                     "No now-playing on the playback channel → the server item is Up Next, not current")
     }
 
     /// Verify that refreshAllFeeds does NOT pull queue items from the server.

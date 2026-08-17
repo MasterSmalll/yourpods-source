@@ -293,4 +293,85 @@ final class EpisodeAccessibilityTests: XCTestCase {
         let spoken = EpisodeAccessibility.spokenDuration(3600)
         XCTAssertEqual(spoken, "1 hour")
     }
+
+    // MARK: - Localization: no bare English literals
+
+    /// Every user-facing string this helper emits is read aloud by VoiceOver.
+    /// A bare Swift literal here never reaches a String Catalog, so it stays
+    /// English in every language — and unlike a visible label, nobody
+    /// screenshotting the app will ever notice.
+    ///
+    /// The rule: a line carrying a string literal must be part of a
+    /// `String(localized:)` expression — the call itself, or one of its
+    /// `defaultValue:` / `comment:` continuation lines.
+    func test_episodeAccessibility_hasNoUnlocalizedUserFacingLiterals() throws {
+        let url = Self.sourceURL()
+        let contents = try XCTUnwrap(try? String(contentsOf: url, encoding: .utf8),
+            "could not read EpisodeAccessibility.swift — did it move?")
+        XCTAssertGreaterThan(contents.count, 500,
+            "EpisodeAccessibility.swift is implausibly small — wrong path?")
+
+        let offenders = Self.unlocalizedLiteralLines(in: contents)
+        XCTAssertTrue(offenders.isEmpty, """
+        Bare string literal in EpisodeAccessibility.swift:
+
+          \(offenders.joined(separator: "\n  "))
+
+        These are VoiceOver labels and rotor action names. A bare literal is
+        never extracted, so it is read in English under every language. Wrap it
+        in String(localized:) with an explicit a11y.* key.
+        """)
+    }
+
+    /// A guard whose scanner cannot fire is not evidence.
+    func test_unlocalizedLiteralScanner_decidesCorrectly() {
+        let cases: [(String, Bool, String)] = [
+            (#"        parts.append("Currently playing")"#, true, "bare literal is the defect"),
+            (#"        actions.append(isPlayed ? "Mark as Unplayed" : "Mark as Played")"#, true, "literal ternary is still unextracted here — this is a String helper, not a LocalizedStringKey position"),
+            (#"        String(localized: "a11y.episode.state.played","#, false, "the localized call itself"),
+            (#"               defaultValue: "Played","#, false, "continuation line carrying the English"),
+            (#"               comment: "VoiceOver: marked as played.")"#, false, "continuation line carrying the comment"),
+            (#"        // parts.append("Currently playing")"#, false, "comments are exempt"),
+            (#"        guard duration > 0 else { return "" }"#, false, "an empty literal is not untranslated English — it is 'say nothing'"),
+            (#"        guard duration > 0 else { return "" + "Played" }"#, true, "an empty literal does not launder the one beside it"),
+            (#"        let total = max(0, seconds)"#, false, "no literal at all"),
+            (#"        return parts.joined(separator: separator)"#, false, "no literal"),
+        ]
+        for (source, expected, why) in cases {
+            let hit = !Self.unlocalizedLiteralLines(in: source).isEmpty
+            XCTAssertEqual(hit, expected, "scanner disagreed on: \(source)\n  because \(why)")
+        }
+    }
+
+    // MARK: - Scanner (shared by the real scan and its self-check)
+
+    private static func sourceURL() -> URL {
+        var root = URL(fileURLWithPath: #filePath)  // …/YourPodsTests/ThisFile.swift
+        root.deleteLastPathComponent()              // …/YourPodsTests
+        root.deleteLastPathComponent()              // repo root
+        return root.appendingPathComponent("YourPods/YourPods/Utils/EpisodeAccessibility.swift")
+    }
+
+    private static func unlocalizedLiteralLines(in contents: String) -> [String] {
+        var out: [String] = []
+        for (i, raw) in contents.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+            let line = String(raw)
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.hasPrefix("//"), !trimmed.hasPrefix("*"), !trimmed.hasPrefix("/*") else { continue }
+            // An empty literal carries no English, so it cannot be
+            // untranslated English. `progressValue` returns one deliberately:
+            // a duration of zero means "say nothing", and VoiceOver then reads
+            // the label alone. Removed before the check rather than exempted
+            // by line, so `"" + "Played"` is still caught.
+            let withoutEmpty = line.replacingOccurrences(of: "\"\"", with: "")
+            guard withoutEmpty.contains("\"") else { continue }
+            // Legal homes for an English literal: the localized call and its
+            // continuation lines.
+            if line.contains("String(localized:")
+                || trimmed.hasPrefix("defaultValue:")
+                || trimmed.hasPrefix("comment:") { continue }
+            out.append("\(i + 1): \(trimmed)")
+        }
+        return out
+    }
 }

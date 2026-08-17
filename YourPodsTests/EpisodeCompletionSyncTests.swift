@@ -91,8 +91,8 @@ final class EpisodeCompletionSyncTests: XCTestCase {
             episodeGuid: "ep-1"
         )
 
-        // Allow async Tasks to run
-        try await Task.sleep(for: .milliseconds(300))
+        // Completion now flows through the durable outbox; drain it to assert the eventual push.
+        await manager.drainCompletionOutbox(using: spy, baselines: nil)
 
         // THEN: syncPlayback must have been called with completed: true
         let calls = await spy.syncPlaybackCalls
@@ -212,8 +212,10 @@ actor CompletionSyncSpy: SyncClient {
         durationSec: Double?,
         nowPlaying: Bool?,
         completed: Bool?,
-        deviceId: String?
-    ) async throws {
+        deviceId: String?,
+        clientUpdatedAt: Date?,
+        baseVersion: Int64?
+    ) async throws -> ProPlaybackSyncResponse? {
         syncPlaybackCalls.append(PlaybackCall(
             podcastUrl: podcastUrl,
             episodeUrl: episodeUrl,
@@ -222,6 +224,7 @@ actor CompletionSyncSpy: SyncClient {
             nowPlaying: nowPlaying,
             completed: completed
         ))
+        return nil
     }
 
     // MARK: - Unused protocol stubs

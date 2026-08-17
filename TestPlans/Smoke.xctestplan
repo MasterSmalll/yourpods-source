@@ -1,0 +1,48 @@
+{
+  "configurations": [
+    {
+      "id": "50000000-0000-4000-A000-000000000002",
+      "name": "Smoke",
+      "options": {}
+    }
+  ],
+  "defaultOptions": {
+    "codeCoverage": false,
+    "testTimeoutsEnabled": true
+  },
+  "testTargets": [
+    {
+      "parallelizable": true,
+      "skippedTests": [
+        "AuthMethodTests",
+        "ClearAllQueueTests",
+        "CrossDeviceSyncBugTests",
+        "EpisodeActionOutboxTests",
+        "EpisodeCompletionSyncTests",
+        "ForegroundSyncCompletionTests",
+        "LoginFlowClientTests",
+        "NowPlayingReassertEventTimeTests",
+        "NowPlayingReconciliationTests",
+        "NowPlayingSyncTests",
+        "PlaybackEventTimeTests",
+        "PlaybackPositionAdoptTests",
+        "PlaybackSyncImprovementTests",
+        "PlayerManagerTests",
+        "ProQueueItemDecodingTests",
+        "QueueSyncFixTests",
+        "QueueSyncFlowTests",
+        "QueueSyncTests",
+        "SleepTimerExtendedTests",
+        "SleepTimerManagerTests",
+        "SyncCancellationBannerTests",
+        "SyncWriteCancellationGateTests"
+      ],
+      "target": {
+        "containerPath": "container:YourPods.xcodeproj",
+        "identifier": "YourPodsTests",
+        "name": "YourPodsTests"
+      }
+    }
+  ],
+  "version": 1
+}

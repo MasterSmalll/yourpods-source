@@ -3,7 +3,28 @@ import XCTest
 
 /// Tests for PlayerManager's static formatting helpers and sync guard logic.
 final class PlayerManagerTests: XCTestCase {
-    
+
+    // `PlayerManager.init` unconditionally calls `audioManager.restoreQueue()`, and
+    // `AudioManager.queue`'s didSet synchronously persists queue + currentItem to
+    // the REAL UserDefaults.standard on every mutation (see AudioManager.swift's
+    // `persistQueue()`). Without this cleanup, a queue/currentItem mutation in one
+    // test (e.g. any `markCurrentEpisodeAsPlayed`/`skipToNext` advance) leaks into
+    // the next fresh `AudioManager()` in this file via restoreQueue() — same root
+    // cause MarkQueuedEpisodeAsPlayedTests.swift already guards against.
+    override func setUp() {
+        super.setUp()
+        UserDefaults.standard.removeObject(forKey: "savedQueue")
+        UserDefaults.standard.removeObject(forKey: "savedCurrentItem")
+        UserDefaults.standard.removeObject(forKey: "savedCurrentPosition")
+    }
+
+    override func tearDown() {
+        UserDefaults.standard.removeObject(forKey: "savedQueue")
+        UserDefaults.standard.removeObject(forKey: "savedCurrentItem")
+        UserDefaults.standard.removeObject(forKey: "savedCurrentPosition")
+        super.tearDown()
+    }
+
     // MARK: - formatTimestamp
     
     func test_formatTimestamp_minutesAndSeconds() {
@@ -252,12 +273,11 @@ final class PlayerManagerTests: XCTestCase {
     }
     
     // MARK: - Mark as Played Queue Behavior
-    
+
     @MainActor
-    func test_markCurrentEpisodeAsPlayed_stopsAndRemovesFromQueue() {
+    private func makeMarkPlayedFixture() -> (AudioManager, PlayerManager, QueueItem, QueueItem) {
         let audioManager = AudioManager()
         let playerManager = PlayerManager(audioManager: audioManager)
-        
         let item = QueueItem(
             id: "ep-playing", title: "Playing Episode", podcastTitle: "Pod",
             audioUrl: "https://example.com/ep1.mp3", artworkUrl: nil,
@@ -271,19 +291,137 @@ final class PlayerManagerTests: XCTestCase {
             podcastUrl: "https://example.com/feed", pubDate: nil
         )
         audioManager.currentItem = item
-        audioManager.appendToQueue([nextItem])
         audioManager.testableSetPlaybackState(position: 500, duration: 3600)
-        
-        playerManager.markCurrentEpisodeAsPlayed()
-        
-        // The played episode should NOT be the current item
-        XCTAssertNotEqual(audioManager.currentItem?.id, "ep-playing",
-                          "Played episode should not remain as current item")
-        // The played episode should NOT be in the queue
-        XCTAssertFalse(audioManager.queue.contains(where: { $0.id == "ep-playing" }),
-                       "Played episode should not be in the queue")
+        return (audioManager, playerManager, item, nextItem)
     }
-    
+
+    /// REGRESSION (2026-07-09): marking the playing episode as played from the mini
+    /// player queue stopped playback dead instead of starting the next Up Next episode.
+    @MainActor
+    func test_markCurrentEpisodeAsPlayed_advancesToNextEpisode_whenPlaying() async {
+        let (audioManager, playerManager, _, nextItem) = makeMarkPlayedFixture()
+        audioManager.appendToQueue([nextItem])
+        audioManager.isPlaying = true
+
+        playerManager.markCurrentEpisodeAsPlayed()
+
+        let advanced = await pollUntil { audioManager.currentItem?.id == "ep-next" }
+        XCTAssertTrue(advanced,
+                      "Marking the playing episode as played must advance to the next Up Next episode")
+        XCTAssertFalse(audioManager.queue.contains(where: { $0.id == "ep-playing" }),
+                       "Played episode must not be re-queued")
+        XCTAssertFalse(audioManager.queue.contains(where: { $0.id == "ep-next" }),
+                       "Next episode must be popped from Up Next, not duplicated")
+    }
+
+    /// EDGE: marked as played while PAUSED — advance, but never start audio (D2).
+    @MainActor
+    func test_markCurrentEpisodeAsPlayed_advancesPaused_whenNotPlaying() async {
+        let (audioManager, playerManager, _, nextItem) = makeMarkPlayedFixture()
+        audioManager.appendToQueue([nextItem])
+        audioManager.isPlaying = false
+
+        playerManager.markCurrentEpisodeAsPlayed()
+
+        let advanced = await pollUntil { audioManager.currentItem?.id == "ep-next" }
+        XCTAssertTrue(advanced, "Paused mark-played still advances the queue")
+        XCTAssertFalse(audioManager.isPlaying,
+                       "Mark-played while paused must NOT start audio — next episode loads paused")
+    }
+
+    /// EDGE: empty queue — original stop semantics preserved, direct marking path (D4).
+    @MainActor
+    func test_markCurrentEpisodeAsPlayed_stops_whenQueueEmpty() {
+        let (audioManager, playerManager, _, _) = makeMarkPlayedFixture()
+        var completions = 0
+        let original = audioManager.onEpisodeCompleted
+        audioManager.onEpisodeCompleted = { completions += 1; original?($0) }
+        audioManager.isPlaying = true
+
+        playerManager.markCurrentEpisodeAsPlayed()
+
+        XCTAssertNil(audioManager.currentItem, "Nothing to advance to — playback stops")
+        XCTAssertFalse(audioManager.isPlaying)
+        XCTAssertEqual(completions, 0,
+                       "Empty-queue mark-played uses the direct markEpisodeAsPlayed path, not the completion pipeline (skipToNext would not fire it)")
+    }
+
+    /// Sync-initiated completion must never advance: the three fromSync callers run
+    /// during background reconciliation (clearPlayedEpisodesFromQueue / reconcile
+    /// Cases 1 & 4) — advancing could start audio on a pocketed phone (D3).
+    @MainActor
+    func test_markCurrentEpisodeAsPlayed_fromSync_neverAdvances() {
+        let (audioManager, playerManager, _, nextItem) = makeMarkPlayedFixture()
+        audioManager.appendToQueue([nextItem])
+        audioManager.isPlaying = false
+
+        playerManager.markCurrentEpisodeAsPlayed(fromSync: true)
+
+        XCTAssertNil(audioManager.currentItem, "fromSync keeps stop semantics")
+        XCTAssertFalse(audioManager.isPlaying)
+        XCTAssertTrue(audioManager.queue.contains(where: { $0.id == "ep-next" }),
+                      "Queue preserved — the reconcile path decides separately what plays next")
+    }
+
+    /// Exactly ONE completion pipeline (D1): double-marking sends duplicate 'play'
+    /// EpisodeActions to the server (b15 regression class, PlayerManager.swift:639-640).
+    @MainActor
+    func test_markCurrentEpisodeAsPlayed_firesCompletionPipelineExactlyOnce() async {
+        let (audioManager, playerManager, _, nextItem) = makeMarkPlayedFixture()
+        audioManager.appendToQueue([nextItem])
+        audioManager.isPlaying = true
+        var completedIds: [String] = []
+        let original = audioManager.onEpisodeCompleted
+        audioManager.onEpisodeCompleted = { completedIds.append($0.id); original?($0) }
+
+        playerManager.markCurrentEpisodeAsPlayed()
+
+        _ = await pollUntil { audioManager.currentItem?.id == "ep-next" }
+        XCTAssertEqual(completedIds, ["ep-playing"],
+                       "The played episode completes exactly once, via the onEpisodeCompleted pipeline")
+    }
+
+    /// EDGE (double-tap re-entry): last queued pair, "Mark as Played" tapped twice fast.
+    /// Tap 1's skipToNext sets isAdvancingQueue and suspends mid-advance (URL resolution
+    /// await); tap 2 must be a complete no-op instead of racing the direct/empty-queue
+    /// branch — without this guard, tap 2 would set isPlayed on the item tap 1's advance
+    /// Task is about to swap in as currentItem, then stop(), while the suspended Task
+    /// resumes and plays that same "played" episode anyway (double 'play' EpisodeAction
+    /// risk). Regression pinned per the review finding on PlayerManager.swift's
+    /// markCurrentEpisodeAsPlayed doc comment.
+    @MainActor
+    func test_markCurrentEpisodeAsPlayed_isNoOp_whenQueueAdvanceInProgress() {
+        let (audioManager, playerManager, item, nextItem) = makeMarkPlayedFixture()
+        audioManager.appendToQueue([nextItem])
+        audioManager.isPlaying = true
+        audioManager.isAdvancingQueue = true
+
+        playerManager.markCurrentEpisodeAsPlayed()
+
+        XCTAssertEqual(audioManager.currentItem?.id, item.id,
+                       "currentItem must be untouched while a queue advance is in progress")
+        XCTAssertFalse(audioManager.currentItem?.isPlayed ?? true,
+                       "the in-flight item must not be marked played out from under the advance")
+        XCTAssertTrue(audioManager.isPlaying, "isPlaying must be untouched")
+        XCTAssertEqual(audioManager.queue.map(\.id), [nextItem.id], "queue must be untouched")
+    }
+
+    /// DECISION D6: user-initiated mark-played follows manual-skip semantics — the
+    /// sleep-timer DriftOff veto applies only to NATURAL episode end.
+    @MainActor
+    func test_markCurrentEpisodeAsPlayed_advancesEvenWhenSleepTimerVetoArmed() async {
+        let (audioManager, playerManager, _, nextItem) = makeMarkPlayedFixture()
+        audioManager.appendToQueue([nextItem])
+        audioManager.isPlaying = true
+        audioManager.shouldAutoAdvanceToNextEpisode = { false }   // DriftOff armed
+
+        playerManager.markCurrentEpisodeAsPlayed()
+
+        let advanced = await pollUntil { audioManager.currentItem?.id == "ep-next" }
+        XCTAssertTrue(advanced,
+                      "Mark-played is a deliberate user action — it advances even with 'stop after this episode' armed, matching the next-track button")
+    }
+
     @MainActor
     func test_markQueuedEpisodeAsPlayed_removesFromQueue() {
         let audioManager = AudioManager()
@@ -501,12 +639,28 @@ final class PlayerManagerTests: XCTestCase {
         
         // markCurrentEpisodeAsPlayed sets isPlayed BEFORE calling stop
         // We can't check after stop (item is nil), but the method's contract
-        // is confirmed by the existing test_markCurrentEpisodeAsPlayed_stopsAndRemovesFromQueue
+        // is confirmed by the "Mark as Played Queue Behavior" tests above
         playerManager2.markCurrentEpisodeAsPlayed()
-        
-        // Both should have stopped
+
+        // Both should have stopped (queue is empty in this fixture — with queued episodes it advances)
         XCTAssertNil(audioManager2.currentItem,
                      "Current item should be cleared after marking as played")
     }
+}
+
+/// Poll until `condition` is true or `timeout` elapses, yielding to the main actor
+/// between checks. No real-time sleeps — the advance Task runs on the main actor,
+/// and playEpisode sets currentItem in its synchronous prefix, so a few yields
+/// are enough on the happy path.
+@MainActor
+fileprivate func pollUntil(
+    timeout: TimeInterval = 2.0,
+    _ condition: () -> Bool
+) async -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    while !condition() && Date() < deadline {
+        await Task.yield()
+    }
+    return condition()
 }
 

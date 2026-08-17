@@ -212,7 +212,7 @@ final class SyncConflictResolutionTests: XCTestCase {
     // MARK: - Conflict resolution correctness
 
     /// After resolving a conflict with "Use Device", the episode must have the device position.
-    func test_resolveConflict_useDevice_appliesLocalPosition() {
+    func test_resolveConflict_useDevice_appliesLocalPosition() async {
         let podcast = insertPodcast(url: "https://example.com/resolve-dev", episodeCount: 1)
         let episode = podcast.episodes.first!
         episode.listenedSeconds = 600
@@ -230,7 +230,7 @@ final class SyncConflictResolutionTests: XCTestCase {
         guard let conflict = conflicts.first else { return }
 
         // WHEN: Resolve with "Use Device" (conflict.localPosition)
-        manager.resolveConflict(conflict, chosenPosition: conflict.localPosition)
+        await manager.resolveConflict(conflict, chosenPosition: conflict.localPosition)
 
         // THEN: Episode must have the LOCAL position, not the server position
         XCTAssertEqual(episode.listenedSeconds, 600,
@@ -238,7 +238,7 @@ final class SyncConflictResolutionTests: XCTestCase {
     }
 
     /// After resolving a conflict with "Use Server", the episode must have the server position.
-    func test_resolveConflict_useServer_appliesServerPosition() {
+    func test_resolveConflict_useServer_appliesServerPosition() async {
         let podcast = insertPodcast(url: "https://example.com/resolve-srv", episodeCount: 1)
         let episode = podcast.episodes.first!
         episode.listenedSeconds = 600
@@ -255,7 +255,7 @@ final class SyncConflictResolutionTests: XCTestCase {
         guard let conflict = conflicts.first else { return }
 
         // WHEN: Resolve with "Use Server" (conflict.serverPosition)
-        manager.resolveConflict(conflict, chosenPosition: conflict.serverPosition)
+        await manager.resolveConflict(conflict, chosenPosition: conflict.serverPosition)
 
         // THEN: Episode must have the SERVER position
         XCTAssertEqual(episode.listenedSeconds, 100,

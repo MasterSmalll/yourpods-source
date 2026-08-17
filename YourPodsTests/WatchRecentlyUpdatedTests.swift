@@ -132,9 +132,9 @@ final class WatchRecentlyUpdatedTests: XCTestCase {
         }
         
         XCTAssertEqual(recentEpisodes.count, 3)
-        XCTAssertEqual(recentEpisodes[0]["id"] as? String, "new")
-        XCTAssertEqual(recentEpisodes[1]["id"] as? String, "mid")
-        XCTAssertEqual(recentEpisodes[2]["id"] as? String, "old")
+        XCTAssertEqual(recentEpisodes[0]["guid"] as? String, "new")
+        XCTAssertEqual(recentEpisodes[1]["guid"] as? String, "mid")
+        XCTAssertEqual(recentEpisodes[2]["guid"] as? String, "old")
     }
     
     func test_sendRecentEpisodes_excludesPlayedEpisodes() {
@@ -154,7 +154,7 @@ final class WatchRecentlyUpdatedTests: XCTestCase {
         }
         
         XCTAssertEqual(recentEpisodes.count, 1)
-        XCTAssertEqual(recentEpisodes[0]["id"] as? String, "unplayed")
+        XCTAssertEqual(recentEpisodes[0]["guid"] as? String, "unplayed")
     }
     
     func test_sendRecentEpisodes_excludesInteractedEpisodes() {
@@ -174,7 +174,7 @@ final class WatchRecentlyUpdatedTests: XCTestCase {
         }
         
         XCTAssertEqual(recentEpisodes.count, 1)
-        XCTAssertEqual(recentEpisodes[0]["id"] as? String, "fresh")
+        XCTAssertEqual(recentEpisodes[0]["guid"] as? String, "fresh")
     }
     
     func test_sendRecentEpisodes_includesPodcastMetadata() {
@@ -229,9 +229,9 @@ final class WatchRecentlyUpdatedTests: XCTestCase {
         }
         
         XCTAssertEqual(recentEpisodes.count, 2)
-        XCTAssertEqual(recentEpisodes[0]["id"] as? String, "b-ep", "Newest episode should be first")
+        XCTAssertEqual(recentEpisodes[0]["guid"] as? String, "b-ep", "Newest episode should be first")
         XCTAssertEqual(recentEpisodes[0]["podcastTitle"] as? String, "Podcast B")
-        XCTAssertEqual(recentEpisodes[1]["id"] as? String, "a-ep")
+        XCTAssertEqual(recentEpisodes[1]["guid"] as? String, "a-ep")
         XCTAssertEqual(recentEpisodes[1]["podcastTitle"] as? String, "Podcast A")
     }
     

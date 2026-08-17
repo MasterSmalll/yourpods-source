@@ -3,7 +3,7 @@ import XCTest
 
 /// Ensures the ProStatsView does NOT show an "Upgrade to Pro" prompt.
 /// Pro is not public yet — any upsell leaking into the stats screen
-/// violates the "Pro features must not leak" rule from GEMINI.md.
+/// violates the rule that Pro features must not leak into the shipping app.
 final class ProStatsUpgradePromptTests: XCTestCase {
 
     // MARK: - Upgrade Prompt Suppressed

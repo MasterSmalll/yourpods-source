@@ -6,9 +6,22 @@ import XCTest
 /// instead of auto-advancing to the next queued episode.
 @MainActor
 final class SleepTimerEndOfEpisodeTests: XCTestCase {
-    
+
+    // These tests call `appendToQueue`, whose `didSet` persists the current episode into
+    // standard UserDefaults — from where `PlayerManager.init` restores it into any later
+    // class's "fresh" AudioManager. Clean up after ourselves.
+    override func setUp() {
+        super.setUp()
+        clearAudioPersistenceDefaults()
+    }
+
+    override func tearDown() {
+        clearAudioPersistenceDefaults()
+        super.tearDown()
+    }
+
     // MARK: - Helpers
-    
+
     private func makeItem(id: String = "ep1", title: String = "Episode 1") -> QueueItem {
         QueueItem(
             id: id,

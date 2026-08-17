@@ -60,7 +60,7 @@ final class SubscriptionDeleteBounceBackTests: XCTestCase {
         return podcast
     }
 
-    // MARK: - Phase 1: Pending Removal Tracking
+    // MARK: - Pending Removal Tracking
 
     func test_removeSubscription_recordsPendingRemoval() async {
         let url = "https://example.com/hardcore-history"
@@ -89,7 +89,7 @@ final class SubscriptionDeleteBounceBackTests: XCTestCase {
                       "Pending removals must be persisted so they survive app restarts")
     }
 
-    // MARK: - Phase 2: Push-First + Bounce-Back Prevention
+    // MARK: - Push-First + Bounce-Back Prevention
 
     func test_syncSubscriptions_doesNotReAddDeletedPodcast() async throws {
         let deletedUrl = "https://example.com/deleted-podcast"
@@ -162,7 +162,7 @@ final class SubscriptionDeleteBounceBackTests: XCTestCase {
                       "REGRESSION: push failure must NOT clear the pending removal — it stays for retry on next sync")
     }
 
-    // MARK: - Phase 3: Pro-Specific Second Vector
+    // MARK: - Pro-Specific Second Vector
 
     /// For YourPods Pro, `pullSubscriptionChanges` returns the FULL server list as `add`.
     /// A deleted URL absent locally but present on the server would be seen by
@@ -185,7 +185,7 @@ final class SubscriptionDeleteBounceBackTests: XCTestCase {
                        "Pro bounce-back: deleted URL must not be re-pushed to server as an add via localSubscriptionsToUpload")
     }
 
-    // MARK: - Phase 4: Server-Authoritative Sync (remote deletions)
+    // MARK: - Server-Authoritative Sync (remote deletions)
 
     /// Server-side deletion (web / another device) must propagate to iOS.
     /// If a podcast exists locally, is NOT on the server, and is NOT in pendingAdds,

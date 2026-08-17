@@ -54,8 +54,8 @@ final class LargeLibrarySyncPerformanceTests: XCTestCase {
     }
 
     private func cleanupActionMapFile() {
-        let url = EpisodeActionSyncService.actionMapFileURL
-        try? FileManager.default.removeItem(at: url)
+        try? FileManager.default.removeItem(at: EpisodeActionSyncService.actionMapFileURL)
+        try? FileManager.default.removeItem(at: EpisodeActionSyncService.actionMapFileURL(forProfile: testProfileId))
     }
 
     @discardableResult
@@ -297,12 +297,13 @@ final class LargeLibrarySyncPerformanceTests: XCTestCase {
         )
         manager.episodeActionSync.replaceActionMap(["file-test-ep-1": action])
 
-        // WHEN: Creating a fresh service and loading
+        // WHEN: Creating a fresh service and loading (same profile as the manager, so
+        // the profile-scoped file round-trips)
         let freshService = EpisodeActionSyncService(
             modelContext: context,
             subscriptionsProvider: { [] },
             syncClientProvider: { nil },
-            profileIdProvider: { nil },
+            profileIdProvider: { self.testProfileId },
             deviceIdProvider: { "test" }
         )
         freshService.loadActionMap()

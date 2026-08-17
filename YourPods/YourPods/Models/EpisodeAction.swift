@@ -1,7 +1,7 @@
 import Foundation
 
 /// Represents a gPodder episode action for sync.
-struct EpisodeAction: Codable, Identifiable {
+struct EpisodeAction: Codable, Identifiable, Sendable {
     var id: String { "\(podcast)|\(episode)|\(timestamp)" }
     
     let podcast: String
@@ -59,6 +59,24 @@ struct EpisodeAction: Codable, Identifiable {
             started: json["started"] as? Int,
             total: json["total"] as? Int,
             device: json["device"] as? String
+        )
+    }
+    
+    /// Copy this action but preserve the device field from an existing action
+    /// when this action's device is nil. Used by the echo guard to prevent
+    /// losing the local device stamp when the server echoes back our action
+    /// without a device field.
+    func preservingDevice(from existing: EpisodeAction) -> EpisodeAction {
+        EpisodeAction(
+            podcast: podcast,
+            episode: episode,
+            guid: guid,
+            action: action,
+            timestamp: timestamp,
+            position: position,
+            started: started,
+            total: total,
+            device: device ?? existing.device
         )
     }
 }

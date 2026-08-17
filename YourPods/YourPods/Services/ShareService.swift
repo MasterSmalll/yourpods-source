@@ -29,6 +29,15 @@ struct ShareService {
         return items
     }
     
+    /// Caption shown above a rich YourPods share link.
+    static func richShareText(episodeTitle: String?, podcastTitle: String, startSec: Int?) -> String {
+        guard let episodeTitle, !episodeTitle.isEmpty else { return "🎙️ \(podcastTitle)" }
+        if let startSec, startSec > 0 {
+            return "🎧 \(episodeTitle) at \(PlayerManager.formatTimestamp(TimeInterval(startSec))) — \(podcastTitle)"
+        }
+        return "🎧 \(episodeTitle) — \(podcastTitle)"
+    }
+
     /// Share current playback position with a formatted timestamp.
     static func sharePosition(
         episodeTitle: String,

@@ -38,8 +38,7 @@ final class MockNotificationCenter: NotificationCenterProtocol, @unchecked Senda
 
 /// Tests for `NewEpisodeNotificationService`.
 ///
-/// TDD Phase 1: These tests define the expected notification behavior.
-/// All tests should FAIL against the current stubs.
+/// These define the expected notification behavior.
 @MainActor
 final class NewEpisodeNotificationTests: XCTestCase {
     

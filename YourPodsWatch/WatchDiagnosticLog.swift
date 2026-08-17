@@ -23,8 +23,14 @@ final class WatchDiagnosticLog {
     /// In-memory buffer — flushed to UserDefaults on each append.
     private var entries: [String] = []
 
+    /// Confines all reads/writes of `entries` and the UserDefaults write off
+    /// the calling thread — log(_:) is called from hot lifecycle paths and
+    /// must not block on a synchronous UserDefaults rewrite of the whole array.
+    private let queue = DispatchQueue(label: "com.yourpods.watch.diaglog", qos: .utility)
+
     private init() {
-        // Load existing entries from UserDefaults
+        // Load existing entries from UserDefaults. Happens before any
+        // concurrent access, so no queue hop is needed here.
         if let saved = UserDefaults.standard.stringArray(forKey: Self.defaultsKey) {
             entries = saved
         }
@@ -37,31 +43,26 @@ final class WatchDiagnosticLog {
     func log(_ event: String) {
         let timestamp = ISO8601DateFormatter().string(from: Date())
         let entry = "\(timestamp) | \(event)"
-
-        entries.append(entry)
-
-        // Trim to max size (ring buffer)
-        if entries.count > Self.maxEntries {
-            entries = Array(entries.suffix(Self.maxEntries))
-        }
-
-        // Persist
-        UserDefaults.standard.set(entries, forKey: Self.defaultsKey)
-
-        // Also forward to os.Logger for Xcode console
         logger.info("\(event)")
+        queue.async { [self] in
+            entries.append(entry)
+            if entries.count > Self.maxEntries {
+                entries = Array(entries.suffix(Self.maxEntries))
+            }
+            UserDefaults.standard.set(entries, forKey: Self.defaultsKey)
+        }
     }
 
     // MARK: - Reading
 
     /// All current log entries, oldest first.
-    var allEntries: [String] {
-        return entries
-    }
+    var allEntries: [String] { queue.sync { entries } }
 
     /// Clear all entries.
     func clear() {
-        entries = []
-        UserDefaults.standard.removeObject(forKey: Self.defaultsKey)
+        queue.sync {
+            entries = []
+            UserDefaults.standard.removeObject(forKey: Self.defaultsKey)
+        }
     }
 }

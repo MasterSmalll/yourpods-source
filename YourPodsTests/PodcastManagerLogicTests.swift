@@ -537,7 +537,7 @@ final class PodcastManagerLogicTests: XCTestCase {
     
     // MARK: - Conflict Resolution: resolveConflict
     
-    func test_resolveConflict_updatesModelAndActionMap() {
+    func test_resolveConflict_updatesModelAndActionMap() async {
         let podcast = insertPodcast(url: "https://example.com/feed1")
         let episode = podcast.episodes.first!
         episode.listenedSeconds = 300
@@ -557,7 +557,7 @@ final class PodcastManagerLogicTests: XCTestCase {
             occurrenceCount: 1
         )
         
-        manager.resolveConflict(conflict, chosenPosition: 1500)
+        await manager.resolveConflict(conflict, chosenPosition: 1500)
         
         XCTAssertEqual(episode.listenedSeconds, 1500,
                        "resolveConflict should update the episode position")
@@ -662,7 +662,7 @@ final class PodcastManagerLogicTests: XCTestCase {
         XCTAssertEqual(conflicts2.first?.occurrenceCount, 2)
     }
     
-    func test_conflictCount_clearedOnResolve() {
+    func test_conflictCount_clearedOnResolve() async {
         let podcast = insertPodcast(url: "https://example.com/feed1")
         let episode = podcast.episodes.first!
         episode.listenedSeconds = 300
@@ -686,7 +686,7 @@ final class PodcastManagerLogicTests: XCTestCase {
         XCTAssertEqual(conflicts.count, 1)
         
         // Resolve it
-        manager.resolveConflict(conflicts.first!, chosenPosition: 1500)
+        await manager.resolveConflict(conflicts.first!, chosenPosition: 1500)
         
         // Re-apply — should not generate a conflict now because position matches
         let conflictsAfter = manager.applyEpisodeActions(strategy: .ask)
@@ -1031,7 +1031,7 @@ final class PodcastManagerLogicTests: XCTestCase {
                        "120 episodes (< batch size 500) should produce 1 final save, got \(saveCount)")
     }
     
-    /// Fix (Build 54): autoreleasepool wrapping per 50-episode batch contains
+    /// The fix: autoreleasepool wrapping per 50-episode batch contains
     /// faulted-in __NSCFString objects. Save is deferred to the cross-podcast
     /// batch level (every 500 episodes) to reduce WAL checkpoint overhead.
     ///

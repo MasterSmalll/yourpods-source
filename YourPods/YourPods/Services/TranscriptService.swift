@@ -1,11 +1,113 @@
 import Foundation
 import os
 import CryptoKit
+#if canImport(UIKit)
+import UIKit
+#elseif canImport(AppKit)
+import AppKit
+#endif
 
 /// Transcript data model
 struct Transcript {
     let items: [TranscriptItem]
     let type: String
+}
+
+/// The transcript formats we can parse.
+///
+/// The raw value is the canonical MIME type, and also the `Transcript.type` we report
+/// back — except `.srt`, which reports `application/srt` for historical reasons.
+enum TranscriptFormat: String, Sendable, CaseIterable {
+    case plainText = "text/plain"
+    case html = "text/html"
+    case json = "application/json"
+    case vtt = "text/vtt"
+    case srt = "application/x-subrip"
+    case markdown = "text/markdown"
+    case rtf = "application/rtf"
+
+    /// Match a feed's `type="..."`, tolerating MIME parameters and casing.
+    static func forMimeType(_ raw: String?) -> TranscriptFormat? {
+        guard let raw else { return nil }
+        // "text/plain; charset=utf-8" -> "text/plain"
+        let mime = raw.components(separatedBy: ";")[0]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !mime.isEmpty else { return nil }
+        switch mime {
+        case "text/plain", "text/txt": return .plainText
+        case "text/html", "application/xhtml+xml": return .html
+        case "application/json": return .json
+        case "text/vtt", "text/webvtt": return .vtt
+        case "application/x-subrip", "application/srt", "text/srt": return .srt
+        case "text/markdown", "text/x-markdown": return .markdown
+        case "application/rtf", "text/rtf": return .rtf
+        default: return nil
+        }
+    }
+
+    /// Match a URL's path extension, ignoring query strings, fragments, and casing.
+    ///
+    /// Presigned CDN transcript URLs (`…/t.txt?token=…`) and extension-less REST
+    /// endpoints are both routine, so this must never see the raw URL string.
+    static func forURL(_ url: String) -> TranscriptFormat? {
+        var path = url
+        if var comps = URLComponents(string: url) {
+            comps.query = nil
+            comps.fragment = nil
+            path = comps.path.isEmpty ? (comps.string ?? url) : comps.path
+        } else if let cut = url.firstIndex(where: { $0 == "?" || $0 == "#" }) {
+            path = String(url[url.startIndex..<cut])
+        }
+        switch (path as NSString).pathExtension.lowercased() {
+        case "txt", "text": return .plainText
+        case "html", "htm", "xhtml": return .html
+        case "json": return .json
+        case "vtt": return .vtt
+        case "srt": return .srt
+        case "md", "markdown", "mdown": return .markdown
+        case "rtf": return .rtf
+        default: return nil
+        }
+    }
+
+    /// Last resort when the feed declares nothing and the URL carries no extension.
+    ///
+    /// Defaults to `.plainText` rather than `.srt`: prose parsed as SRT yields zero
+    /// items, and a zero-item transcript makes the Transcript button disappear.
+    static func sniffing(_ content: String) -> TranscriptFormat {
+        let head = content.trimmingCharacters(in: .whitespacesAndNewlines).prefix(1024)
+        if head.hasPrefix(#"{\rtf"#) { return .rtf }
+        if head.hasPrefix("{") { return .json }
+        if content.contains("WEBVTT") { return .vtt }
+        if head.hasPrefix("<") || head.localizedCaseInsensitiveContains("<html") || head.contains("<p>") { return .html }
+        if content.contains("-->") { return .srt }
+        return .plainText
+    }
+
+    /// Resolution order: the feed's declared type, then the URL, then the bytes.
+    static func detect(declaredType: String?, url: String, content: String) -> TranscriptFormat {
+        forMimeType(declaredType) ?? forURL(url) ?? sniffing(content)
+    }
+
+    /// Whether a zero-item parse is worth retrying as plain text.
+    ///
+    /// True for the grammar-based formats: prose mislabelled as SubRip/WebVTT/JSON is
+    /// still readable, so showing it beats showing nothing. False for the markup formats
+    /// — they already terminate in the plain-text parser, so zero items there means there
+    /// was genuinely no text, and retrying would present raw markup *as* the transcript.
+    /// RTF sits between: retry only when the bytes aren't really RTF, so a corrupt-but-real
+    /// RTF never spills control words.
+    func retriesAsPlainText(given content: String) -> Bool {
+        switch self {
+        case .srt, .vtt, .json:
+            return true
+        case .rtf:
+            return !content.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix(#"{\rtf"#)
+        case .plainText, .html, .markdown:
+            return false
+        }
+    }
 }
 
 struct TranscriptItem: Identifiable {
@@ -18,7 +120,6 @@ struct TranscriptItem: Identifiable {
 }
 
 /// Fetches and parses transcripts in SRT, VTT, JSON, plain text, and HTML formats.
-///
 actor TranscriptService {
     static let shared = TranscriptService()
     private let logger = Logger(subsystem: "com.yourpods", category: "TranscriptService")
@@ -26,6 +127,32 @@ actor TranscriptService {
     private var memoryCache: [String: Transcript] = [:]
     private let cacheDuration: TimeInterval = 24 * 3600
     
+    /// A transcript's location and its declared format.
+    struct Source: Equatable, Sendable {
+        let url: String
+        let type: String?
+    }
+
+    /// Picks the transcript to load, preferring the live `Episode` over a `QueueItem`'s
+    /// enqueue-time snapshot.
+    ///
+    /// `QueueItem` freezes `transcriptUrl` when the episode is queued, but feeds routinely
+    /// publish a transcript days after the episode itself. Trusting the snapshot means an
+    /// episode queued before its transcript existed never shows one — no refresh fixes it,
+    /// because the snapshot is what the player reads.
+    nonisolated static func resolveSource(
+        snapshotUrl: String?, snapshotType: String?,
+        liveUrl: String?, liveType: String?
+    ) -> Source? {
+        if let liveUrl, !liveUrl.isEmpty {
+            return Source(url: liveUrl, type: liveType)
+        }
+        if let snapshotUrl, !snapshotUrl.isEmpty {
+            return Source(url: snapshotUrl, type: snapshotType)
+        }
+        return nil
+    }
+
     /// Synchronous entry point for unit tests.
     static func parseContentSync(_ content: String, url: String, type: String?) -> Transcript {
         let instance = TranscriptService()
@@ -68,27 +195,28 @@ actor TranscriptService {
     /// Core routing — determines format and dispatches to the right parser.
     /// `nonisolated` so it can be called from the static test helper without async.
     nonisolated func parseContentDirect(_ content: String, url: String, type: String?) -> Transcript {
-        var detectedType = type ?? ""
-        if detectedType.isEmpty {
-            if url.hasSuffix(".json") || content.trimmingCharacters(in: .whitespaces).hasPrefix("{") {
-                detectedType = "application/json"
-            } else if url.hasSuffix(".vtt") || content.contains("WEBVTT") {
-                detectedType = "text/vtt"
-            } else if url.hasSuffix(".txt") {
-                detectedType = "text/plain"
-            } else if url.hasSuffix(".html") || url.hasSuffix(".htm") {
-                detectedType = "text/html"
-            } else {
-                detectedType = "application/x-subrip"
-            }
-        }
-        
-        switch detectedType {
-        case "application/json": return parseJSON(content)
-        case "text/vtt": return parseVTT(content)
-        case "text/plain": return parsePlainText(content)
-        case "text/html": return parseHTML(content)
-        default: return parseSRT(content)
+        let format = TranscriptFormat.detect(declaredType: type, url: url, content: content)
+        let transcript = parse(content, as: format)
+        guard transcript.items.isEmpty, format.retriesAsPlainText(given: content) else { return transcript }
+
+        // Backstop: a detection miss otherwise ends as a zero-item transcript, and the UI
+        // gates the Transcript button on items.count > 0 — so a wrong guess makes the
+        // button silently vanish. Showing readable text beats showing nothing.
+        let fallback = parsePlainText(content)
+        guard !fallback.items.isEmpty else { return transcript }
+        logger.debug("Transcript parsed as \(format.rawValue, privacy: .public) yielded no items — falling back to plain text")
+        return fallback
+    }
+
+    nonisolated private func parse(_ content: String, as format: TranscriptFormat) -> Transcript {
+        switch format {
+        case .json: return parseJSON(content)
+        case .vtt: return parseVTT(content)
+        case .plainText: return parsePlainText(content)
+        case .html: return parseHTML(content)
+        case .markdown: return parseMarkdown(content)
+        case .rtf: return parseRTF(content)
+        case .srt: return parseSRT(content)
         }
     }
     
@@ -152,50 +280,134 @@ actor TranscriptService {
     
     // MARK: - HTML Parser
     
-    /// Strips HTML tags and entities, preserving paragraph boundaries as blank
-    /// lines, then parses as plain text.
+    /// Strips HTML markup, preserving paragraph boundaries as blank lines, then parses
+    /// as plain text.
+    ///
+    /// Entities are decoded *after* tags are stripped. Decoding first would turn a
+    /// literal `&lt;p&gt;` into `<p>` and then strip it as if it were real markup.
     nonisolated func parseHTML(_ content: String) -> Transcript {
         var result = content
-        // Decode common entities
-        result = result
-            .replacingOccurrences(of: "&amp;", with: "&")
-            .replacingOccurrences(of: "&lt;", with: "<")
-            .replacingOccurrences(of: "&gt;", with: ">")
-            .replacingOccurrences(of: "&quot;", with: "\"")
-            .replacingOccurrences(of: "&#39;", with: "'")
-            .replacingOccurrences(of: "&apos;", with: "'")
-            .replacingOccurrences(of: "&nbsp;", with: " ")
-        
-        // Replace block-level closing tags with double newlines to preserve segment boundaries
-        if let blockRegex = try? NSRegularExpression(pattern: "</(?:p|div|li|h[1-6])>", options: .caseInsensitive) {
-            result = blockRegex.stringByReplacingMatches(
+
+        // Drop non-content elements wholesale. Stripping only their tags leaves the
+        // <title>/CSS/JS *text* behind, which then reads as transcript body.
+        for tag in ["head", "script", "style"] {
+            result = Self.replacingMatches(
                 in: result,
-                range: NSRange(result.startIndex..., in: result),
-                withTemplate: "\n\n"
+                pattern: "<\(tag)\\b[^>]*>.*?</\(tag)>",
+                with: "",
+                options: [.caseInsensitive, .dotMatchesLineSeparators]
             )
         }
-        
-        // Replace <br> with single newline
-        if let brRegex = try? NSRegularExpression(pattern: "<br\\s*/?>", options: .caseInsensitive) {
-            result = brRegex.stringByReplacingMatches(
-                in: result,
-                range: NSRange(result.startIndex..., in: result),
-                withTemplate: "\n"
-            )
-        }
-        
-        // Strip remaining HTML tags
-        if let tagRegex = try? NSRegularExpression(pattern: "<[^>]+>", options: []) {
-            result = tagRegex.stringByReplacingMatches(
-                in: result,
-                range: NSRange(result.startIndex..., in: result),
-                withTemplate: ""
-            )
-        }
-        
-        let parsed = parsePlainText(result)
+
+        // Block-level closes become segment boundaries; <br> becomes a line break.
+        result = Self.replacingMatches(in: result, pattern: "</(?:p|div|li|h[1-6])>", with: "\n\n", options: .caseInsensitive)
+        result = Self.replacingMatches(in: result, pattern: "<br\\s*/?>", with: "\n", options: .caseInsensitive)
+        result = Self.replacingMatches(in: result, pattern: "<[^>]+>", with: "", options: [])
+
+        let parsed = parsePlainText(Self.decodingHTMLEntities(result))
         // Preserve the HTML type marker
         return Transcript(items: parsed.items, type: "text/html")
+    }
+
+    // MARK: - Markdown Parser
+
+    /// Strips Markdown syntax and parses the remainder as plain text.
+    ///
+    /// Deliberately not a full Markdown parser — transcripts only ever use a thin
+    /// slice of it (headings, emphasis, links), and the timestamps are what matter.
+    nonisolated func parseMarkdown(_ content: String) -> Transcript {
+        var result = content
+        // Links and images: [text](url) -> text. Before emphasis, since link text may carry it.
+        result = Self.replacingMatches(in: result, pattern: #"!?\[([^\]]*)\]\([^)]*\)"#, with: "$1", options: [])
+        // Fenced code blocks: drop the fences, keep the contents.
+        result = Self.replacingMatches(in: result, pattern: "```[a-zA-Z0-9]*", with: "", options: [])
+        // Headings and blockquote markers at line start.
+        result = Self.replacingMatches(in: result, pattern: "^[ \\t]{0,3}#{1,6}[ \\t]*", with: "", options: .anchorsMatchLines)
+        result = Self.replacingMatches(in: result, pattern: "^[ \\t]{0,3}>[ \\t]?", with: "", options: .anchorsMatchLines)
+        // Emphasis. Paired-delimiter patterns so snake_case words survive.
+        for pattern in [#"\*\*\*([^*]+)\*\*\*"#, #"\*\*([^*]+)\*\*"#, #"\*([^*\n]+)\*"#,
+                        "___([^_]+)___", "__([^_]+)__", "_([^_\n]+)_"] {
+            result = Self.replacingMatches(in: result, pattern: pattern, with: "$1", options: [])
+        }
+        result = result.replacingOccurrences(of: "`", with: "")
+
+        let parsed = parsePlainText(result)
+        return Transcript(items: parsed.items, type: TranscriptFormat.markdown.rawValue)
+    }
+
+    // MARK: - RTF Parser
+
+    /// Decodes RTF to plain text via the system text importer, then parses it.
+    ///
+    /// Safe off the main thread: the RTF importer is the Cocoa text system, not the
+    /// WebKit-backed HTML importer that Apple restricts to the main thread.
+    nonisolated func parseRTF(_ content: String) -> Transcript {
+        let rtfType = TranscriptFormat.rtf.rawValue
+        guard let data = content.data(using: .utf8) else { return Transcript(items: [], type: rtfType) }
+        let options: [NSAttributedString.DocumentReadingOptionKey: Any] = [
+            .documentType: NSAttributedString.DocumentType.rtf
+        ]
+        guard let decoded = try? NSAttributedString(data: data, options: options, documentAttributes: nil) else {
+            logger.error("Failed to decode RTF transcript")
+            return Transcript(items: [], type: rtfType)
+        }
+        let parsed = parsePlainText(decoded.string)
+        return Transcript(items: parsed.items, type: rtfType)
+    }
+
+    // MARK: - Text Helpers
+
+    nonisolated private static func replacingMatches(
+        in string: String, pattern: String, with template: String,
+        options: NSRegularExpression.Options
+    ) -> String {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: options) else { return string }
+        return regex.stringByReplacingMatches(
+            in: string, range: NSRange(string.startIndex..., in: string), withTemplate: template
+        )
+    }
+
+    /// Decodes named and numeric HTML entities.
+    ///
+    /// `&amp;` is decoded last: doing it first turns `&amp;lt;` into `&lt;` and then
+    /// into `<`, corrupting text that legitimately shows escaped markup.
+    nonisolated static func decodingHTMLEntities(_ string: String) -> String {
+        var result = string
+        let named: [(String, String)] = [
+            ("&lt;", "<"), ("&gt;", ">"), ("&quot;", "\""), ("&apos;", "'"), ("&nbsp;", " "),
+            ("&hellip;", "\u{2026}"), ("&mdash;", "\u{2014}"), ("&ndash;", "\u{2013}"),
+            ("&lsquo;", "\u{2018}"), ("&rsquo;", "\u{2019}"),
+            ("&ldquo;", "\u{201C}"), ("&rdquo;", "\u{201D}")
+        ]
+        for (entity, replacement) in named {
+            result = result.replacingOccurrences(of: entity, with: replacement)
+        }
+        result = decodingNumericEntities(result)
+        return result.replacingOccurrences(of: "&amp;", with: "&")
+    }
+
+    /// Decodes `&#8217;` and `&#x2014;` style entities. Malformed ones are left alone.
+    nonisolated private static func decodingNumericEntities(_ string: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: "&#([xX]?)([0-9a-fA-F]+);") else { return string }
+        let source = string as NSString
+        let matches = regex.matches(in: string, range: NSRange(location: 0, length: source.length))
+        guard !matches.isEmpty else { return string }
+
+        var result = ""
+        var cursor = 0
+        for match in matches {
+            result += source.substring(with: NSRange(location: cursor, length: match.range.location - cursor))
+            let isHex = !source.substring(with: match.range(at: 1)).isEmpty
+            let digits = source.substring(with: match.range(at: 2))
+            if let code = UInt32(digits, radix: isHex ? 16 : 10), let scalar = Unicode.Scalar(code) {
+                result.append(Character(scalar))
+            } else {
+                result += source.substring(with: match.range)
+            }
+            cursor = match.range.location + match.range.length
+        }
+        result += source.substring(from: cursor)
+        return result
     }
     
     private nonisolated func parseJSON(_ content: String) -> Transcript {

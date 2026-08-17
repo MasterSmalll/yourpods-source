@@ -16,7 +16,11 @@ import XCTest
 final class QueueSyncPruningTests: XCTestCase {
 
     private let defaults = UserDefaults.standard
-    private let serverGuidsKey = "proQueueSyncServerGuids"
+    // The constant, not a copy of its value: these tests both clear this key in
+    // setUp and assert against it, so a hardcoded spelling silently stops
+    // clearing the real one (leaking state between tests) and starts asserting
+    // on a key nothing writes.
+    private let serverGuidsKey = PlayerManager.proQueueSyncServerGuidsKey
     private let syncCompletedKey = "proQueueSyncCompleted"
 
     override func setUp() {

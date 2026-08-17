@@ -1,0 +1,146 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "No episodes queued" : {
+      "comment" : "Empty-state line meaning the Queue (the ordered list of episodes to play) contains nothing. It appears as small caption text directly under the app name 'YourPods' in the Apple Watch face / iPhone Lock Screen complication AND in the Home Screen widget's empty state. Space is the hard constraint: a complication gives roughly one short line and anything longer is truncated.",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Warteliste leer"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sin episodios en cola"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "File d'attente vide"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Coda vuota"
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Niets in de wachtrij"
+          }
+        }
+      }
+    },
+    "Now playing and up next from your podcast queue." : {
+      "comment" : "Description of the YourPods complication shown in the picker when the user chooses a complication to add to an Apple Watch face or the iPhone Lock Screen. 'Up next' means the episode that follows the current one in the Queue (the ordered list of episodes to play). YourPods is the product name and is never translated.",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Aktuelle Wiedergabe und die nächste Folge aus deiner Podcast-Warteliste."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Lo que suena ahora y lo siguiente de tu cola de podcasts."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Lecture en cours et épisodes à suivre de votre file d'attente."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "In riproduzione e prossimi episodi dalla tua coda di podcast."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Wat er nu speelt en wat er volgt in je wachtrij."
+          }
+        }
+      }
+    },
+    "Up Next" : {
+      "comment" : "The queue's screen name — the ordered list of episodes waiting to play. Used as the navigation title of that screen, as a 'Start Page' option in Settings, and as a heading on the Apple Watch complication. Keep one translation everywhere, including where it appears inside longer sentences.",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Als Nächstes"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "A continuación"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "À suivre"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Prossimi"
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Wachtrij"
+          }
+        }
+      }
+    },
+    "YourPods" : {
+      "comment" : "The app's own name — never translate or transliterate it. It appears as the Home screen navigation title, beside the logo in the toolbar, and as fallback text on the Apple Watch complication.",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "YourPods"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "YourPods"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "YourPods"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "YourPods"
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "YourPods"
+          }
+        }
+      }
+    }
+  },
+  "version" : "1.0"
+}

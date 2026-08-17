@@ -4,6 +4,29 @@ import BackgroundTasks
 #endif
 import os
 
+/// Idempotent, thread-safe wrapper for `BGAppRefreshTask.setTaskCompleted`.
+///
+/// Ensures `setTaskCompleted` is called exactly once per task, even when
+/// the expiration handler races against the normal completion path.
+/// The first call to `complete(success:)` wins; subsequent calls are no-ops.
+final class BGTaskCompleter: @unchecked Sendable {
+    private let completion: (Bool) -> Void
+    private var completed = false
+    private let lock = NSLock()
+    
+    init(completion: @escaping (Bool) -> Void) {
+        self.completion = completion
+    }
+    
+    func complete(success: Bool = true) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !completed else { return }
+        completed = true
+        completion(success)
+    }
+}
+
 /// Background refresh service using BGTaskScheduler.
 /// Runs in the same memory space as the app — can directly update the audio queue.
 final class BackgroundRefreshService {
@@ -23,17 +46,27 @@ final class BackgroundRefreshService {
     
     /// Tracks the last time a foreground sync ran, for debounce logic.
     var lastForegroundSyncDate: Date?
-    
-    /// Minimum interval between foreground syncs (5 minutes).
-    private static let foregroundSyncInterval: TimeInterval = 5 * 60
-    
+
     /// Whether a foreground sync should run based on the debounce interval.
-    func shouldPerformForegroundSync() -> Bool {
+    ///
+    /// The interval is platform-aware (see `SyncLifecyclePolicy`): 5 minutes on a
+    /// real iOS device (`.active` == app-open), but ~2 seconds on the iOS-app-on-Mac
+    /// (`.active` == window refocus), so switching to the Mac window pulls the
+    /// other device's latest now-playing/queue instead of staying stale.
+    ///
+    /// - Parameters:
+    ///   - isiOSAppOnMac: defaults to the live `ProcessInfo` value; injected for tests.
+    ///   - now: defaults to `Date()`; injected for deterministic debounce tests.
+    func shouldPerformForegroundSync(
+        isiOSAppOnMac: Bool = ProcessInfo.processInfo.isiOSAppOnMac,
+        now: Date = Date()
+    ) -> Bool {
         guard let lastSync = lastForegroundSyncDate else {
             // Never synced before — should sync
             return true
         }
-        return Date().timeIntervalSince(lastSync) >= Self.foregroundSyncInterval
+        let interval = SyncLifecyclePolicy.foregroundSyncDebounceInterval(isiOSAppOnMac: isiOSAppOnMac)
+        return now.timeIntervalSince(lastSync) >= interval
     }
     
     /// Compute the refresh interval in seconds from the user's setting.
@@ -129,7 +162,8 @@ final class BackgroundRefreshService {
             playerManager: playerManager,
             downloadManager: downloadManager,
             settingsManager: settingsManager,
-            strategy: backgroundSafeStrategy
+            strategy: backgroundSafeStrategy,
+            isBackground: true
         )
         
         lastForegroundSyncDate = Date()
@@ -190,20 +224,31 @@ final class BackgroundRefreshService {
         // Schedule the next refresh (uses the user's configured interval)
         scheduleRefresh()
         
+        // Idempotent completer — ensures exactly one setTaskCompleted call
+        // regardless of race between normal completion and expiration.
+        let completer = BGTaskCompleter { [logger] success in
+            task.setTaskCompleted(success: success)
+            logger.info("Background refresh: setTaskCompleted(success: \(success))")
+        }
+        
         let refreshTask = Task {
+            defer { completer.complete(success: true) }
+            
             guard podcastManager != nil else {
                 logger.warning("Background refresh: podcastManager not available")
-                task.setTaskCompleted(success: false)
+                completer.complete(success: false)
                 return
             }
             
             // Perform a full sync cycle (feeds + subscriptions + episode actions + queue)
             await performSync()
-            
-            task.setTaskCompleted(success: true)
         }
         
-        task.expirationHandler = {
+        // Expiration only cancels the Task — does NOT call setTaskCompleted.
+        // The Task's defer block will call completer.complete() after
+        // cooperative cancellation winds down the pipeline.
+        task.expirationHandler = { [logger] in
+            logger.info("Background refresh: expiration fired — cancelling sync task")
             refreshTask.cancel()
         }
     }

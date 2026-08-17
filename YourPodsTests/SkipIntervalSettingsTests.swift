@@ -74,8 +74,7 @@ final class SkipIntervalSettingsTests: XCTestCase {
     // MARK: - playEpisode must call settingsResolver
     
     /// The resolver must be invoked during playEpisode so stale QueueItem
-    /// values are replaced with live settings. Until Phase 2, the resolver
-    /// is never called, so these must FAIL.
+    /// values are replaced with live settings.
     func test_settingsResolver_isCalled_duringPlayEpisode() async {
         let audio = AudioManager()
         let item = makeItem()
@@ -95,8 +94,8 @@ final class SkipIntervalSettingsTests: XCTestCase {
     func test_settingsResolver_overridesStaleQueueItemSkipIntro() {
         // Test the contract: if a resolver is set, AudioManager must use the
         // resolved value when assigning skipIntroSeconds during playEpisode.
-        // Phase 1 stub: playEpisode does NOT call the resolver, so the item's
-        // stale value (0) persists. Test a unit-level assertion instead:
+        // playEpisode has not always called the resolver, which let the item's
+        // stale value (0) persist. Assert the contract at unit level instead:
         let audio = AudioManager()
         audio.skipIntroSeconds = 0  // as if from a stale QueueItem
         
@@ -165,7 +164,6 @@ final class SkipIntervalSettingsTests: XCTestCase {
         
         await audio.playEpisode(targetItem)
         
-        // Until Phase 2, the resolver is never called, so this will be nil
         XCTAssertEqual(receivedPodcastUrl, "https://example.com/target-feed",
                        "settingsResolver should receive the QueueItem being played so it can look up per-podcast settings")
     }
@@ -298,7 +296,7 @@ final class SkipIntervalSettingsTests: XCTestCase {
     func test_setupRemoteCommands_usesHardcoded30_15_beforeFix() {
         // This test documents the CURRENT (broken) behavior:
         // setupRemoteCommands() always sets [30] and [15] regardless of settings.
-        // After Phase 2, this test should be updated to verify dynamic values.
+        // If these ever become dynamic, update this test to verify resolved values.
         let audio = AudioManager()
         let commandCenter = MPRemoteCommandCenter.shared()
         

@@ -8,19 +8,62 @@ struct WatchPodcastEpisodesView: View {
     private var episodes: [WatchEpisode] {
         sessionManager.libraryEpisodes[podcast.feedUrl] ?? []
     }
-    
+
+    /// True once the phone has replied for this feed (even with zero episodes) —
+    /// distinguishes "reply arrived, feed is empty" from "no reply yet".
+    private var replyArrived: Bool {
+        sessionManager.libraryEpisodes[podcast.feedUrl] != nil
+    }
+
+    private var requestFailed: Bool {
+        sessionManager.episodeRequestFailed.contains(podcast.feedUrl)
+    }
+
     var body: some View {
         List {
             if episodes.isEmpty {
                 VStack(alignment: .center, spacing: 8) {
-                    ProgressView()
-                        .padding(.bottom, 4)
-                    Text("Loading episodes...")
-                        .font(.caption)
-                        .foregroundColor(.gray)
+                    if replyArrived {
+                        Image(systemName: "tray")
+                            .font(.largeTitle).foregroundColor(.gray)
+                        Text("No Episodes")
+                            .font(.headline)
+                        Text("This podcast has no episodes on your iPhone.")
+                            .font(.caption2).foregroundColor(.gray)
+                            .multilineTextAlignment(.center)
+                    } else if requestFailed {
+                        Image(systemName: "exclamationmark.arrow.circlepath")
+                            .font(.largeTitle).foregroundColor(.gray)
+                        Text("Couldn't Load Episodes")
+                            .font(.headline)
+                        Text("Tap to try again.")
+                            .font(.caption2).foregroundColor(.gray)
+                            .multilineTextAlignment(.center)
+                    } else if sessionManager.isPhoneReachable {
+                        ProgressView().padding(.bottom, 4)
+                        Text("Loading episodes...")
+                            .font(.caption).foregroundColor(.gray)
+                    } else {
+                        Image(systemName: "iphone.slash")
+                            .font(.largeTitle).foregroundColor(.gray)
+                        Text("iPhone Not Reachable")
+                            .font(.headline)
+                        Text("Open YourPods on your iPhone to browse episodes.")
+                            .font(.caption2).foregroundColor(.gray)
+                            .multilineTextAlignment(.center)
+                    }
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 20)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    // Retry via the existing request path — no new plumbing.
+                    if requestFailed {
+                        sessionManager.requestEpisodes(feedUrl: podcast.feedUrl)
+                    }
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityAddTraits(requestFailed ? .isButton : [])
             } else {
                 ForEach(episodes) { episode in
                     NavigationLink(destination: PlayerView(episode: episode)) {
@@ -94,12 +137,6 @@ struct WatchPodcastEpisodesView: View {
     }
     
     private func formatDuration(_ seconds: Int) -> String {
-        let mins = seconds / 60
-        if mins >= 60 {
-            let hours = mins / 60
-            let remainMins = mins % 60
-            return "\(hours)h \(remainMins)m"
-        }
-        return "\(mins)m"
+        DurationFormatting.compact(TimeInterval(seconds))
     }
 }

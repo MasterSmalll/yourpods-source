@@ -3,8 +3,8 @@ import SwiftUI
 /// P3 — Privacy Preserving Playback settings screen.
 ///
 /// Dedicated screen accessible from Settings → Playback → P3.
-/// Provides the global P3 toggle with detailed explanations of what it does,
-/// including download/listener tracking and dynamic ad insertion bypass.
+/// Provides the global P3 toggle with detailed explanations of what it does.
+/// P3 targets download/listener tracking redirects only — it is not an ad blocker.
 struct P3SettingsView: View {
     @Environment(SettingsManager.self) private var settings
     @State private var showP3EnabledAlert = false
@@ -20,7 +20,7 @@ struct P3SettingsView: View {
                     Label("Enable P3", systemImage: "shield.checkered")
                 }
             } footer: {
-                Text("When enabled, YourPods removes known tracking redirects and dynamic ad insertion from episode URLs before playback. Your device connects directly to the audio host.")
+                Text("When enabled, YourPods removes known tracking redirects from episode URLs before playback. Your device connects directly to the audio host.")
             }
             
             // MARK: - What P3 Does
@@ -29,12 +29,6 @@ struct P3SettingsView: View {
                     icon: "chart.bar.xaxis",
                     title: "Removes Download Tracking",
                     detail: "Many podcast analytics services track when you download or stream an episode. P3 bypasses these trackers."
-                )
-                
-                InfoRow(
-                    icon: "speaker.wave.2.bubble",
-                    title: "Bypasses Dynamic Ad Insertion",
-                    detail: "Some podcasts stitch ads into the audio in real-time through ad-insertion services. P3 attempts to bypass this to deliver the raw episode audio."
                 )
                 
                 InfoRow(
@@ -48,6 +42,12 @@ struct P3SettingsView: View {
             
             // MARK: - Good to Know
             Section {
+                InfoRow(
+                    icon: "speaker.wave.2.bubble",
+                    title: "Not an Ad Blocker",
+                    detail: "P3 removes tracking redirects, not ads. Many podcasts stitch ads directly into the audio file, and P3 does not change that."
+                )
+
                 InfoRow(
                     icon: "exclamationmark.triangle",
                     title: "Some Podcasts May Not Play",
@@ -98,7 +98,7 @@ struct P3SettingsView: View {
         .alert("P3 is Now Active", isPresented: $showP3EnabledAlert) {
             Button("OK", role: .cancel) { }
         } message: {
-            Text("Tracking redirects and dynamic ad insertion will be stripped from episode URLs for all podcasts.\n\nYou can override this for individual podcasts in Library → Podcast → Settings.")
+            Text("Tracking redirects will be stripped from episode URLs for all podcasts.\n\nYou can override this for individual podcasts in Library → Podcast → Settings.")
         }
     }
 }
@@ -108,9 +108,9 @@ struct P3SettingsView: View {
 /// A row with an icon, title, and multi-line detail text for informational sections.
 private struct InfoRow: View {
     let icon: String
-    let title: String
-    let detail: String
-    
+    let title: LocalizedStringResource
+    let detail: LocalizedStringResource
+
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: icon)
@@ -129,6 +129,8 @@ private struct InfoRow: View {
         }
         .padding(.vertical, 4)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(title). \(detail)")
+        .accessibilityLabel(String(localized: "a11y.settings.titleWithDetail",
+                                   defaultValue: "\(String(localized: title)). \(String(localized: detail))",
+                                   comment: "VoiceOver label for a settings row that has an explanatory subtitle. Argument 1 is the setting's name, 2 the explanation."))
     }
 }

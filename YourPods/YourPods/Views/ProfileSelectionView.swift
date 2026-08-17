@@ -13,6 +13,10 @@ struct ProfileSelectionView: View {
     
     @Environment(SettingsManager.self) private var settings
     @Environment(PodcastManager.self) private var podcastManager
+    // Needed to reach refreshAndSync — sync must go through the orchestrator factory
+    // rather than calling individual steps.
+    @Environment(PlayerManager.self) private var playerManager
+    @Environment(DownloadManager.self) private var downloadManager
     @Environment(\.dismiss) private var dismiss
     
     @State private var profiles: [ServerProfile] = []
@@ -170,7 +174,7 @@ struct ProfileSelectionView: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Label("YourPods Sync", systemImage: "star.circle")
                                     .foregroundStyle(.purple)
-                                Text(AccountTypeDescriptions.yourPodsSyncShort)
+                                Text(AccountTypeDescriptions.yourPodsFreeShort)
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
                             }
@@ -293,7 +297,10 @@ struct ProfileSelectionView: View {
     private func activateProfile(_ profile: ServerProfile) {
         settings.activeProfileId = profile.id
         syncStatusMessage = nil
-        
+        // Swap episode-action state to this profile before any sync, so the previous
+        // profile's positions don't leak into this profile's conflict detection.
+        podcastManager.switchActiveProfile(to: profile.id)
+
         if !profile.isLocal, let baseUrl = profile.baseUrl, let username = profile.username {
             switch profile.profileType {
             case .yourpodsPro:
@@ -339,15 +346,27 @@ struct ProfileSelectionView: View {
                 }
             }
             
-            do {
-                _ = try await podcastManager.syncSubscriptions()
-                progressTask.cancel()
-                syncStatusMessage = "Syncing episode progress..."
-                _ = try await podcastManager.syncEpisodeActions()
+            // Route through refreshAndSync, not the individual steps. Calling
+            // syncSubscriptions + syncEpisodeActions directly synced exactly those two
+            // things and nothing else — no playback positions, no queue, no settings, no
+            // notes — so the Sync button could not fix the state users press it to fix.
+            // It also skipped the orchestrator factory, and passed no strategy, so it
+            // silently resolved as .serverWins whatever the user had chosen.
+            podcastManager.lastSyncError = nil
+            _ = await podcastManager.refreshAndSync(
+                playerManager: playerManager,
+                downloadManager: downloadManager,
+                settingsManager: settings,
+                strategy: settings.syncConflictStrategy
+            )
+            progressTask.cancel()
+            // refreshAndSync does not throw — it reports through lastSyncError — so
+            // reporting success unconditionally would claim a sync that may not have
+            // happened. That is the failure mode this guards against.
+            if let failure = podcastManager.lastSyncError {
+                syncStatusMessage = "Sync failed: \(failure)"
+            } else {
                 syncStatusMessage = "Sync complete ✓"
-            } catch {
-                progressTask.cancel()
-                syncStatusMessage = "Sync failed: \(error.localizedDescription)"
             }
             isSyncing = false
             Task {
@@ -537,12 +556,33 @@ struct EditProfileView: View {
     @State private var isForkingProfile = false
     
     // Account deletion (Pro only)
+
+    /// The word the user types to confirm permanent account deletion.
+    ///
+    /// The prompt, the field placeholder, the VoiceOver hint and the comparison
+    /// that unlocks the button all read this one value. They used to be four
+    /// separate literals, three of them localizable and the fourth — the
+    /// comparison — hardcoded English, so translating the app would have made
+    /// account deletion impossible in every translated language.
+    static let deleteConfirmationWord = String(
+        localized: "account.delete.confirmWord",
+        defaultValue: "DELETE",
+        comment: "The exact word the user must type to confirm permanent account deletion. Translate it, but keep it ONE all-capitals word with no spaces or punctuation — the app compares the typed text against this string character for character, and the field force-uppercases what is typed.")
+
     @State private var showDeleteAccount = false
     @State private var deleteConfirmation = ""
     @State private var deleteReason = ""
     @State private var isDeletingAccount = false
     @State private var deleteAccountError: String?
     @State private var showDataTransparency = false
+
+    // GDPR Export
+    @State private var isExportingData = false
+    @State private var exportError: String?
+    @State private var exportFileURL: URL?
+    
+    // Login Flow re-authentication (Nextcloud only)
+    @StateObject private var loginCoordinator = LoginFlowCoordinator()
 
     private var isProProfile: Bool { profile.profileType == .yourpodsPro }
     
@@ -571,85 +611,7 @@ struct EditProfileView: View {
             }
             
             if !profile.isLocal {
-                Section {
-                    TextField("Server URL", text: $serverUrl, prompt: Text("https://cloud.example.com"))
-                        #if os(iOS)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        #endif
-                        .autocorrectionDisabled()
-                    
-                    if isInsecure {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Label {
-                                Text("This URL uses HTTP. Your credentials and data will be sent unencrypted. We recommend using HTTPS for security.")
-                                    .font(.caption)
-                            } icon: {
-                                Image(systemName: "exclamationmark.triangle.fill")
-                                    .foregroundColor(.orange)
-                            }
-                            .accessibilityLabel("Security warning: This URL uses HTTP. Your credentials and data will be sent unencrypted. We recommend using HTTPS for security.")
-                            
-                            if let suggested = URLSanitizer.suggestedHTTPSURL(serverUrl) {
-                                Button {
-                                    serverUrl = suggested
-                                } label: {
-                                    Label("Switch to HTTPS", systemImage: "lock.shield")
-                                        .font(.caption.bold())
-                                }
-                                .buttonStyle(.bordered)
-                                .tint(.blue)
-                                .controlSize(.small)
-                                .accessibilityHint("Replaces http with https in the server URL")
-                            }
-                        }
-                    }
-                } header: {
-                    Text("Server")
-                }
-                
-                Section("Credentials") {
-                    TextField("Username", text: $username)
-                        #if os(iOS)
-                        .textContentType(.username)
-                        .textInputAutocapitalization(.never)
-                        #endif
-                        .autocorrectionDisabled()
-                    
-                    RevealableSecureField(label: "Password", text: $password)
-                        .textContentType(.password)
-                    
-                    Toggle("Save Password", isOn: $savePassword)
-                }
-                
-                if isProProfile {
-                    // Pro: Sync Profile Name (shared across devices)
-                    Section {
-                        TextField("Sync Profile Name", text: $proProfileName)
-                            #if os(iOS)
-                            .textInputAutocapitalization(.never)
-                            #endif
-                            .autocorrectionDisabled()
-                    } header: {
-                        Text("Sync Profile")
-                    } footer: {
-                        Text("Devices sharing the same profile name sync subscriptions, settings, and groups together. Change this to join or create a different profile.")
-                    }
-                } else {
-                    Section {
-                        TextField("Device ID", text: $deviceId)
-                            #if os(iOS)
-                            .textInputAutocapitalization(.never)
-                            #endif
-                            .autocorrectionDisabled()
-
-                        Text("Identifies this device to the sync server. Change only if you need to match an existing device name on the server.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } header: {
-                        Text("Device")
-                    }
-                }
+                serverAndCredentialsSections
             }
             
             Section {
@@ -693,6 +655,11 @@ struct EditProfileView: View {
                         Label("Change Password", systemImage: "lock.rotation")
                     }
                 }
+            }
+
+            // GDPR Data Export (Pro only)
+            if isProProfile {
+                gdprExportSection
             }
             
             // Delete profile
@@ -744,16 +711,27 @@ struct EditProfileView: View {
                             .font(.subheadline)
                         
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("Type DELETE to confirm:")
+                            Text(String(localized: "account.delete.confirmPrompt",
+                                        defaultValue: "Type \(Self.deleteConfirmationWord) to confirm:",
+                                        comment: "Instruction above the account-deletion confirmation field. Argument 1 is the confirmation word itself, already localized."))
                                 .font(.caption.weight(.medium))
                                 .foregroundStyle(.secondary)
-                            TextField("DELETE", text: $deleteConfirmation)
+                            // The label goes through the closure form rather
+                            // than an empty title string: `TextField("", …)`
+                            // extracts the empty literal as a catalog key, and
+                            // an empty key is not a translatable string.
+                            TextField(text: $deleteConfirmation,
+                                      prompt: Text(verbatim: Self.deleteConfirmationWord)) {
+                                Text("Confirmation field")
+                            }
                                 #if os(iOS)
                                 .textInputAutocapitalization(.characters)
                                 #endif
                                 .autocorrectionDisabled()
                                 .accessibilityLabel("Confirmation field")
-                                .accessibilityHint("Type the word DELETE in all capitals to confirm account deletion")
+                                .accessibilityHint(String(localized: "a11y.account.delete.confirmHint",
+                                                          defaultValue: "Type the word \(Self.deleteConfirmationWord) in all capitals to confirm account deletion",
+                                                          comment: "VoiceOver hint on the account-deletion confirmation field. Argument 1 is the confirmation word, already localized."))
                         }
                         
                         if let error = deleteAccountError {
@@ -787,7 +765,7 @@ struct EditProfileView: View {
                                         .fontWeight(.semibold)
                                 }
                             }
-                            .disabled(deleteConfirmation != "DELETE" || isDeletingAccount)
+                            .disabled(deleteConfirmation != Self.deleteConfirmationWord || isDeletingAccount)
                             .accessibilityLabel("Permanently delete account")
                             .accessibilityHint(isDeletingAccount ? "Deleting account" : "Double-tap to permanently delete your YourPods Sync account and all data")
                         }
@@ -828,6 +806,16 @@ struct EditProfileView: View {
         } message: {
             Text("Changing your Sync Profile Name to \"\(pendingProProfileName)\" will link this device to a new shared profile. Devices with the old name will stay on \"\(profile.proProfileName)\".")
         }
+        #if os(iOS)
+        .sheet(isPresented: Binding(
+            get: { exportFileURL != nil },
+            set: { if !$0 { exportFileURL = nil } }
+        )) {
+            if let url = exportFileURL {
+                ShareSheet(url: url)
+            }
+        }
+        #endif
         .onAppear {
             profileName = profile.name
             serverUrl = profile.baseUrl ?? ""
@@ -835,6 +823,18 @@ struct EditProfileView: View {
             password = KeychainHelper.shared.password(forProfileId: profile.id) ?? ""
             deviceId = profile.deviceId
             proProfileName = profile.proProfileName
+        }
+        .onChange(of: loginCoordinator.state) { _, newState in
+            if case .success(_, _, let appPassword) = newState {
+                // Re-auth success — update Keychain with new app password
+                KeychainHelper.shared.save(password: appPassword, forProfileId: profile.id)
+                if isActive { onReconnect() }
+                withAnimation { showSavedConfirmation = true }
+                Task {
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    showSavedConfirmation = false
+                }
+            }
         }
     }
     
@@ -915,7 +915,161 @@ struct EditProfileView: View {
             isDeletingAccount = false
         }
     }
-    
+
+    /// GDPR: Download all user data as JSON and present a share sheet.
+    private func performDataExport() async {
+        isExportingData = true
+        exportError = nil
+
+        do {
+            guard let proClient = podcastManager.currentSyncClient as? YourPodsProClient else {
+                exportError = "Not connected to YourPods Sync."
+                isExportingData = false
+                return
+            }
+
+            let data = try await proClient.exportAccountData()
+
+            // Write to a temp file for the share sheet
+            let filename = "yourpods-export-\(ISO8601DateFormatter().string(from: Date()).prefix(10)).json"
+            let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+            try data.write(to: tempURL)
+            exportFileURL = tempURL
+        } catch {
+            exportError = "Export failed: \(error.localizedDescription)"
+        }
+
+        isExportingData = false
+    }
+
+    @ViewBuilder
+    private var serverAndCredentialsSections: some View {
+        Section {
+            TextField("Server URL", text: $serverUrl, prompt: Text("https://cloud.example.com"))
+                #if os(iOS)
+                .keyboardType(.URL)
+                .textInputAutocapitalization(.never)
+                #endif
+                .autocorrectionDisabled()
+
+            if isInsecure {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label {
+                        Text("This URL uses HTTP. Your credentials and data will be sent unencrypted. We recommend using HTTPS for security.")
+                            .font(.caption)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.orange)
+                    }
+                    .accessibilityLabel("Security warning: This URL uses HTTP. Your credentials and data will be sent unencrypted. We recommend using HTTPS for security.")
+
+                    if let suggested = URLSanitizer.suggestedHTTPSURL(serverUrl) {
+                        Button {
+                            serverUrl = suggested
+                        } label: {
+                            Label("Switch to HTTPS", systemImage: "lock.shield")
+                                .font(.caption.bold())
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.blue)
+                        .controlSize(.small)
+                        .accessibilityHint("Replaces http with https in the server URL")
+                    }
+                }
+            }
+        } header: {
+            Text("Server")
+        }
+
+        Section("Credentials") {
+            TextField("Username", text: $username)
+                #if os(iOS)
+                .textContentType(.username)
+                .textInputAutocapitalization(.never)
+                #endif
+                .autocorrectionDisabled()
+
+            if profile.resolvedAuthMethod == .loginFlow {
+                HStack {
+                    Image(systemName: "checkmark.seal.fill")
+                        .foregroundStyle(.green)
+                    Text("Authenticated via Login Flow")
+                        .foregroundStyle(.secondary)
+                }
+
+                Button {
+                    startReAuthentication()
+                } label: {
+                    Label("Re-authenticate with Nextcloud", systemImage: "arrow.triangle.2.circlepath")
+                }
+            } else {
+                RevealableSecureField(label: "Password", text: $password)
+                    .textContentType(.password)
+
+                Toggle("Save Password", isOn: $savePassword)
+            }
+        }
+
+        if isProProfile {
+            Section {
+                TextField("Sync Profile Name", text: $proProfileName)
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    #endif
+                    .autocorrectionDisabled()
+            } header: {
+                Text("Sync Profile")
+            } footer: {
+                Text("Devices sharing the same profile name sync subscriptions, settings, and groups together. Change this to join or create a different profile.")
+            }
+        } else {
+            Section {
+                TextField("Device ID", text: $deviceId)
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    #endif
+                    .autocorrectionDisabled()
+
+                Text("Identifies this device to the sync server. Change only if you need to match an existing device name on the server.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("Device")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var gdprExportSection: some View {
+        Section {
+            Button {
+                Task { await performDataExport() }
+            } label: {
+                HStack {
+                    Label("Export My Data", systemImage: "square.and.arrow.up")
+                    Spacer()
+                    if isExportingData {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
+            }
+            .disabled(isExportingData)
+            .accessibilityLabel("Export My Data")
+            .accessibilityHint("Downloads all your synced data as a JSON file")
+
+            if let error = exportError {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+                    .font(.caption)
+            }
+        } header: {
+            Text("Data & Privacy")
+        } footer: {
+            Text("Download a copy of all your synced data (subscriptions, playback history, settings) as a JSON file.")
+        }
+    }
+
     private func saveChanges() {
         // For Pro profiles, check if the sync profile name changed — show fork alert first
         if isProProfile {
@@ -984,6 +1138,13 @@ struct EditProfileView: View {
             dismiss()
         }
     }
+    
+    // MARK: - Login Flow Re-authentication
+    
+    private func startReAuthentication() {
+        let sanitized = URLSanitizer.sanitize(serverUrl)
+        loginCoordinator.startLoginFlow(serverURL: sanitized)
+    }
 }
 
 // MARK: - Add Profile Sheet
@@ -1003,8 +1164,14 @@ private struct AddProfileSheet: View {
     @State private var password = ""
     @State private var deviceId = "yourpods-ios"
     @State private var savePassword = true
+    @State private var connectionError: String?
+    
+    // Login Flow v2 (Nextcloud only)
+    @State private var showManualEntry = false
+    @StateObject private var loginCoordinator = LoginFlowCoordinator()
     
     private var isGpodderNet: Bool { profileType == .gpodderNet }
+    private var isNextcloud: Bool { profileType == .gpodder }
     
     private var isInsecure: Bool {
         serverUrl.lowercased().hasPrefix("http://")
@@ -1012,6 +1179,12 @@ private struct AddProfileSheet: View {
     
     private var navTitle: String {
         isGpodderNet ? "Add gpodder.net" : "Add Self-Hosted Sync"
+    }
+    
+    private var canStartLoginFlow: Bool {
+        !serverUrl.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && loginCoordinator.state != .initiating
+            && loginCoordinator.state != .waitingForBrowser
     }
     
     var body: some View {
@@ -1069,30 +1242,74 @@ private struct AddProfileSheet: View {
                     Text("Server")
                 }
                 
-                Section("Credentials") {
-                    TextField("Username", text: $username)
-                        #if os(iOS)
-                        .textContentType(.username)
-                        .textInputAutocapitalization(.never)
-                        #endif
-                        .autocorrectionDisabled()
-                    
-                    RevealableSecureField(label: "Password", text: $password)
-                        .textContentType(.password)
-                    
-                    Toggle("Save Password", isOn: $savePassword)
+                // Login Flow v2 — Nextcloud only (not gpodder.net)
+                if isNextcloud {
+                    Section {
+                        Button(action: startLoginFlow) {
+                            HStack {
+                                Spacer()
+                                switch loginCoordinator.state {
+                                case .initiating:
+                                    ProgressView()
+                                        .controlSize(.small)
+                                        .padding(.trailing, 4)
+                                    Text("Connecting…")
+                                        .fontWeight(.semibold)
+                                case .waitingForBrowser:
+                                    ProgressView()
+                                        .controlSize(.small)
+                                        .padding(.trailing, 4)
+                                    Text("Waiting for browser…")
+                                        .fontWeight(.semibold)
+                                default:
+                                    Image(systemName: "person.badge.key.fill")
+                                    Text("Sign in with Nextcloud")
+                                        .fontWeight(.semibold)
+                                }
+                                Spacer()
+                            }
+                        }
+                        .disabled(!canStartLoginFlow)
+                        .accessibilityLabel(
+                            loginCoordinator.state == .waitingForBrowser
+                                ? "Waiting for browser login"
+                                : "Sign in with Nextcloud"
+                        )
+                        .accessibilityHint("Opens your Nextcloud login page in a browser window")
+                    } header: {
+                        Text("Sign In")
+                    } footer: {
+                        Text("Opens your Nextcloud server in a browser. Log in and grant access — your credentials stay in the browser, never in this app.")
+                    }
                 }
                 
-                Section("Device") {
-                    TextField("Device ID", text: $deviceId)
-                        #if os(iOS)
-                        .textInputAutocapitalization(.never)
-                        #endif
-                        .autocorrectionDisabled()
+                if let error = connectionError {
+                    Section {
+                        Label(error, systemImage: "exclamationmark.circle.fill")
+                            .foregroundStyle(.red)
+                            .font(.caption)
+                    }
+                }
+                
+                // Manual entry — primary for gpodder.net, collapsible fallback for Nextcloud
+                if isNextcloud {
+                    Section {
+                        DisclosureGroup("Enter app password manually", isExpanded: $showManualEntry) {
+                            manualCredentialFields
+                            deviceIdField
+                        }
+                    } footer: {
+                        Text("For servers that don't support Login Flow, create an app password in Nextcloud → Settings → Security.")
+                    }
+                } else {
+                    // gpodder.net — always show credentials directly
+                    Section("Credentials") {
+                        manualCredentialFields
+                    }
                     
-                    Text("Identifies this device to the sync server.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Section("Device") {
+                        deviceIdField
+                    }
                 }
             }
             .navigationTitle(navTitle)
@@ -1101,13 +1318,19 @@ private struct AddProfileSheet: View {
             #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button("Cancel") {
+                        loginCoordinator.cancel()
+                        dismiss()
+                    }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Add") {
-                        addProfile()
+                    // Only show Add button for manual entry (Login Flow auto-saves on success)
+                    if isGpodderNet || showManualEntry {
+                        Button("Add") {
+                            addProfile(authMethod: .manual)
+                        }
+                        .disabled(profileName.isEmpty || serverUrl.isEmpty || username.isEmpty || password.isEmpty)
                     }
-                    .disabled(profileName.isEmpty || serverUrl.isEmpty || username.isEmpty || password.isEmpty)
                 }
             }
             #if os(macOS)
@@ -1119,16 +1342,89 @@ private struct AddProfileSheet: View {
                     if profileName.isEmpty { profileName = "gpodder.net" }
                 }
             }
+            .onChange(of: loginCoordinator.state) { _, newState in
+                handleLoginFlowState(newState)
+            }
         }
     }
     
-    private func addProfile() {
+    // MARK: - Shared UI Components
+    
+    @ViewBuilder
+    private var manualCredentialFields: some View {
+        TextField("Username", text: $username)
+            #if os(iOS)
+            .textContentType(.username)
+            .textInputAutocapitalization(.never)
+            #endif
+            .autocorrectionDisabled()
+        
+        RevealableSecureField(label: "App Password", text: $password)
+            .textContentType(.password)
+        
+        Toggle("Save Password", isOn: $savePassword)
+    }
+    
+    @ViewBuilder
+    private var deviceIdField: some View {
+        TextField("Device ID", text: $deviceId)
+            #if os(iOS)
+            .textInputAutocapitalization(.never)
+            #endif
+            .autocorrectionDisabled()
+        
+        Text("Identifies this device to the sync server.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+    }
+    
+    // MARK: - Login Flow
+    
+    private func startLoginFlow() {
+        connectionError = nil
+        let sanitized = URLSanitizer.sanitize(serverUrl)
+        serverUrl = sanitized
+        loginCoordinator.startLoginFlow(serverURL: sanitized)
+    }
+    
+    private func handleLoginFlowState(_ state: LoginFlowCoordinator.State) {
+        switch state {
+        case .success(let server, let loginName, let appPassword):
+            // Create profile directly from Login Flow credentials
+            let name = profileName.isEmpty ? loginName : profileName
+            let profile = ServerProfile(
+                name: name,
+                baseUrl: server,
+                username: loginName,
+                deviceId: deviceId.isEmpty ? "yourpods-ios" : deviceId,
+                profileType: .gpodder,
+                authMethod: .loginFlow
+            )
+            
+            // Store app password in Keychain
+            settings.saveGPodderPassword = true
+            KeychainHelper.shared.save(password: appPassword, forProfileId: profile.id)
+            
+            profiles.append(profile)
+            onSave(profile)
+            dismiss()
+        case .error(let message):
+            connectionError = message
+        default:
+            break
+        }
+    }
+    
+    // MARK: - Manual Entry
+    
+    private func addProfile(authMethod: AuthMethod) {
         let profile = ServerProfile(
             name: profileName,
             baseUrl: serverUrl,
             username: username,
             deviceId: deviceId.isEmpty ? "yourpods-ios" : deviceId,
-            profileType: profileType
+            profileType: profileType,
+            authMethod: authMethod
         )
         
         if savePassword {
@@ -1136,11 +1432,15 @@ private struct AddProfileSheet: View {
             KeychainHelper.shared.save(password: password, forProfileId: profile.id)
         }
         
+        // Clear password from @State immediately after Keychain save
+        password = ""
+        
         profiles.append(profile)
         onSave(profile)
         dismiss()
     }
 }
+
 
 // MARK: - Add YourPods Pro Profile Sheet
 
@@ -1152,6 +1452,10 @@ private struct AddProfileSheet: View {
 private struct AddProProfileSheet: View {
     @Environment(SettingsManager.self) private var settings
     @Environment(PodcastManager.self) private var podcastManager
+    @Environment(SubscriptionManager.self) private var subscriptionManager
+    // Needed to reach refreshAndSync — see ProfileSelectionView.
+    @Environment(PlayerManager.self) private var playerManager
+    @Environment(DownloadManager.self) private var downloadManager
     @Environment(\.dismiss) private var dismiss
     @Binding var profiles: [ServerProfile]
     let onSave: (ServerProfile) -> Void
@@ -1214,7 +1518,9 @@ private struct AddProProfileSheet: View {
                         HStack(spacing: 4) {
                             Text(isCreatingAccount ? "By creating an account, you agree to our" : "By signing in, you agree to our")
                             Link("Terms of Service", destination: AppURLs.termsOfService)
-                            Text("and")
+                            Text(String(localized: "legal.termsAndPrivacy.conjunction",
+                                        defaultValue: "and",
+                                        comment: "Joins the two links in the row [Terms of Service] and [Privacy Policy]. It sits between two separately tappable links, so it cannot be folded into either one."))
                             Link("Privacy Policy", destination: AppURLs.privacyPolicy)
                         }
                         .font(.caption2)
@@ -1319,7 +1625,19 @@ private struct AddProProfileSheet: View {
             
             // Validate session with backend
             let session = try await client.validateSession()
-            
+
+            // Reflect the account's Pro entitlement immediately so an already-Pro
+            // account isn't shown the upgrade nudge after signing in.
+            subscriptionManager.applyServerSession(session)
+
+            // Identify to RevenueCat by Firebase UID so this account's purchases
+            // (web or app) resolve to the same customer. Never anonymous.
+            if let uid = session.user.firebaseUid {
+                subscriptionManager.identify(
+                    firebaseUID: uid,
+                    earlyAdopterPricingEligible: session.earlyAdopterPricingEligible ?? false)
+            }
+
             // Create Pro profile with default sync profile name "yourpodssync".
             // All devices using the same proProfileName share subscriptions, settings, and groups.
             let profile = ServerProfile(
@@ -1331,7 +1649,8 @@ private struct AddProProfileSheet: View {
                 proProfileName: "yourpodssync"
             )
             
-            // Store password in Keychain (kSecAttrAccessibleAfterFirstUnlock per GEMINI.md)
+            // Store password in Keychain (kSecAttrAccessibleAfterFirstUnlock,
+            // so background sync can still re-auth after a reboot)
             _ = KeychainHelper.shared.save(password: password, forProfileId: profile.id)
             
             profiles.append(profile)
@@ -1345,9 +1664,16 @@ private struct AddProProfileSheet: View {
                 showMigrationConfirmation = true
             } else {
                 onSave(profile)
-                // Sync from server
-                _ = try? await podcastManager.syncSubscriptions()
-                _ = try? await podcastManager.syncEpisodeActions()
+                // First pull after linking. Through refreshAndSync so the initial sync
+                // brings down playback positions, queue and settings too — pulling only
+                // subscriptions and actions left a freshly linked device with none of the
+                // state the user linked it for.
+                _ = await podcastManager.refreshAndSync(
+                    playerManager: playerManager,
+                    downloadManager: downloadManager,
+                    settingsManager: settings,
+                    strategy: settings.syncConflictStrategy
+                )
                 dismiss()
             }
             

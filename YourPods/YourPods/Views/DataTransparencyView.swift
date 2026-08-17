@@ -54,6 +54,8 @@ struct DataTransparencyView: View {
                         dataRow(icon: "envelope", label: "Email address", detail: "For authentication only")
                         dataRow(icon: "antenna.radiowaves.left.and.right", label: "Podcast subscriptions", detail: "RSS feed URLs you subscribe to")
                         dataRow(icon: "play.circle", label: "Playback positions", detail: "So you can resume across devices")
+                        dataRow(icon: "note.text", label: "Annotations (notes)", detail: "Synced for Pro users only")
+                        dataRow(icon: "exclamationmark.triangle", label: "Playback errors", detail: "Episode URL and error details when playback fails, so we can fix it")
                     }
                     .accessibilityElement(children: .combine)
                 }
@@ -63,7 +65,7 @@ struct DataTransparencyView: View {
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.primary)
                     
-                    Text("We do not collect analytics, tracking data, ad identifiers, or usage telemetry.")
+                    Text("We do not collect analytics, tracking data, or ad identifiers. Nothing above is used to profile you or shared with anyone.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -84,11 +86,11 @@ struct DataTransparencyView: View {
             
             // MARK: - Legal
             Section {
-                Link(destination: URL(string: "https://asecretcompany.com/yourpods-terms-of-service/")!) {
+                Link(destination: AppURLs.termsOfService) {
                     Label("Terms of Service", systemImage: "doc.text")
                 }
                 
-                Link(destination: URL(string: "https://asecretcompany.com/yourpods-privacy-policy/")!) {
+                Link(destination: AppURLs.privacyPolicy) {
                     Label("Privacy Policy", systemImage: "hand.raised")
                 }
             } header: {
@@ -118,6 +120,8 @@ struct DataTransparencyView: View {
             }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(label): \(detail)")
+        .accessibilityLabel(String(localized: "a11y.dataTransparency.row",
+                                   defaultValue: "\(label): \(detail)",
+                                   comment: "VoiceOver label for a row describing what data the app stores. Argument 1 is the kind of data, 2 what is done with it."))
     }
 }

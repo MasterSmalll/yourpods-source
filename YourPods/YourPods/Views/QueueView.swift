@@ -88,6 +88,14 @@ struct QueueView: View {
                                 } label: {
                                     Label("Mark as Played", systemImage: "checkmark.circle")
                                 }
+                                if let ep = resolveEpisode(for: current) {
+                                    Button {
+                                        podcastManager.toggleHidden(episode: ep)
+                                    } label: {
+                                        let isHidden = podcastManager.episodeActionSync.isHidden(guid: current.id)
+                                        Label(isHidden ? "Unhide" : "Hide", systemImage: isHidden ? "eye" : "eye.slash")
+                                    }
+                                }
                             }
                             // MARK: VoiceOver - Now Playing
                             .accessibilityAction(named: "Details") {
@@ -103,6 +111,11 @@ struct QueueView: View {
                             }
                             .accessibilityAction(named: "Mark as Played") {
                                 playerManager.markCurrentEpisodeAsPlayed()
+                            }
+                            .accessibilityAction(named: podcastManager.episodeActionSync.isHidden(guid: current.id) ? "Unhide" : "Hide") {
+                                if let ep = resolveEpisode(for: current) {
+                                    podcastManager.toggleHidden(episode: ep)
+                                }
                             }
                         }
                     }
@@ -142,9 +155,7 @@ struct QueueView: View {
                         settingsManager: settingsManager,
                         strategy: strategy
                     )
-                    if !conflicts.isEmpty && strategy == .ask {
-                        playerManager.pendingConflicts = conflicts
-                    }
+                    playerManager.deliverConflicts(conflicts, strategy: strategy)
                 }
             }
             .navigationTitle("Up Next")
@@ -161,7 +172,7 @@ struct QueueView: View {
                         } label: {
                             Label("Clear Queue", systemImage: "trash")
                         }
-                        .accessibilityLabel("Clear queue")
+                        .accessibilityLabel("Clear Queue")
                         .accessibilityHint("Remove episodes from your Up Next queue")
                     }
                 }
@@ -203,7 +214,7 @@ struct QueueView: View {
                         if playerManager.audioManager.currentItem?.id == item.id {
                             playerManager.removeCurrentEpisodeFromQueue()
                         } else {
-                            playerManager.audioManager.removeFromQueue(item)
+                            playerManager.removeFromQueue(item)
                         }
                         if rememberChoice {
                             settingsManager.queueRemovalAction = .removeOnly
@@ -318,6 +329,14 @@ struct QueueView: View {
                 } label: {
                     Label("Mark as Played", systemImage: "checkmark.circle")
                 }
+                if let ep = resolveEpisode(for: item) {
+                    Button {
+                        podcastManager.toggleHidden(episode: ep)
+                    } label: {
+                        let isHidden = podcastManager.episodeActionSync.isHidden(guid: item.id)
+                        Label(isHidden ? "Unhide" : "Hide", systemImage: isHidden ? "eye" : "eye.slash")
+                    }
+                }
                 Divider()
                 Button {
                     if let ep = resolveEpisode(for: item) {
@@ -349,6 +368,11 @@ struct QueueView: View {
             .accessibilityAction(named: "Mark as Played") {
                 playerManager.markQueuedEpisodeAsPlayed(item)
             }
+            .accessibilityAction(named: podcastManager.episodeActionSync.isHidden(guid: item.id) ? "Unhide" : "Hide") {
+                if let ep = resolveEpisode(for: item) {
+                    podcastManager.toggleHidden(episode: ep)
+                }
+            }
             .accessibilityAction(named: "Details") {
                 if let ep = resolveEpisode(for: item) {
                     episodeSheetItem = EpisodeSheetItem(episode: ep)
@@ -360,7 +384,7 @@ struct QueueView: View {
     private func handleRemoveItem(_ item: QueueItem) {
         switch settingsManager.queueRemovalAction {
         case .removeOnly:
-            playerManager.audioManager.removeFromQueue(item)
+            playerManager.removeFromQueue(item)
         case .removeAndMarkPlayed:
             playerManager.audioManager.removeFromQueue(item)
             podcastManager.markEpisodeAsPlayed(
@@ -374,7 +398,10 @@ struct QueueView: View {
     }
     
     /// Handle removing the currently-playing item based on the user's queue removal preference.
-    /// Unlike `handleRemoveItem`, this stops playback since the item is actively playing.
+    /// DECISION (2026-07-09): the two preferences intentionally diverge on playback —
+    /// .removeAndMarkPlayed advances to the next Up Next episode (stops when Up Next is empty) ("episode consumed,
+    /// keep going"), .removeOnly stops playback ("silence this", see
+    /// removeCurrentEpisodeFromQueue). Keep this asymmetry deliberate.
     private func handleRemoveCurrentItem(_ item: QueueItem) {
         switch settingsManager.queueRemovalAction {
         case .removeOnly:
@@ -430,28 +457,37 @@ private struct QueueSettingsSheet: View {
 
 // MARK: - Queue Info Banner
 
-private struct QueueInfoBanner: View {
+struct QueueInfoBanner: View {
+    /// One-time banner shown to every account type, so the copy has to be
+    /// accurate for all of them: gPodder/Nextcloud never sync the queue, Pro
+    /// syncs it across devices and the web, and Vault Mode keeps it on-device.
+    /// Exposed (not `private`) so the copy is covered by `QueueInfoBannerCopyTests`.
+    static let title: LocalizedStringResource = "How Up Next Syncs"
+    static let message: LocalizedStringResource = "gPodder and Nextcloud don't sync your Up Next queue between devices — only YourPods Pro syncs it across your devices and the web. Vault Mode keeps Up Next on this device. Your listening progress still syncs with any sync account."
+
     let onDismiss: () -> Void
-    
+
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: "info.circle.fill")
                 .foregroundColor(.blue)
-            
+                .accessibilityHidden(true)
+
             VStack(alignment: .leading, spacing: 2) {
-                Text("Device-Only Queue")
+                Text(Self.title)
                     .font(.subheadline.bold())
-                Text("This queue exists only on this device. Episode progress will sync to the server if you're using a sync account.")
+                Text(Self.message)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            
+
             Spacer()
-            
+
             Button(action: onDismiss) {
                 Image(systemName: "xmark.circle.fill")
                     .foregroundColor(.secondary)
             }
+            .accessibilityLabel("Dismiss")
         }
         .padding()
         .background(Color.blue.opacity(0.08))
@@ -502,12 +538,12 @@ struct QueueItemRow: View {
                     if let duration = item.durationSeconds, duration > 0 {
                         if isNowPlaying {
                             let listened = Int(progress * 100)
-                            Text("\(listened)% listened")
+                            Text(DurationFormatting.percentListened(listened))
                                 .font(.caption2.bold())
                                 .foregroundColor(.accentColor)
                         } else if item.positionSeconds > 0 {
                             let remaining = duration - item.positionSeconds
-                            Text("\(PlayerManager.formatDuration(TimeInterval(remaining))) left")
+                            Text(DurationFormatting.remaining(TimeInterval(remaining)))
                                 .font(.caption2)
                                 .foregroundStyle(.tertiary)
                         } else {

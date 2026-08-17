@@ -161,22 +161,38 @@ struct DownloadsView: View {
         }
         // MARK: VoiceOver
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel({
-            var label = episode.title
-            if let duration = episode.durationSeconds {
-                label += ", \(EpisodeAccessibility.spokenDuration(duration))"
-            }
-            label += ", \(formatSize(downloadManager.fileSize(for: episode.guid)))"
-            label += ", Downloaded"
-            return label
-        }())
+        .accessibilityLabel(Self.rowAccessibilityLabel(
+            title: episode.title,
+            spokenDuration: episode.durationSeconds.map { EpisodeAccessibility.spokenDuration($0) },
+            size: formatSize(downloadManager.fileSize(for: episode.guid))))
         .accessibilityAction(named: "Delete Download") {
             downloadManager.deleteDownload(guid: episode.guid)
         }
     }
     
+    // MARK: - VoiceOver
+
+    /// VoiceOver label for one row of the Downloads list.
+    ///
+    /// This was assembled in a `{ … }()` closure returning `String`, which
+    /// binds the `@_disfavoredOverload` `StringProtocol` overload of
+    /// `.accessibilityLabel` — so none of it reached the catalog, including
+    /// the hardcoded English word "Downloaded" and the ", " joining the parts.
+    /// Whole-sentence templates instead, so a language can reorder the pieces
+    /// and punctuate them its own way.
+    private static func rowAccessibilityLabel(title: String, spokenDuration: String?, size: String) -> String {
+        guard let spokenDuration else {
+            return String(localized: "a11y.downloads.row",
+                          defaultValue: "\(title), \(size), downloaded",
+                          comment: "VoiceOver label for a row in the Downloads list when the episode has no known duration. Argument 1 is the episode title, 2 the size of the file on disk. Every row in this list is a downloaded episode.")
+        }
+        return String(localized: "a11y.downloads.rowWithDuration",
+                      defaultValue: "\(title), \(spokenDuration), \(size), downloaded",
+                      comment: "VoiceOver label for a row in the Downloads list. Argument 1 is the episode title, 2 its spoken duration such as '1 hour 5 minutes', 3 the size of the file on disk. Every row in this list is a downloaded episode.")
+    }
+
     // MARK: - Formatting
-    
+
     private func formatSize(_ bytes: Int64) -> String {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file

@@ -26,10 +26,11 @@ struct RemotePlayerView: View {
                     Button(action: {
                         sessionManager.sendRemoteCommand("skipBackward")
                     }) {
-                        Image(systemName: "gobackward.15")
+                        Image(systemName: WatchSkipIntervals.symbolName(for: sessionManager.skipBackwardSeconds, direction: .backward))
                             .font(.title2)
                     }
-                    
+                    .accessibilityLabel("Skip back \(sessionManager.skipBackwardSeconds) seconds on iPhone")
+
                     Button(action: {
                         sessionManager.sendRemoteCommand(sessionManager.remoteIsPlaying ? "pause" : "play")
                     }) {
@@ -37,13 +38,15 @@ struct RemotePlayerView: View {
                             .font(.system(size: 50))
                             .foregroundColor(.green)
                     }
-                    
+                    .accessibilityLabel(sessionManager.remoteIsPlaying ? "Pause on iPhone" : "Play on iPhone")
+
                     Button(action: {
                         sessionManager.sendRemoteCommand("skipForward")
                     }) {
-                        Image(systemName: "goforward.30")
+                        Image(systemName: WatchSkipIntervals.symbolName(for: sessionManager.skipForwardSeconds, direction: .forward))
                             .font(.title2)
                     }
+                    .accessibilityLabel("Skip forward \(sessionManager.skipForwardSeconds) seconds on iPhone")
                 }
                 .padding(.bottom, 8)
                 

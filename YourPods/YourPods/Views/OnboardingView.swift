@@ -17,6 +17,11 @@ struct OnboardingView: View {
     @Environment(SettingsManager.self) private var settingsManager
     @Environment(PodcastManager.self) private var podcastManager
     @Environment(NavigationState.self) private var navigationState
+    @Environment(SubscriptionManager.self) private var subscriptionManager
+    // Needed to reach refreshAndSync — the first pull after linking must bring down
+    // playback positions, queue and settings, not just subscriptions and actions.
+    @Environment(PlayerManager.self) private var playerManager
+    @Environment(DownloadManager.self) private var downloadManager
     @Environment(\.dismiss) private var dismiss
     
     @State private var currentPage = 0
@@ -40,12 +45,18 @@ struct OnboardingView: View {
     @State private var migrationResult: String?
     @State private var proIsCreatingAccount = false
     @State private var showDataTransparency = false
+    @State private var showProPaywall = false
+    
+    // Login Flow v2 (onboarding, Nextcloud only)
+    @State private var useLoginFlow = true
+    @StateObject private var loginCoordinator = LoginFlowCoordinator()
     
     enum OnboardingMode {
         case vault
         case sync       // Nextcloud / self-hosted gPodder
         case gpodderNet // gpodder.net public service
-        case pro
+        case free       // YourPods Free (sync-only account)
+        case pro        // YourPods Pro (account + paywall)
     }
     
     var body: some View {
@@ -56,7 +67,7 @@ struct OnboardingView: View {
             
             if selectedMode == .sync || selectedMode == .gpodderNet {
                 syncSetupPage.tag(2)
-            } else if selectedMode == .pro {
+            } else if selectedMode == .free || selectedMode == .pro {
                 proSetupPage.tag(2)
             }
         }
@@ -69,7 +80,7 @@ struct OnboardingView: View {
             case 0: welcomePage
             case 1: comparisonPage
             case 2 where selectedMode == .sync || selectedMode == .gpodderNet: syncSetupPage
-            case 2 where selectedMode == .pro: proSetupPage
+            case 2 where selectedMode == .free || selectedMode == .pro: proSetupPage
             default: comparisonPage
             }
         }
@@ -140,18 +151,27 @@ struct OnboardingView: View {
                 Text("Choose Your Setup")
                     .font(.title.bold())
                 
-                Text(AccountTypeDescriptions.tagline)
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal)
+                HStack(spacing: 4) {
+                    Text(AccountTypeDescriptions.tagline)
+                        .foregroundStyle(.secondary)
+                    Link(destination: AppURLs.accountTypes) {
+                        HStack(spacing: 2) {
+                            Text("Learn More")
+                            Image(systemName: "arrow.up.right.square")
+                        }
+                    }
+                    .accessibilityLabel("Learn more about account types on the YourPods website")
+                }
+                .font(.subheadline)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
             }
             .padding(.top, 24)
             .padding(.bottom, 12)
             
             // Scrollable mode cards
             ScrollView {
-                VStack(spacing: 10) {
+                VStack(spacing: 8) {
                     modeRow(
                         mode: .vault,
                         title: AccountTypeDescriptions.vault.title,
@@ -161,6 +181,54 @@ struct OnboardingView: View {
                         features: AccountTypeDescriptions.vault.features,
                         isRecommended: true
                     )
+                    
+                    // ☁️ YourPods Cloud section header
+                    HStack {
+                        Image(systemName: "cloud")
+                            .font(.caption2)
+                        Text("YourPods Cloud")
+                            .font(.caption2.weight(.bold))
+                            .tracking(0.8)
+                    }
+                    .foregroundStyle(.purple)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 4)
+                    .padding(.top, 8)
+                    .accessibilityAddTraits(.isHeader)
+                    .accessibilityLabel("YourPods Cloud")
+                    
+                    modeRow(
+                        mode: .free,
+                        title: AccountTypeDescriptions.yourPodsFree.title,
+                        subtitle: AccountTypeDescriptions.yourPodsFree.subtitle,
+                        icon: AccountTypeDescriptions.yourPodsFree.icon,
+                        color: .purple,
+                        features: AccountTypeDescriptions.yourPodsFree.features
+                    )
+                    
+                    modeRow(
+                        mode: .pro,
+                        title: AccountTypeDescriptions.yourPodsPro.title,
+                        subtitle: AccountTypeDescriptions.yourPodsPro.subtitle,
+                        icon: AccountTypeDescriptions.yourPodsPro.icon,
+                        color: .purple,
+                        features: AccountTypeDescriptions.yourPodsPro.features
+                    )
+                    
+                    // 🔧 Self-Hosted section header
+                    HStack {
+                        Image(systemName: "wrench.and.screwdriver")
+                            .font(.caption2)
+                        Text("SELF-HOSTED / THIRD-PARTY")
+                            .font(.caption2.weight(.bold))
+                            .tracking(0.8)
+                    }
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 4)
+                    .padding(.top, 8)
+                    .accessibilityAddTraits(.isHeader)
+                    .accessibilityLabel("Self-hosted and third-party")
                     
                     modeRow(
                         mode: .sync,
@@ -179,30 +247,14 @@ struct OnboardingView: View {
                         color: .orange,
                         features: AccountTypeDescriptions.thirdPartyGPodder.features
                     )
-                    
-                    modeRow(
-                        mode: .pro,
-                        title: AccountTypeDescriptions.yourPodsSync.title,
-                        subtitle: AccountTypeDescriptions.yourPodsSync.subtitle,
-                        icon: AccountTypeDescriptions.yourPodsSync.icon,
-                        color: .purple,
-                        features: AccountTypeDescriptions.yourPodsSync.features
-                    )
-                    
-                    Link(destination: AppURLs.accountTypes) {
-                        HStack(spacing: 4) {
-                            Text("Learn more at yourpods.app")
-                            Image(systemName: "arrow.up.right.square")
-                        }
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    }
-                    .accessibilityLabel("Learn more about account types on the YourPods website")
-                    .padding(.top, 4)
                 }
                 .padding(.horizontal)
+                // Reserve room at the top so the recommended card's "Quickstart"
+                // badge (a .topLeading overlay offset y: -6) isn't clipped by the
+                // ScrollView's top edge. Independent of translation length.
+                .padding(.top, 12)
             }
-            
+
             // Pinned action button
             VStack(spacing: 12) {
                 if selectedMode == .vault {
@@ -265,13 +317,27 @@ struct OnboardingView: View {
                             .foregroundColor(.white)
                             .clipShape(RoundedRectangle(cornerRadius: 14))
                     }
+                } else if selectedMode == .free {
+                    Button {
+                        withAnimation {
+                            currentPage = 2
+                        }
+                    } label: {
+                        Label("Create Free Account →", systemImage: "cloud")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(Color.purple)
+                            .foregroundColor(.white)
+                            .clipShape(RoundedRectangle(cornerRadius: 14))
+                    }
                 } else if selectedMode == .pro {
                     Button {
                         withAnimation {
                             currentPage = 2
                         }
                     } label: {
-                        Label("Sign In or Create Account →", systemImage: "star.circle")
+                        Label("Sign In or Create Account →", systemImage: "star.circle.fill")
                             .font(.headline)
                             .frame(maxWidth: .infinity)
                             .padding()
@@ -289,13 +355,56 @@ struct OnboardingView: View {
     
     // MARK: - Mode Row Component
     
+    /// The title + subtitle stack for a mode row. Extracted so the large
+    /// `modeRow` view expression stays within the Swift type-checker's budget
+    /// (LocalizedStringResource `Text` overloads tipped it over otherwise).
+    @ViewBuilder
+    private func modeRowTitles(_ title: LocalizedStringResource,
+                               _ subtitle: LocalizedStringResource) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.primary)
+            Text(subtitle)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// The expandable feature checklist for a mode row. Extracted to keep the
+    /// `modeRow` view expression within the type-checker's budget. Indexed by
+    /// offset since `LocalizedStringResource` is not `Hashable` for `id: \.self`.
+    @ViewBuilder
+    private func modeRowFeatures(_ features: [LocalizedStringResource], color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Divider()
+                .padding(.horizontal)
+
+            ForEach(Array(features.enumerated()), id: \.offset) { _, feature in
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "checkmark")
+                        .font(.caption.bold())
+                        .foregroundStyle(color)
+                        .frame(width: 14)
+                    Text(feature)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal)
+            }
+        }
+        .padding(.bottom, 14)
+        .transition(.opacity.combined(with: .move(edge: .top)))
+    }
+
     private func modeRow(
         mode: OnboardingMode,
-        title: String,
-        subtitle: String,
+        title: LocalizedStringResource,
+        subtitle: LocalizedStringResource,
         icon: String,
         color: Color,
-        features: [String],
+        features: [LocalizedStringResource],
         isRecommended: Bool = false
     ) -> some View {
         let isSelected = selectedMode == mode
@@ -306,22 +415,14 @@ struct OnboardingView: View {
             Button {
                 selectedMode = mode
             } label: {
-                HStack(spacing: 14) {
+                HStack(spacing: 12) {
                     Image(systemName: icon)
-                        .font(.title2)
+                        .font(.title3)
                         .foregroundStyle(color)
-                        .frame(width: 36)
+                        .frame(width: 32)
                         .accessibilityHidden(true)
                     
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(title)
-                            .font(.headline)
-                            .foregroundStyle(.primary)
-                        Text(subtitle)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
+                    modeRowTitles(title, subtitle)
                     
                     Spacer()
                     
@@ -330,10 +431,13 @@ struct OnboardingView: View {
                         .foregroundStyle(isSelected ? color : Color.secondary)
                         .accessibilityHidden(true)
                 }
-                .padding()
+                .padding(.horizontal)
+                .padding(.vertical, 10)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("\(title). \(subtitle)")
+            .accessibilityLabel(String(localized: "a11y.onboarding.option",
+                                       defaultValue: "\(String(localized: title)). \(String(localized: subtitle))",
+                                       comment: "VoiceOver label for a selectable onboarding option. Argument 1 is the option's name, 2 its one-line explanation."))
             .accessibilityValue(isSelected ? "Selected" : "Not selected")
             .accessibilityAddTraits(isSelected ? .isSelected : [])
             
@@ -352,34 +456,18 @@ struct OnboardingView: View {
                         .accessibilityHidden(true)
                 }
                 .foregroundStyle(color)
-                .padding(.bottom, isExpanded ? 8 : 12)
+                .padding(.bottom, isExpanded ? 6 : 8)
                 .frame(maxWidth: .infinity)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("More Info for \(title)")
+            .accessibilityLabel(String(localized: "a11y.onboarding.moreInfo",
+                                       defaultValue: "More Info for \(String(localized: title))",
+                                       comment: "VoiceOver label for the button that expands an onboarding option's details. Placeholder is the option's name, such as 'Vault Mode'."))
             .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
             
             // Expandable checklist
             if isExpanded {
-                VStack(alignment: .leading, spacing: 8) {
-                    Divider()
-                        .padding(.horizontal)
-                    
-                    ForEach(features, id: \.self) { feature in
-                        HStack(alignment: .top, spacing: 8) {
-                            Image(systemName: "checkmark")
-                                .font(.caption.bold())
-                                .foregroundStyle(color)
-                                .frame(width: 14)
-                            Text(feature)
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.horizontal)
-                    }
-                }
-                .padding(.bottom, 14)
-                .transition(.opacity.combined(with: .move(edge: .top)))
+                modeRowFeatures(features, color: color)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -396,7 +484,7 @@ struct OnboardingView: View {
                         : (isSelected ? color : .clear),
                         lineWidth: isRecommended && !isSelected ? 1.5 : 2)
         )
-        .overlay(alignment: .topTrailing) {
+        .overlay(alignment: .topLeading) {
             if isRecommended {
                 Text("Quickstart")
                     .font(.caption2.weight(.semibold))
@@ -404,7 +492,7 @@ struct OnboardingView: View {
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
                     .background(Capsule().fill(Color.blue))
-                    .padding(8)
+                    .offset(x: -6, y: -6)
                     .accessibilityLabel("Recommended quickstart option")
             }
         }
@@ -473,22 +561,35 @@ struct OnboardingView: View {
                         }
                     }
                     
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Username").font(.caption.weight(.medium)).foregroundStyle(.secondary)
-                        TextField("username", text: $username)
-                            .textContentType(.username)
-                            #if os(iOS)
-                            .autocapitalization(.none)
-                            #endif
-                            .disableAutocorrection(true)
-                            .textFieldStyle(.roundedBorder)
+                    // Login Flow vs Manual picker — Nextcloud only
+                    if !isGpodderNetSetup {
+                        Picker("Authentication", selection: $useLoginFlow.animation()) {
+                            Text("Sign in with Nextcloud").tag(true)
+                            Text("Enter app password").tag(false)
+                        }
+                        .pickerStyle(.segmented)
                     }
                     
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Password").font(.caption.weight(.medium)).foregroundStyle(.secondary)
-                        RevealableSecureField(label: "password", text: $password)
-                            .textContentType(.password)
-                            .textFieldStyle(.roundedBorder)
+                    if isGpodderNetSetup || !useLoginFlow {
+                        // Manual credential entry
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Username").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                            TextField("username", text: $username)
+                                .textContentType(.username)
+                                #if os(iOS)
+                                .autocapitalization(.none)
+                                #endif
+                                .disableAutocorrection(true)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                        
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(isGpodderNetSetup ? "Password" : "App Password")
+                                .font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                            RevealableSecureField(label: "password", text: $password)
+                                .textContentType(.password)
+                                .textFieldStyle(.roundedBorder)
+                        }
                     }
                     
                     VStack(alignment: .leading, spacing: 4) {
@@ -514,33 +615,172 @@ struct OnboardingView: View {
                         .padding(.horizontal)
                 }
                 
-                Button {
-                    Task { await connectAndSync() }
-                } label: {
-                    HStack {
-                        Text("Connect & Sync")
-                            .font(.headline)
-                        if isConnecting {
-                            ProgressView()
-                                .controlSize(.small)
-                                .tint(.white)
+                // Action button — either Login Flow or manual Connect & Sync
+                if !isGpodderNetSetup && useLoginFlow {
+                    Button {
+                        startOnboardingLoginFlow()
+                    } label: {
+                        HStack {
+                            switch loginCoordinator.state {
+                            case .initiating:
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .tint(.white)
+                                Text("Connecting…")
+                                    .font(.headline)
+                            case .waitingForBrowser:
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .tint(.white)
+                                Text("Waiting for browser…")
+                                    .font(.headline)
+                            default:
+                                Image(systemName: "person.badge.key.fill")
+                                Text("Sign in with Nextcloud")
+                                    .font(.headline)
+                            }
                         }
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                        .background(canStartOnboardingLoginFlow ? Color.green : Color.gray)
+                        .foregroundColor(.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding()
-                    .background(canConnect ? (isGpodderNetSetup ? Color.orange : Color.green) : Color.gray)
-                    .foregroundColor(.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                    .disabled(!canStartOnboardingLoginFlow)
+                    .accessibilityLabel(
+                        loginCoordinator.state == .waitingForBrowser
+                            ? "Waiting for browser login"
+                            : "Sign in with Nextcloud"
+                    )
+                    .accessibilityHint("Opens your Nextcloud login page in a browser window")
+                    .padding(.horizontal, 32)
+                    
+                    Text("Opens your Nextcloud login page in a browser. Your credentials stay in the browser, never in this app.")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
+                        .padding(.bottom, 48)
+                } else {
+                    Button {
+                        Task { await connectAndSync() }
+                    } label: {
+                        HStack {
+                            Text("Connect & Sync")
+                                .font(.headline)
+                            if isConnecting {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .tint(.white)
+                            }
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                        .background(canConnect ? (isGpodderNetSetup ? Color.orange : Color.green) : Color.gray)
+                        .foregroundColor(.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                    }
+                    .disabled(!canConnect || isConnecting)
+                    .padding(.horizontal, 32)
+                    .padding(.bottom, 48)
                 }
-                .disabled(!canConnect || isConnecting)
-                .padding(.horizontal, 32)
-                .padding(.bottom, 48)
             }
+        }
+        .onChange(of: loginCoordinator.state) { _, newState in
+            handleOnboardingLoginFlowState(newState)
         }
     }
     
     private var canConnect: Bool {
         !username.isEmpty && !password.isEmpty && !serverUrl.isEmpty && (isGpodderNetSetup || !profileName.isEmpty)
+    }
+    
+    private var canStartOnboardingLoginFlow: Bool {
+        !serverUrl.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && loginCoordinator.state != .initiating
+            && loginCoordinator.state != .waitingForBrowser
+    }
+    
+    private func startOnboardingLoginFlow() {
+        errorMessage = nil
+        let sanitized = URLSanitizer.sanitize(serverUrl)
+        serverUrl = sanitized
+        loginCoordinator.startLoginFlow(serverURL: sanitized)
+    }
+    
+    private func handleOnboardingLoginFlowState(_ state: LoginFlowCoordinator.State) {
+        switch state {
+        case .success(let server, let loginName, let appPassword):
+            // Auto-fill from Login Flow credentials and proceed with sync
+            Task {
+                await connectAndSyncViaLoginFlow(
+                    server: server,
+                    loginName: loginName,
+                    appPassword: appPassword
+                )
+            }
+        case .error(let message):
+            errorMessage = message
+        default:
+            break
+        }
+    }
+    
+    private func connectAndSyncViaLoginFlow(server: String, loginName: String, appPassword: String) async {
+        isConnecting = true
+        errorMessage = nil
+        
+        let effectiveDeviceId = deviceId.isEmpty ? "yourpods-ios" : deviceId
+        let effectiveProfileName = profileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? loginName : profileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        let client = GPodderClient(
+            baseUrl: server,
+            username: loginName,
+            password: appPassword,
+            flavor: .nextcloud
+        )
+        
+        do {
+            // Validate connection
+            _ = try await client.getSubscriptionChanges(deviceId: effectiveDeviceId, since: 0)
+            
+            // Create sync profile with loginFlow auth method
+            let profile = ServerProfile(
+                name: effectiveProfileName,
+                baseUrl: server,
+                username: loginName,
+                deviceId: effectiveDeviceId,
+                profileType: .gpodder,
+                authMethod: .loginFlow
+            )
+            
+            var profiles = loadProfiles()
+            profiles.append(profile)
+            saveProfiles(profiles)
+            
+            _ = KeychainHelper.shared.save(password: appPassword, forProfileId: profile.id)
+            
+            settingsManager.activeProfileId = profile.id
+            podcastManager.setSyncClient(client, deviceId: effectiveDeviceId)
+            podcastManager.loadSubscriptions()
+            
+            // Initial sync
+            _ = await podcastManager.refreshAndSync(
+                playerManager: playerManager,
+                downloadManager: downloadManager,
+                settingsManager: settingsManager,
+                strategy: settingsManager.syncConflictStrategy
+            )
+            
+            settingsManager.hasCompletedOnboarding = true
+            dismiss()
+            
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        
+        isConnecting = false
     }
     
     // MARK: - Actions
@@ -606,8 +846,12 @@ struct OnboardingView: View {
             podcastManager.loadSubscriptions()
             
             // Initial sync
-            _ = try await podcastManager.syncSubscriptions()
-            _ = try await podcastManager.syncEpisodeActions()
+            _ = await podcastManager.refreshAndSync(
+                playerManager: playerManager,
+                downloadManager: downloadManager,
+                settingsManager: settingsManager,
+                strategy: settingsManager.syncConflictStrategy
+            )
             
             settingsManager.hasCompletedOnboarding = true
             dismiss()
@@ -642,7 +886,10 @@ struct OnboardingView: View {
             VStack(spacing: 24) {
                 Text(proIsCreatingAccount ? "Create a YourPods Sync Account" : "Sign In to YourPods Sync")
                     .font(.title.bold())
+                    .multilineTextAlignment(.center)
+                    .minimumScaleFactor(0.8)
                     .padding(.top, 32)
+                    .padding(.horizontal)
                 
                 Text(proIsCreatingAccount ? "Create a free account to sync your podcasts across devices." : "Enter your YourPods Sync account credentials.")
                     .font(.subheadline)
@@ -708,7 +955,9 @@ struct OnboardingView: View {
                     }
                     HStack(spacing: 4) {
                         Link("Terms of Service", destination: AppURLs.termsOfService)
-                        Text("and")
+                        Text(String(localized: "legal.termsAndPrivacy.conjunction",
+                                    defaultValue: "and",
+                                    comment: "Joins the two links in the row [Terms of Service] and [Privacy Policy]. It sits between two separately tappable links, so it cannot be folded into either one."))
                             .foregroundStyle(.secondary)
                         Link("Privacy Policy", destination: AppURLs.privacyPolicy)
                     }
@@ -764,6 +1013,22 @@ struct OnboardingView: View {
         } message: {
             Text("Upload your \(podcastManager.subscriptions.count) subscriptions and listening history to YourPods Sync?")
         }
+        .sheet(isPresented: $showProPaywall) {
+            NavigationStack {
+                ProPaywallView(onSkip: {
+                    showProPaywall = false
+                    completeOnboarding()
+                })
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Skip") {
+                            showProPaywall = false
+                            completeOnboarding()
+                        }
+                    }
+                }
+            }
+        }
     }
     
     private var canConnectPro: Bool {
@@ -795,7 +1060,19 @@ struct OnboardingView: View {
             
             // Validate session with backend
             let session = try await client.validateSession()
-            
+
+            // Reflect the account's Pro entitlement immediately so an already-Pro
+            // account isn't shown the upgrade paywall/nudge after signing in.
+            subscriptionManager.applyServerSession(session)
+
+            // Identify to RevenueCat by Firebase UID so this account's purchases
+            // (web or app) resolve to the same customer. Never anonymous.
+            if let uid = session.user.firebaseUid {
+                subscriptionManager.identify(
+                    firebaseUID: uid,
+                    earlyAdopterPricingEligible: session.earlyAdopterPricingEligible ?? false)
+            }
+
             // Create Pro profile
             let profile = ServerProfile(
                 name: session.user.email,
@@ -809,7 +1086,8 @@ struct OnboardingView: View {
             profiles.append(profile)
             saveProfiles(profiles)
             
-            // Store password in Keychain for re-auth (kSecAttrAccessibleAfterFirstUnlock per GEMINI.md)
+            // Store password in Keychain for re-auth (kSecAttrAccessibleAfterFirstUnlock,
+            // so background sync can still re-auth after a reboot)
             _ = KeychainHelper.shared.save(password: proPassword, forProfileId: profile.id)
             
             settingsManager.activeProfileId = profile.id
@@ -821,8 +1099,12 @@ struct OnboardingView: View {
                 showMigrationConfirmation = true
             } else {
                 // No local data to migrate — just sync
-                _ = try? await podcastManager.syncSubscriptions()
-                _ = try? await podcastManager.syncEpisodeActions()
+                _ = await podcastManager.refreshAndSync(
+                    playerManager: playerManager,
+                    downloadManager: downloadManager,
+                    settingsManager: settingsManager,
+                    strategy: settingsManager.syncConflictStrategy
+                )
                 finishProOnboarding()
             }
             
@@ -853,6 +1135,16 @@ struct OnboardingView: View {
     }
     
     private func finishProOnboarding() {
+        // An account that already has Pro (paid or early adopter) gets no upsell.
+        if !subscriptionManager.isPro && (selectedMode == .pro || selectedMode == .free) {
+            // Show paywall after account creation (easy skip for free users)
+            showProPaywall = true
+        } else {
+            completeOnboarding()
+        }
+    }
+    
+    private func completeOnboarding() {
         settingsManager.hasCompletedOnboarding = true
         dismiss()
         

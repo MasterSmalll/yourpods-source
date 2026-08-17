@@ -393,8 +393,7 @@ final class YourPodsProModelsV2Tests: XCTestCase {
 
 // MARK: - StatsEventBuffer
 
-/// TDD tests for the stats event buffer actor.
-/// Phase 1 (Red): These will fail until StatsEventBuffer is implemented.
+/// Tests for the stats event buffer actor.
 final class StatsEventBufferTests: XCTestCase {
 
     private func makeEvent(type: ProStatsEventType = .listen) -> ProStatsEvent {
@@ -472,7 +471,6 @@ final class StatsEventBufferTests: XCTestCase {
 // MARK: - Groups Sync First-Pull Guard
 
 /// Tests for the groups first-pull guard logic in PodcastManager.
-/// Phase 1 (Red): These will fail until the sync logic is wired up.
 @MainActor
 final class GroupsFirstPullTests: XCTestCase {
 
@@ -621,7 +619,6 @@ final class GroupsFirstPullTests: XCTestCase {
 ///   1. Pushes local groups to server
 ///   2. Applies server response (server is now consistent with local)
 ///
-/// Phase 1 (Red): `test_syncGroupsPushThenPull` will fail until that method exists.
 @MainActor
 final class GroupsSyncOrderTests: XCTestCase {
 

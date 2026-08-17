@@ -87,10 +87,7 @@ struct HistoryView: View {
     }
     
     private func formatDuration(_ seconds: TimeInterval) -> String {
-        let s = Int(seconds)
-        if s >= 3600 { return "\(s / 3600)h \((s % 3600) / 60)m" }
-        if s >= 60 { return "\(s / 60)m" }
-        return "\(s)s"
+        DurationFormatting.compact(seconds)
     }
 }
 
@@ -116,7 +113,7 @@ private struct StatCard: View {
         }
         .frame(maxWidth: .infinity)
         .padding()
-        .background(.ultraThinMaterial)
+        .yourPodsGlass(role: .card, cornerRadius: 12)
         .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 }

@@ -27,7 +27,7 @@ final class EmailValidationTests: XCTestCase {
     }
 
     func test_validEmail_withUnderscore() {
-        XCTAssertTrue(EmailValidator.isValid("test_user@example.com"))
+        XCTAssertTrue(EmailValidator.isValid("first_last@example.com"))
     }
 
     // MARK: - Invalid emails should fail

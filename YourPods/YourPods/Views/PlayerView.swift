@@ -1,19 +1,21 @@
 import SwiftUI
 
 /// Full-screen Now Playing view with artwork, progress, and controls.
-/// Full-screen Now Playing view.
+/// Port of player_screen.dart.
 struct PlayerView: View {
     @Environment(PlayerManager.self) private var playerManager
+    @Environment(PodcastManager.self) private var podcastManager
     @Environment(SettingsManager.self) private var settings
+    @Environment(ChapterCoordinator.self) private var chapterCoordinator
     @Environment(\.dismiss) private var dismiss
-    
+
     @State private var isSeeking = false
     @State private var seekPosition: Double = 0
     @State private var showSpeedPicker = false
     @State private var showChapters = false
     @State private var showTranscript = false
-    @State private var chapters: [Chapter] = []
     @State private var transcript: Transcript?
+    @State private var showAddNote = false
     
     var item: QueueItem? { playerManager.audioManager.currentItem }
     
@@ -21,23 +23,8 @@ struct PlayerView: View {
         NavigationStack {
             VStack(spacing: 0) {
                 if let item {
-                    // Artwork
-                    CachedAsyncImage(url: URL(string: item.artworkUrl ?? "")) { image in
-                        image.resizable().aspectRatio(contentMode: .fill)
-                    } placeholder: {
-                        RoundedRectangle(cornerRadius: 20)
-                            .fill(.ultraThinMaterial)
-                            .overlay {
-                                Image(systemName: "waveform")
-                                    .font(.system(size: 80))
-                                    .foregroundStyle(.secondary)
-                            }
-                    }
-                    .frame(maxWidth: 300, maxHeight: 300)
-                    .clipShape(RoundedRectangle(cornerRadius: 20))
-                    .shadow(radius: 20)
-                    .padding(.top, 32)
-                    
+                    mainArtwork
+
                     Spacer()
                     
                     // Title & Podcast
@@ -84,12 +71,10 @@ struct PlayerView: View {
                         )
                         .tint(.accentColor)
                         .accessibilityLabel("Seek position")
-                        .accessibilityValue({
-                            let pos = Int(isSeeking ? seekPosition : playerManager.currentPosition)
-                            let dur = Int(playerManager.currentDuration)
-                            guard dur > 0 else { return "" }
-                            return "\(EpisodeAccessibility.spokenDuration(pos)) of \(EpisodeAccessibility.spokenDuration(dur))"
-                        }())
+                        .accessibilityValue(EpisodeAccessibility.progressValue(
+                            position: Int(isSeeking ? seekPosition : playerManager.currentPosition),
+                            duration: Int(playerManager.currentDuration)
+                        ))
                         
                         HStack {
                             Text(formatTime(isSeeking ? seekPosition : playerManager.currentPosition))
@@ -98,7 +83,7 @@ struct PlayerView: View {
                             
                             Spacer()
                             
-                            Text("-\(formatTime(max(0, playerManager.currentDuration - (isSeeking ? seekPosition : playerManager.currentPosition))))")
+                            Text(DurationFormatting.remainingTimestamp(max(0, playerManager.currentDuration - (isSeeking ? seekPosition : playerManager.currentPosition))))
                                 .font(.caption.monospacedDigit())
                                 .foregroundStyle(.secondary)
                         }
@@ -123,7 +108,7 @@ struct PlayerView: View {
                             Image(systemName: "backward.fill")
                                 .font(.title2)
                         }
-                        .accessibilityLabel("Restart episode")
+                        .accessibilityLabel("Restart Episode")
                         
                         Button { playerManager.seekRelative(seconds: -Double(settings.skipBackwardSeconds)) } label: {
                             Image(systemName: "gobackward.\(settings.skipBackwardSeconds)")
@@ -172,7 +157,7 @@ struct PlayerView: View {
                             Image(systemName: "forward.fill")
                                 .font(.title2)
                         }
-                        .accessibilityLabel("Next episode")
+                        .accessibilityLabel("Next Episode")
                     }
                     .foregroundStyle(.primary)
                     .padding(.vertical, 20)
@@ -180,18 +165,20 @@ struct PlayerView: View {
                     // Bottom actions
                     HStack(spacing: 32) {
                         Button { showSpeedPicker.toggle() } label: {
-                            Text("\(settings.playbackSpeed, specifier: "%.1f")×")
+                            Text(DurationFormatting.speed(settings.playbackSpeed))
                                 .font(.subheadline.bold())
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 6)
-                                .background(.ultraThinMaterial)
+                                .yourPodsGlass(role: .control, cornerRadius: 20)
                                 .clipShape(Capsule())
                         }
-                        .accessibilityLabel("Playback speed, \(settings.playbackSpeed, specifier: "%.1f") times")
+                        .accessibilityLabel(String(localized: "a11y.player.playbackSpeed",
+                                                   defaultValue: "Playback speed, \(DurationFormatting.spokenSpeed(settings.playbackSpeed))",
+                                                   comment: "VoiceOver label for the speed button in the player. The argument is the spoken rate, e.g. '1.5 times'."))
                         
                         Spacer()
                         
-                        if !chapters.isEmpty {
+                        if !chapterCoordinator.visibleChapters.isEmpty {
                             Button { showChapters = true } label: {
                                 Image(systemName: "book.pages")
                                     .font(.title3)
@@ -206,6 +193,12 @@ struct PlayerView: View {
                             }
                             .accessibilityLabel("Transcript")
                         }
+                        
+                        Button { showAddNote = true } label: {
+                            Image(systemName: "note.text.badge.plus")
+                                .font(.title3)
+                        }
+                        .accessibilityLabel("Add Note")
                     }
                     .padding(.horizontal, 24)
                     .padding(.bottom, 24)
@@ -233,7 +226,7 @@ struct PlayerView: View {
             }
             .sheet(isPresented: $showChapters) {
                 ChapterListSheet(
-                    chapters: chapters,
+                    chapters: chapterCoordinator.visibleChapters,
                     currentPosition: playerManager.currentPosition
                 ) { chapter in
                     playerManager.seek(to: chapter.startTime)
@@ -249,35 +242,89 @@ struct PlayerView: View {
                     }
                 }
             }
+            .sheet(isPresented: $showAddNote) {
+                if let item {
+                    AddEditNoteSheet(
+                        episodeUrl: item.audioUrl,
+                        podcastUrl: item.podcastUrl,
+                        episodeGuid: item.id,
+                        timestampSec: playerManager.currentPosition,
+                        podcastTitle: item.podcastTitle,
+                        episodeTitle: item.title,
+                        artUrl: item.artworkUrl,
+                        durationSec: playerManager.currentDuration > 0 ? playerManager.currentDuration : nil,
+                        transcriptUrl: item.transcriptUrl
+                    )
+                    .environment(podcastManager)
+                    .presentationDetents([.medium, .large])
+                }
+            }
             .task(id: playerManager.currentEpisodeGuid) {
-                chapters = []
                 transcript = nil
                 guard let item = playerManager.audioManager.currentItem else { return }
-                
-                // Fetch chapters from URL, inline JSON, or parse from description as fallback
-                chapters = await ChapterService.shared.fetchAllChapters(
-                    chaptersUrl: item.chaptersUrl,
-                    chaptersJSON: item.chaptersJSON,
-                    description: item.episodeDescription
-                )
-                
-                // Fetch transcript
-                if let transcriptUrl = item.transcriptUrl, !transcriptUrl.isEmpty {
-                    transcript = await TranscriptService.shared.fetchTranscript(url: transcriptUrl)
+
+                // Fetch transcript. Prefer the live episode over the QueueItem's snapshot,
+                // which was frozen at enqueue time and misses transcripts the feed
+                // published after the episode was queued.
+                let live = podcastManager.episodes(withGuids: [item.id]).first
+                if let source = TranscriptService.resolveSource(
+                    snapshotUrl: item.transcriptUrl, snapshotType: item.transcriptType,
+                    liveUrl: live?.transcriptUrl, liveType: live?.transcriptType
+                ) {
+                    transcript = await TranscriptService.shared.fetchTranscript(url: source.url, type: source.type)
                 }
             }
         }
     }
     
-    private func formatTime(_ seconds: TimeInterval) -> String {
-        let s = Int(seconds)
-        let h = s / 3600
-        let m = (s % 3600) / 60
-        let sec = s % 60
-        if h > 0 {
-            return String(format: "%d:%02d:%02d", h, m, sec)
+    /// Player artwork: follows the current chapter when one has declared art,
+    /// falling back to the episode's own artwork otherwise.
+    ///
+    /// Gated on `ChapterArtworkView.hasAnyDeclaredSource(for:)` — a cheap,
+    /// non-IO field check — NOT `ChapterArtworkView.source(for:) != .none`,
+    /// which does a synchronous disk read (`ChapterArtworkStore.image(forKey:)`)
+    /// plus a 900px decode and an LRU-touch write on a cache miss. `body`
+    /// re-evaluates on every position tick (~1/s) via `playerManager
+    /// .currentPosition`, so calling `source(for:)` here would repeat that
+    /// cost every second — exactly the bug that was removed from the chapter
+    /// list row body, at a strictly worse call site. `ChapterArtworkView`
+    /// itself still resolves the real image asynchronously via `.task(id:)`.
+    @ViewBuilder
+    private var mainArtwork: some View {
+        switch ChapterArtworkView.selection(forCurrentChapter: chapterCoordinator.currentChapter) {
+        case .chapter(let chapter):
+            ChapterArtworkView(chapter: chapter, size: 300, cornerRadius: 20)
+                .shadow(radius: 20)
+                .padding(.top, 32)
+                .accessibilityElement()
+                .accessibilityLabel("Chapter artwork: \(chapter.title)")
+        case .episode:
+            episodeArtwork
         }
-        return String(format: "%d:%02d", m, sec)
+    }
+
+    @ViewBuilder
+    private var episodeArtwork: some View {
+        CachedAsyncImage(url: URL(string: item?.artworkUrl ?? "")) { image in
+            image.resizable().aspectRatio(contentMode: .fill)
+        } placeholder: {
+            RoundedRectangle(cornerRadius: 20)
+                .fill(.ultraThinMaterial)
+                .yourPodsGlassFill(cornerRadius: 20)
+                .overlay {
+                    Image(systemName: "waveform")
+                        .font(.system(size: 80))
+                        .foregroundStyle(.secondary)
+                }
+        }
+        .frame(maxWidth: 300, maxHeight: 300)
+        .clipShape(RoundedRectangle(cornerRadius: 20))
+        .shadow(radius: 20)
+        .padding(.top, 32)
+    }
+
+    private func formatTime(_ seconds: TimeInterval) -> String {
+        DurationFormatting.timestamp(seconds)
     }
 }
 
@@ -314,7 +361,7 @@ private struct SpeedPickerView: View {
         return Button {
             playerManager.setPlaybackRate(Float(speed))
         } label: {
-            Text("\(speed, specifier: "%.2g")×")
+            Text(DurationFormatting.speed(speed))
                 .font(.subheadline.bold())
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 12)

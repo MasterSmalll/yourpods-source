@@ -5,7 +5,7 @@ import os
 struct StrippedURLResult: Equatable {
     /// The cleaned URL (or original if no trackers found).
     let url: String
-    /// Names of tracking/DAI services that were removed.
+    /// Names of tracking services that were removed.
     let trackersRemoved: [String]
     /// True if tracking query parameters were stripped.
     let queryParamsStripped: Bool
@@ -19,10 +19,21 @@ struct StrippedURLResult: Equatable {
     }
 }
 
+/// Marker type so `Bundle(for:)` resolves the bundle that ships the tracker JSON
+/// (the app/framework bundle, in both the app process and the app-hosted test runner).
+final class TrackingURLStripperBundleToken {}
+
 /// P3 — Privacy Preserving Playback: client-side URL de-tracking.
 ///
-/// Strips known tracking and dynamic ad-insertion prefixes from podcast episode
-/// URLs so the user's device never contacts those services.
+/// Strips known tracking/attribution redirect prefixes from podcast episode URLs so
+/// the device never contacts those services. The pattern set is data-driven (OPAWG
+/// snapshot + curated supplemental — see the `Resources/` JSON); a single generic
+/// extractor matches a known tracker host, then locates the embedded audio URL by
+/// scanning the path.
+///
+/// `opawg-prefixes.snapshot.json` is a snapshot of https://github.com/opawg/podcast-prefixes
+/// (MIT), reproduced under its licence — see `NOTICE.md`. Its `notes` fields are the
+/// upstream maintainers' commentary, not ours.
 ///
 /// Podcast episode URLs are often wrapped in multiple tracking layers:
 /// ```
@@ -30,94 +41,131 @@ struct StrippedURLResult: Equatable {
 /// ```
 /// This service extracts the innermost CDN URL without making any network requests.
 ///
-/// **Design**: The pattern list is static and easily extensible. Adding a new tracker
-/// is a single entry in the `prefixPatterns` array — no architecture changes needed.
+/// Dynamic Ad Insertion (DAI) is deliberately NOT handled: stitched ads are baked into
+/// the audio file served from the same host, so there is no inner URL to reveal — P3 is
+/// a privacy tool, not an ad-blocker.
 enum TrackingURLStripper {
     private static let logger = Logger(subsystem: "com.yourpods", category: "TrackingURLStripper")
 
-    // MARK: - Tracker Prefix Patterns
+    // MARK: - Pattern model
 
-    /// A known tracking/DAI prefix pattern.
-    ///
-    /// Each pattern describes how a tracking service wraps the actual audio URL:
-    /// - `host`: The domain of the tracking service (matched case-insensitively).
-    /// - `pathPrefix`: A regex pattern matching the service's path prefix. The captured
-    ///   URL (everything AFTER this prefix) is the next layer or the final CDN URL.
-    /// - `name`: Human-readable name for logging and UI.
-    private struct PrefixPattern {
-        let host: String
-        let pathPrefixRegex: NSRegularExpression
+    /// How a pattern matches a URL host.
+    enum HostMatch: Equatable {
+        case exact(String)    // host == value (case-insensitive)
+        case suffix(String)   // host == base OR host ends with ".base" (OPAWG ".gum.fm" form)
+    }
+
+    /// A known tracking prefix, matched by host. The embedded audio URL is found by
+    /// scanning the path — no per-service path regex is needed.
+    struct PrefixPattern: Equatable {
         let name: String
+        let match: HostMatch
 
-        init(host: String, pathPrefix: String, name: String) {
-            self.host = host
-            // The regex matches from the start of the path. The part after the match
-            // is the embedded URL (without scheme).
-            // swiftlint:disable:next force_try
-            self.pathPrefixRegex = try! NSRegularExpression(pattern: "^" + pathPrefix, options: [])
-            self.name = name
+        func matches(host: String) -> Bool {
+            let h = host.lowercased()
+            switch match {
+            case .exact(let v):
+                return h == v.lowercased()
+            case .suffix(let base):
+                let b = base.lowercased()
+                return h == b || h.hasSuffix("." + b)
+            }
         }
     }
 
-    /// All known prefix-style tracking and DAI patterns.
-    ///
-    /// **Prefix-style** means the tracking URL wraps the actual URL as its path suffix:
-    /// `https://tracker.example/prefix/<actual_url_without_scheme>`
-    ///
-    /// Order doesn't matter — we iterate until no more patterns match.
-    private static let prefixPatterns: [PrefixPattern] = [
-        // ── Analytics / Download Tracking ───────────────────────────────────
-        PrefixPattern(host: "dts.podtrac.com",       pathPrefix: "/redirect\\.[a-zA-Z0-9]+/",  name: "Podtrac"),
-        PrefixPattern(host: "play.podtrac.com",      pathPrefix: "/redirect\\.[a-zA-Z0-9]+/",  name: "Podtrac"),
-        PrefixPattern(host: "chrt.fm",               pathPrefix: "/track/[^/]+/",               name: "Chartable"),
-        PrefixPattern(host: "chtbl.com",             pathPrefix: "/track/[^/]+/",               name: "Chartable"),
-        PrefixPattern(host: "pdst.fm",               pathPrefix: "/e/",                         name: "Podsights"),
-        PrefixPattern(host: "prfx.byspotify.com",   pathPrefix: "/e/",                         name: "Podsights"),
-        PrefixPattern(host: "op3.dev",               pathPrefix: "/e/",                         name: "OP3"),
-        PrefixPattern(host: "mgln.ai",               pathPrefix: "/e/",                         name: "Magellan AI"),
-        PrefixPattern(host: "verifi.podscribe.com",  pathPrefix: "/rss/p/",                     name: "Podscribe"),
-        PrefixPattern(host: "pscrb.fm",              pathPrefix: "/e/",                         name: "Podscribe"),
-        PrefixPattern(host: "claritaspod.com",       pathPrefix: "/measure/",                   name: "Claritas"),
-        PrefixPattern(host: "www.claritaspod.com",   pathPrefix: "/measure/",                   name: "Claritas"),
-        PrefixPattern(host: "prefix.artsai.com",     pathPrefix: "/e/",                         name: "ArtsAI"),
-        PrefixPattern(host: "artsai.com",            pathPrefix: "/e/",                         name: "ArtsAI"),
-        PrefixPattern(host: "2.gum.fm",              pathPrefix: "/[^/]+/",                     name: "Gumshoe"),
-        PrefixPattern(host: "pdcn.co",               pathPrefix: "/e/",                         name: "Podcorn"),
-        PrefixPattern(host: "backtracks.fm",         pathPrefix: "/e/",                         name: "Backtracks"),
-        PrefixPattern(host: "pdrl.fm",               pathPrefix: "/e/",                         name: "PodRoll"),
-        PrefixPattern(host: "podroll.fm",            pathPrefix: "/e/",                         name: "PodRoll"),
-        PrefixPattern(host: "rss.pdrl.fm",           pathPrefix: "/e/",                         name: "PodRoll"),
-        PrefixPattern(host: "cohst.app",             pathPrefix: "/e/",                         name: "CoHost"),
-        PrefixPattern(host: "cohostpodcasting.com",  pathPrefix: "/e/",                         name: "CoHost"),
-        PrefixPattern(host: "prefix.up.audio",       pathPrefix: "/[^/]+/",                     name: "Up.Audio"),
-        PrefixPattern(host: "adbarker.com",          pathPrefix: "/e/",                         name: "AdBarker"),
-        PrefixPattern(host: "veritonic.com",         pathPrefix: "/e/",                         name: "Veritonic"),
-        PrefixPattern(host: "swap.fm",               pathPrefix: "/track/[^/]+/",               name: "Swap.fm"),
-        PrefixPattern(host: "tracking.swap.fm",      pathPrefix: "/track/[^/]+/",               name: "Swap.fm"),
-        PrefixPattern(host: "pfx.vpixl.com",         pathPrefix: "/[^/]+/",                     name: "vPixl"),
+    // MARK: - Tracking query parameters (code-defined; survive a snapshot-load failure)
 
-        // ── Dynamic Content Insertion ───────────────────────────────────────
-        // These services insert dynamic content into the audio stream at
-        // request time. Resolving through them returns the original CDN URL.
-        PrefixPattern(host: "traffic.megaphone.fm",  pathPrefix: "/[^/]+/",                     name: "Megaphone"),
-        PrefixPattern(host: "adswizz.com",           pathPrefix: "/e/",                         name: "AdsWizz"),
-        PrefixPattern(host: "pcm.adswizz.com",       pathPrefix: "/e/",                         name: "AdsWizz"),
-    ]
+    /// Param-name prefixes to strip (case-insensitive).
+    private static let trackingQueryParamPrefixes: [String] = ["utm_"]
+    /// Exact param names to strip (compared lowercased). AdsWizz attribution params.
+    private static let trackingQueryParamNames: Set<String> = ["awcollectionid", "awepisodeid"]
 
-    // MARK: - Tracking Query Parameters
+    /// Final labels that must never be mistaken for an embedded host.
+    private static let audioExtensions: Set<String> =
+        ["mp3", "m4a", "m4b", "aac", "ogg", "opus", "wav", "flac", "mp4"]
 
-    /// Known tracking query parameter prefixes that are safe to strip.
-    /// These are analytics/attribution params — removing them does not affect playback.
-    private static let trackingQueryParamPrefixes: [String] = [
-        "utm_",       // Google Analytics / Urchin Tracking Module
-    ]
+    // MARK: - Pattern source (data-driven, loaded once from the bundle)
+
+    /// One OPAWG (or supplemental) registry entry. Extra OPAWG fields are ignored.
+    struct OPAWGEntry: Decodable, Equatable {
+        let prefixpattern: String
+        let prefixname: String
+        init(prefixpattern: String, prefixname: String) {
+            self.prefixpattern = prefixpattern
+            self.prefixname = prefixname
+        }
+    }
+
+    /// All tracker patterns: the OPAWG snapshot merged with the curated supplemental
+    /// (supplemental wins on host collision). Loaded once, cached for process lifetime.
+    /// Degrades to `[]` (safe pass-through) if the bundled JSON is missing or malformed.
+    static let patterns: [PrefixPattern] = loadPatterns()
+
+    static func loadPatterns() -> [PrefixPattern] {
+        let bundle = Bundle(for: TrackingURLStripperBundleToken.self)
+        let snapshot = loadEntries(named: "opawg-prefixes.snapshot", in: bundle)
+        let supplemental = loadEntries(named: "trackers-supplemental", in: bundle)
+        return makePatterns(snapshot: snapshot, supplemental: supplemental)
+    }
+
+    private static func loadEntries(named name: String, in bundle: Bundle) -> [OPAWGEntry] {
+        guard let url = bundle.url(forResource: name, withExtension: "json"),
+              let data = try? Data(contentsOf: url) else {
+            logger.error("P3: could not read \(name).json from bundle")
+            return []
+        }
+        return decodeEntries(data)
+    }
+
+    static func decodeEntries(_ data: Data) -> [OPAWGEntry] {
+        do {
+            return try JSONDecoder().decode([OPAWGEntry].self, from: data)
+        } catch {
+            logger.error("P3: failed to decode tracker entries: \(error.localizedDescription)")
+            return []
+        }
+    }
+
+    /// Merge snapshot ∪ supplemental, deduped by host matcher; supplemental wins on collision.
+    static func makePatterns(snapshot: [OPAWGEntry], supplemental: [OPAWGEntry]) -> [PrefixPattern] {
+        var byKey: [String: PrefixPattern] = [:]
+        var order: [String] = []
+        for entry in snapshot + supplemental {   // supplemental last → overwrites on collision
+            let pattern = map(entry)
+            let key = dedupeKey(pattern.match)
+            if byKey[key] == nil { order.append(key) }
+            byKey[key] = pattern
+        }
+        return order.compactMap { byKey[$0] }
+    }
+
+    /// Map an OPAWG entry to a `PrefixPattern`. A leading "." means a subdomain-suffix match
+    /// (OPAWG ".gum.fm" form); otherwise the host is everything up to the first "/".
+    private static func map(_ entry: OPAWGEntry) -> PrefixPattern {
+        let raw = entry.prefixpattern
+        if raw.hasPrefix(".") {
+            let afterDot = String(raw.dropFirst())
+            let base = afterDot.split(separator: "/").first.map(String.init) ?? afterDot
+            return PrefixPattern(name: entry.prefixname, match: .suffix(base))
+        }
+        let host = raw.split(separator: "/").first.map(String.init) ?? raw
+        return PrefixPattern(name: entry.prefixname, match: .exact(host))
+    }
+
+    private static func dedupeKey(_ match: HostMatch) -> String {
+        switch match {
+        case .exact(let v): return "exact:" + v.lowercased()
+        case .suffix(let b): return "suffix:" + b.lowercased()
+        }
+    }
 
     // MARK: - Public API
 
-    /// Strip all known tracking/DAI prefixes from a podcast episode URL.
+    /// Strip all known tracking prefixes from a podcast episode URL.
     ///
-    /// Iteratively removes known prefix patterns until no more are found,
-    /// handling nested tracking wrappers (e.g., Podsights → Chartable → Podtrac → CDN).
+    /// Iteratively removes known prefix patterns until no more are found, handling nested
+    /// tracking wrappers (e.g., Podsights → Chartable → Podtrac → CDN), then strips known
+    /// tracking query parameters.
     ///
     /// - Parameter url: The original episode URL from the RSS feed.
     /// - Returns: A `StrippedURLResult` with the cleaned URL and metadata.
@@ -128,106 +176,98 @@ enum TrackingURLStripper {
         }
 
         var currentUrl = url
-        var removedTrackers: [String] = []
+        var removed: [String] = []
         var didStrip = true
 
-        // Iterate until no more patterns match (handles nested wrappers)
+        // Iterate until no more patterns match (handles nested wrappers).
         while didStrip {
             didStrip = false
-            for pattern in prefixPatterns {
-                if let stripped = tryStrip(currentUrl, with: pattern) {
-                    removedTrackers.append(pattern.name)
-                    currentUrl = stripped
+            guard let host = URLComponents(string: currentUrl)?.host?.lowercased() else { break }
+            for pattern in patterns where pattern.matches(host: host) {
+                if let inner = extractEmbeddedURL(from: currentUrl) {
+                    removed.append(pattern.name)
+                    currentUrl = inner
                     didStrip = true
                     break  // Restart loop — new URL might match a different pattern
                 }
             }
         }
 
-        if !removedTrackers.isEmpty {
-            logger.debug("P3 stripped [\(removedTrackers.joined(separator: ", "))] → \(currentUrl)")
+        if !removed.isEmpty {
+            logger.debug("P3 stripped [\(removed.joined(separator: ", "))] → \(currentUrl)")
         }
 
-        // Phase 2: Strip known tracking query parameters (e.g., utm_*)
-        let queryResult = stripTrackingQueryParams(from: currentUrl)
-        if queryResult.didStrip {
-            currentUrl = queryResult.url
+        let q = stripTrackingQueryParams(from: currentUrl)
+        if q.didStrip {
+            currentUrl = q.url
             logger.debug("P3 stripped tracking query params → \(currentUrl)")
         }
 
-        return StrippedURLResult(url: currentUrl, trackersRemoved: removedTrackers, queryParamsStripped: queryResult.didStrip)
+        return StrippedURLResult(url: currentUrl, trackersRemoved: removed, queryParamsStripped: q.didStrip)
     }
 
-    // MARK: - Private
+    // MARK: - Embedded URL extraction
 
-    /// Attempt to strip a single tracker prefix from a URL.
-    ///
-    /// - Returns: The embedded URL (with `https://` scheme) if the pattern matched, or `nil`.
-    private static func tryStrip(_ urlString: String, with pattern: PrefixPattern) -> String? {
-        guard let components = URLComponents(string: urlString),
-              let host = components.host?.lowercased(),
-              host == pattern.host,
-              let path = components.path.isEmpty ? nil : components.path else {
-            return nil
-        }
+    /// For a URL whose host is a known tracker, find the embedded audio URL by scanning
+    /// path segments for the first registrable domain (2+ labels, alphabetic TLD ≥2 chars,
+    /// final label NOT an audio extension) that is followed by more path. Returns `nil` if
+    /// none is found (the URL then passes through unchanged).
+    private static func extractEmbeddedURL(from urlString: String) -> String? {
+        guard let components = URLComponents(string: urlString) else { return nil }
+        let path = components.percentEncodedPath
+        guard !path.isEmpty else { return nil }
 
-        let nsPath = path as NSString
-        let range = NSRange(location: 0, length: nsPath.length)
+        let trimmed = path.hasPrefix("/") ? String(path.dropFirst()) : path
+        let segments = trimmed.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
 
-        guard let match = pattern.pathPrefixRegex.firstMatch(in: path, options: [], range: range) else {
-            return nil
-        }
-
-        // Everything after the matched prefix is the embedded URL (without scheme)
-        let remainder = nsPath.substring(from: match.range.upperBound)
-
-        guard !remainder.isEmpty else { return nil }
-
-        // The embedded URL typically has no scheme — prepend https://
-        // Unless it already starts with http:// or https://
-        if remainder.lowercased().hasPrefix("http://") || remainder.lowercased().hasPrefix("https://") {
-            return remainder
-        }
-
-        return "https://" + remainder
-    }
-
-    // MARK: - Query Parameter Stripping
-
-    /// Result of stripping tracking query parameters.
-    private struct QueryStripResult {
-        let url: String
-        let didStrip: Bool
-    }
-
-    /// Strip known tracking query parameters from a URL.
-    ///
-    /// Removes parameters whose names start with known tracking prefixes (e.g., `utm_`).
-    /// Non-tracking parameters (e.g., `token`, `expires`) are preserved.
-    ///
-    /// - Parameter url: The URL to strip query parameters from.
-    /// - Returns: A `QueryStripResult` with the cleaned URL and whether stripping occurred.
-    private static func stripTrackingQueryParams(from url: String) -> QueryStripResult {
-        guard var components = URLComponents(string: url),
-              let queryItems = components.queryItems,
-              !queryItems.isEmpty else {
-            return QueryStripResult(url: url, didStrip: false)
-        }
-
-        let cleanedItems = queryItems.filter { item in
-            !trackingQueryParamPrefixes.contains { prefix in
-                item.name.lowercased().hasPrefix(prefix)
+        for (index, seg) in segments.enumerated() where index < segments.count - 1 {
+            if isRegistrableDomain(seg) {
+                let rest = segments[index...].joined(separator: "/")
+                return appendQuery("https://" + rest, from: components)
             }
         }
+        return nil
+    }
 
-        // If no items were removed, return original
-        guard cleanedItems.count < queryItems.count else {
-            return QueryStripResult(url: url, didStrip: false)
+    private static func appendQuery(_ base: String, from components: URLComponents) -> String {
+        guard let q = components.percentEncodedQuery, !q.isEmpty else { return base }
+        return base + "?" + q
+    }
+
+    /// A segment is a registrable domain if it has ≥2 dot-separated labels, an alphabetic
+    /// TLD of ≥2 chars, and its final label is NOT an audio/media extension (so `redirect.mp3`
+    /// is never mistaken for the embedded host).
+    private static func isRegistrableDomain(_ segment: String) -> Bool {
+        let hostPart = segment.split(separator: ":").first.map(String.init) ?? segment
+        let labels = hostPart.split(separator: ".").map(String.init)
+        guard labels.count >= 2, let tld = labels.last?.lowercased() else { return false }
+        guard tld.count >= 2, tld.allSatisfy({ $0.isLetter }) else { return false }
+        if audioExtensions.contains(tld) { return false }
+        return labels.allSatisfy { label in
+            !label.isEmpty && label.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" }
+        }
+    }
+
+    // MARK: - Query parameter stripping
+
+    /// Strip known tracking query parameters. Removes params whose names start with a known
+    /// tracking prefix (e.g. `utm_`) or exactly match a known tracking name; preserves
+    /// non-tracking params (e.g. `token`, `expires`).
+    private static func stripTrackingQueryParams(from url: String) -> (url: String, didStrip: Bool) {
+        guard var components = URLComponents(string: url),
+              let items = components.queryItems, !items.isEmpty else {
+            return (url, false)
         }
 
-        // If all items were tracking params, remove the query string entirely
-        components.queryItems = cleanedItems.isEmpty ? nil : cleanedItems
-        let result = components.string ?? url
-        return QueryStripResult(url: result, didStrip: true)
+        let cleaned = items.filter { item in
+            let name = item.name.lowercased()
+            if trackingQueryParamPrefixes.contains(where: { name.hasPrefix($0) }) { return false }
+            if trackingQueryParamNames.contains(name) { return false }
+            return true
+        }
+
+        guard cleaned.count < items.count else { return (url, false) }
+        components.queryItems = cleaned.isEmpty ? nil : cleaned
+        return (components.string ?? url, true)
     }
 }

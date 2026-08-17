@@ -9,9 +9,21 @@ import XCTest
 
 /// Tests for the `nowPlaying` field added to ProPlaybackSyncRequest and ProPlaybackState.
 final class NowPlayingSyncTests: XCTestCase {
-    
+
+    // `PlayerManager.init` calls `AudioManager.restoreQueue()`, so the no-op tests below
+    // assert against whatever a previously-scheduled class persisted unless this runs.
+    override func setUp() {
+        super.setUp()
+        clearAudioPersistenceDefaults()
+    }
+
+    override func tearDown() {
+        clearAudioPersistenceDefaults()
+        super.tearDown()
+    }
+
     // MARK: - ProPlaybackSyncRequest Encoding
-    
+
     func test_ProPlaybackSyncRequest_encodesNowPlayingTrue() throws {
         let request = ProPlaybackSyncRequest(
             podcastUrl: "https://example.com/feed",
@@ -470,6 +482,113 @@ final class NowPlayingReconciliationTests: XCTestCase {
                        "The original episode must remain loaded")
     }
 
+    // MARK: - Fix B: nil server state + already-played current → clear
+
+    /// When the server returns nil BUT the current item's episode is already
+    /// marked played locally (e.g. Fix A applied a server `completed` flag),
+    /// the finished item must be cleared from the player — not preserved.
+    /// (The existing unplayed-episode nil tests above must still preserve.)
+    func test_reconcile_serverNil_clearsAlreadyPlayedCurrentItem() async {
+        let spy = ReconcileSpy()
+        await spy.setCurrentPlaybackResponse(nil)
+
+        let podcast = Podcast(url: "https://example.com/feed.xml", title: "Podcast")
+        context.insert(podcast)
+        let episode = Episode(
+            guid: "ep-done",
+            title: "Done",
+            audioUrl: "https://example.com/ep-done.mp3",
+            podcast: podcast
+        )
+        episode.isPlayed = true
+        context.insert(episode)
+        try! context.save()
+        podcastManager.subscriptions = [podcast]
+
+        podcastManager.setSyncClient(spy, deviceId: "test-device")
+        playerManager.setSyncClient(spy, deviceId: "test-device")
+
+        audioManager.currentItem = makeQueueItem(id: "ep-done", positionSeconds: 3600, durationSeconds: 3600)
+
+        await playerManager.reconcileNowPlayingWithServer()
+
+        XCTAssertNil(audioManager.currentItem,
+                     "A finished current item (already isPlayed) must be cleared when the server returns nil")
+    }
+
+    // MARK: - Fix D: local-stop paths clear the server now-playing (iOS→web)
+
+    /// Waits for a fire-and-forget playback push to land on the spy.
+    private func waitForPlaybackSync(_ spy: ReconcileSpy, timeout: TimeInterval = 2.0) async -> ReconcileSpy.PlaybackSyncCall? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let call = await spy.lastPlaybackSync { return call }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        return await spy.lastPlaybackSync
+    }
+
+    /// Manual "Mark Played" must push completed:true / nowPlaying:false so the
+    /// web mini player drops the episode (it previously only wrote a gPodder action).
+    func test_markCurrentEpisodeAsPlayed_pushesCompletedToServer() async {
+        let podcast = Podcast(url: "https://example.com/feed.xml", title: "Podcast")
+        context.insert(podcast)
+        let episode = Episode(guid: "ep-1", title: "Ep", audioUrl: "https://example.com/ep-1.mp3", podcast: podcast)
+        context.insert(episode)
+        try! context.save()
+        podcastManager.subscriptions = [podcast]
+
+        let spy = ReconcileSpy()
+        podcastManager.setSyncClient(spy, deviceId: "test-device")
+        playerManager.setSyncClient(spy, deviceId: "test-device")
+        audioManager.currentItem = makeQueueItem(id: "ep-1")
+
+        playerManager.markCurrentEpisodeAsPlayed()  // user-initiated (fromSync = false)
+
+        // Completion now flows through the durable outbox; drain it to assert the eventual push.
+        await podcastManager.drainCompletionOutbox(using: spy, baselines: nil)
+
+        let call = await waitForPlaybackSync(spy)
+        XCTAssertEqual(call?.episodeUrl, "https://example.com/ep-1.mp3")
+        XCTAssertEqual(call?.nowPlaying, false, "manual mark-played must clear server nowPlaying")
+        XCTAssertEqual(call?.completed, true, "manual mark-played must mark server completed")
+    }
+
+    /// Removing the current episode (without marking played) must push
+    /// nowPlaying:false so other devices stop showing it as now-playing.
+    func test_removeCurrentEpisodeFromQueue_pushesNowPlayingFalse() async {
+        let spy = ReconcileSpy()
+        podcastManager.setSyncClient(spy, deviceId: "test-device")
+        playerManager.setSyncClient(spy, deviceId: "test-device")
+        audioManager.currentItem = makeQueueItem(id: "ep-2")
+
+        playerManager.removeCurrentEpisodeFromQueue()
+
+        let call = await waitForPlaybackSync(spy)
+        XCTAssertEqual(call?.episodeUrl, "https://example.com/ep-2.mp3")
+        XCTAssertEqual(call?.nowPlaying, false, "removing the current item must clear server nowPlaying")
+        XCTAssertNotEqual(call?.completed, true, "remove-without-playing must NOT mark the episode completed")
+    }
+
+    // MARK: - Local-stop pushes carry the client event time
+
+    /// A user-initiated local stop must push a `clientUpdatedAt` (the action's event
+    /// time) so the server can order this write against other devices and reject it
+    /// only if a newer change exists. Without it, a stale push silently wins by
+    /// arrival time (the "plane / 3rd device" clobber, Bug 5).
+    func test_removeCurrentEpisodeFromQueue_pushesClientEventTime() async {
+        let spy = ReconcileSpy()
+        podcastManager.setSyncClient(spy, deviceId: "test-device")
+        playerManager.setSyncClient(spy, deviceId: "test-device")
+        audioManager.currentItem = makeQueueItem(id: "ep-2")
+
+        playerManager.removeCurrentEpisodeFromQueue()
+
+        let call = await waitForPlaybackSync(spy)
+        XCTAssertNotNil(call?.clientUpdatedAt,
+                        "local-stop push must carry the client event time")
+    }
+
     // MARK: - Test 3b: Regression — 2 min in, sync, server nil → episode preserved
 
     /// Reproduces the exact user-reported bug: user is 2 minutes into an episode,
@@ -578,11 +697,20 @@ final class NowPlayingReconciliationTests: XCTestCase {
         XCTAssertEqual(audioManager.currentItem?.id, "ep-1")
     }
 
-    // MARK: - Test 6: No current item → no-op
+    // MARK: - Test 6: Empty player — adopt the server's now-playing (web→iOS handoff)
 
-    /// When nothing is loaded in the player, reconciliation has nothing to do.
-    func test_reconcile_noCurrentItem_isNoOp() async {
+    /// When the player is empty AND the server has no now-playing episode, the
+    /// reconcile queries the server (that IS the mechanism for discovering a
+    /// cross-device episode) and correctly leaves the player empty.
+    ///
+    /// NOTE: this replaces an older `test_reconcile_noCurrentItem_isNoOp` that
+    /// asserted the empty-player path must NOT call getCurrentPlayback. That
+    /// optimization was the bug: it meant a now-playing episode set on the web
+    /// could never be adopted into an empty iOS mini player. Querying the server
+    /// on an empty player is now intended.
+    func test_reconcile_emptyPlayer_serverEmpty_staysEmpty() async {
         let spy = ReconcileSpy()
+        await spy.setCurrentPlaybackResponse(nil)
         podcastManager.setSyncClient(spy, deviceId: "test-device")
         playerManager.setSyncClient(spy, deviceId: "test-device")
 
@@ -591,10 +719,43 @@ final class NowPlayingReconciliationTests: XCTestCase {
 
         await playerManager.reconcileNowPlayingWithServer()
 
-        // Should complete without crash or side effects
         let wasCalled = await spy.getCurrentPlaybackCalled
-        XCTAssertFalse(wasCalled,
-                       "Should not call getCurrentPlayback when no item is loaded")
+        XCTAssertTrue(wasCalled,
+                      "Empty-player reconcile must query the server to discover a web-set now-playing")
+        XCTAssertNil(audioManager.currentItem,
+                     "Empty player must stay empty when the server has no now-playing episode")
+    }
+
+    /// Empty player + server now-playing (set on the web) → the parameterless
+    /// reconcile path also adopts it (mirrors the preFetched-overload coverage in
+    /// ForegroundSyncCompletionTests, exercising the relaxed empty-player guard).
+    func test_reconcile_emptyPlayer_adoptsServerNowPlaying() async {
+        let spy = ReconcileSpy()
+        await spy.setCurrentPlaybackResponse(ProPlaybackState(
+            podcastUrl: "https://example.com/feed.xml",
+            episodeUrl: "https://example.com/web-ep.mp3",
+            episodeGuid: "web-ep",
+            positionSec: 300,
+            durationSec: 1800,
+            title: "Played on Web",
+            podcastTitle: "Podcast",
+            artUrl: nil,
+            updatedAt: ISO8601DateFormatter().string(from: Date()),
+            nowPlaying: true,
+            completed: nil,
+            hidden: nil
+        ))
+        podcastManager.setSyncClient(spy, deviceId: "test-device")
+        playerManager.setSyncClient(spy, deviceId: "test-device")
+
+        XCTAssertNil(audioManager.currentItem)
+
+        await playerManager.reconcileNowPlayingWithServer()
+
+        XCTAssertEqual(audioManager.currentItem?.audioUrl, "https://example.com/web-ep.mp3",
+                       "Empty player must adopt the server's now-playing via the parameterless reconcile path too")
+        XCTAssertFalse(audioManager.isPlaying,
+                       "Adopted episode must load paused")
     }
 
     // MARK: - Model Tests: completed field encoding/decoding
@@ -950,6 +1111,10 @@ actor ReconcileSpy: SyncClient {
         let episodeUrl: String
         let nowPlaying: Bool?
         let completed: Bool?
+        var clientUpdatedAt: Date? = nil
+        /// Captured so apply-side tests can prove a push carries the *adopted*
+        /// position rather than a superseded local one (per the sync contract).
+        var positionSec: Double? = nil
     }
     private(set) var lastPlaybackSync: PlaybackSyncCall?
 
@@ -971,15 +1136,20 @@ actor ReconcileSpy: SyncClient {
         durationSec: Double?,
         nowPlaying: Bool?,
         completed: Bool?,
-        deviceId: String?
-    ) async throws {
+        deviceId: String?,
+        clientUpdatedAt: Date?,
+        baseVersion: Int64?
+    ) async throws -> ProPlaybackSyncResponse? {
         callOrder.append("syncPlayback")
         lastPlaybackSync = PlaybackSyncCall(
             podcastUrl: podcastUrl,
             episodeUrl: episodeUrl,
             nowPlaying: nowPlaying,
-            completed: completed
+            completed: completed,
+            clientUpdatedAt: clientUpdatedAt,
+            positionSec: positionSec
         )
+        return nil
     }
 
     /// Tracks syncPlayback calls WITH the completed field.
@@ -1011,16 +1181,18 @@ actor ReconcileSpy: SyncClient {
 
 // MARK: - From CrossDeviceSyncBugTests.swift
 
-/// Regression tests for three cross-device sync bugs reported by the server team:
+/// Regression tests for three cross-device sync bugs:
 ///
 /// Bug 1: `completed: true` sent for the wrong episode (reads currentItem after auto-advance)
 /// Bug 2: Previous episode's `nowPlaying` not cleared when switching tracks
-/// Bug 3: Queue sync pushes 1,443 items on fresh device / doesn't restore currentItem
+/// Bug 3: Queue sync pushes the whole queue on a fresh device / doesn't restore currentItem
 @MainActor
 final class CrossDeviceSyncBugTests: XCTestCase {
 
     private var audioManager: AudioManager!
     private var playerManager: PlayerManager!
+    private var podcastManager: PodcastManager!
+    private var container: ModelContainer!
 
     override func setUp() {
         super.setUp()
@@ -1028,13 +1200,19 @@ final class CrossDeviceSyncBugTests: XCTestCase {
         UserDefaults.standard.removeObject(forKey: "savedCurrentItem")
         UserDefaults.standard.removeObject(forKey: "savedCurrentPosition")
         UserDefaults.standard.removeObject(forKey: "proQueueSyncCompleted")
+        let config = ModelConfiguration(isStoredInMemoryOnly: true)
+        container = try! ModelContainer(for: Podcast.self, Episode.self, configurations: config)
         audioManager = AudioManager()
         playerManager = PlayerManager(audioManager: audioManager)
+        podcastManager = PodcastManager(modelContext: container.mainContext)
+        playerManager.podcastManager = podcastManager
     }
 
     override func tearDown() {
         playerManager = nil
         audioManager = nil
+        podcastManager = nil
+        container = nil
         super.tearDown()
     }
 
@@ -1089,8 +1267,8 @@ final class CrossDeviceSyncBugTests: XCTestCase {
         // Call the new method that takes the completed item explicitly
         playerManager.syncCompletedEpisodeToProServer(finishedItem)
 
-        // Wait for the async Task to execute
-        try? await Task.sleep(for: .milliseconds(200))
+        // Completion now flows through the durable outbox; drain it to assert the eventual push.
+        await podcastManager.drainCompletionOutbox(using: spy, baselines: nil)
 
         // THEN: The completed sync should reference the FINISHED episode, not the current one
         let calls = await spy.playbackSyncCalls
@@ -1116,7 +1294,8 @@ final class CrossDeviceSyncBugTests: XCTestCase {
 
         playerManager.syncCompletedEpisodeToProServer(finishedItem)
 
-        try? await Task.sleep(for: .milliseconds(200))
+        // Completion now flows through the durable outbox; drain it to assert the eventual push.
+        await podcastManager.drainCompletionOutbox(using: spy, baselines: nil)
 
         let calls = await spy.playbackSyncCalls
         let completedCall = calls.first { $0.completed == true }
@@ -1174,16 +1353,20 @@ final class CrossDeviceSyncBugTests: XCTestCase {
 
     // MARK: - Bug 3: Queue sync on fresh device
 
-    /// On a fresh device (empty queue, no currentItem), syncQueueWithServer
-    /// should adopt the server queue wholesale — sortOrder 0 becomes currentItem.
-    func test_syncQueueWithServer_freshDevice_setsCurrentItemFromSortOrder0() async {
+    /// Per the sync contract: on a fresh device, syncQueueWithServer adopts the
+    /// server queue as Up Next and must NOT treat a sortOrder-0 item as the
+    /// now-playing episode. sortOrder 0 is a valid Up Next position — the web
+    /// "add to top of queue" feature inserts there (server `AddToQueue addToTop`).
+    /// Now-playing is restored separately from the playback channel.
+    func test_syncQueueWithServer_freshDevice_adoptsAllAsUpNext_doesNotLiftSortOrderZero() async {
         let spy = PlaybackSyncSpy()
         await spy.setSupportsQueue(true)
+        await spy.setCurrentPlayback(nil)  // no now-playing on the playback channel
         await spy.setServerQueue([
             QueueSyncItem(podcastUrl: "https://example.com/feed.xml",
-                          episodeUrl: "https://example.com/now-playing.mp3",
-                          episodeGuid: "ep-now-playing", sortOrder: 0, positionSec: 500,
-                          title: "Now Playing Episode", podcastTitle: "Great Podcast",
+                          episodeUrl: "https://example.com/top.mp3",
+                          episodeGuid: "ep-top", sortOrder: 0, positionSec: 0,
+                          title: "Added To Top", podcastTitle: "Great Podcast",
                           durationSec: 3600),
             QueueSyncItem(podcastUrl: "https://example.com/feed.xml",
                           episodeUrl: "https://example.com/up-next-1.mp3",
@@ -1205,36 +1388,59 @@ final class CrossDeviceSyncBugTests: XCTestCase {
         // WHEN
         await playerManager.syncQueueWithServer()
 
-        // THEN: sortOrder 0 should be set as currentItem
-        XCTAssertEqual(audioManager.currentItem?.id, "ep-now-playing",
-                       "Server sortOrder-0 must become currentItem on fresh device")
-        XCTAssertEqual(audioManager.currentItem?.title, "Now Playing Episode")
+        // THEN: nothing is lifted as now-playing (playback channel had none)
+        XCTAssertNil(audioManager.currentItem,
+                     "A sortOrder-0 queue item must NOT be mistaken for now-playing")
 
-        // AND: remaining items should be the queue
-        XCTAssertEqual(audioManager.queue.count, 2,
-                       "Server items with sortOrder > 0 should become the queue")
-        XCTAssertEqual(audioManager.queue[0].id, "ep-up-next-1")
-        XCTAssertEqual(audioManager.queue[1].id, "ep-up-next-2")
+        // AND: every server item becomes Up Next, in order
+        XCTAssertEqual(audioManager.queue.map(\.id), ["ep-top", "ep-up-next-1", "ep-up-next-2"],
+                       "All server items (including sortOrder 0) become Up Next")
     }
 
-    /// On a fresh device, the adopted currentItem should have its position restored.
-    func test_syncQueueWithServer_freshDevice_restoresPosition() async {
+    /// Per the sync contract: on a fresh device, the now-playing episode is
+    /// restored from the playback channel (/playback/current), and if that episode
+    /// also appears in the queue (legacy leak), it is excluded from Up Next.
+    func test_syncQueueWithServer_freshDevice_restoresNowPlayingFromPlaybackChannel() async {
         let spy = PlaybackSyncSpy()
         await spy.setSupportsQueue(true)
+        await spy.setCurrentPlayback(ProPlaybackState(
+            podcastUrl: "https://example.com/feed.xml",
+            episodeUrl: "https://example.com/now.mp3",
+            episodeGuid: "ep-now",
+            positionSec: 1234,
+            durationSec: 3600,
+            title: "Now Playing",
+            podcastTitle: "Podcast",
+            artUrl: nil,
+            updatedAt: ISO8601DateFormatter().string(from: Date()),
+            nowPlaying: true,
+            completed: false,
+            hidden: nil
+        ))
         await spy.setServerQueue([
+            // Legacy leak: the now-playing episode also left in the queue.
             QueueSyncItem(podcastUrl: "https://example.com/feed.xml",
-                          episodeUrl: "https://example.com/now-playing.mp3",
-                          episodeGuid: "ep-now-playing", sortOrder: 0, positionSec: 1234,
-                          title: "Now Playing", podcastTitle: "Podcast",
-                          durationSec: 3600),
+                          episodeUrl: "https://example.com/now.mp3",
+                          episodeGuid: "ep-now", sortOrder: 0, positionSec: 1234,
+                          title: "Now Playing", podcastTitle: "Podcast", durationSec: 3600),
+            QueueSyncItem(podcastUrl: "https://example.com/feed.xml",
+                          episodeUrl: "https://example.com/up-next.mp3",
+                          episodeGuid: "ep-up-next", sortOrder: 1, positionSec: 0,
+                          title: "Up Next", podcastTitle: "Podcast", durationSec: 1800),
         ])
         playerManager.setSyncClient(spy, deviceId: "test-device")
 
         await playerManager.syncQueueWithServer()
 
-        // Position should be restored from server
+        // Now-playing restored from the playback channel, with its position
+        XCTAssertEqual(audioManager.currentItem?.id, "ep-now",
+                       "Now-playing must be restored from the playback channel")
         XCTAssertEqual(audioManager.currentItem?.positionSeconds, 1234,
-                       "Current item position should be restored from server")
+                       "Restored now-playing must carry its server position")
+
+        // The now-playing episode must NOT also appear in Up Next
+        XCTAssertEqual(audioManager.queue.map(\.id), ["ep-up-next"],
+                       "Now-playing must be excluded from the adopted Up Next queue")
     }
 
     /// On a fresh device, syncQueueWithServer should NOT push local auto-queued
@@ -1344,12 +1550,17 @@ actor PlaybackSyncSpy: SyncClient {
         let nowPlaying: Bool?
         let completed: Bool?
         let deviceId: String?
+        let clientUpdatedAt: Date?
     }
     var playbackSyncCalls: [PlaybackSyncCall] = []
+
+    // Configurable now-playing response from the playback channel (/playback/current).
+    private var _currentPlayback: ProPlaybackState?
 
     func setSupportsQueue(_ value: Bool) { _supportsQueueSync = value }
     func setServerQueue(_ items: [QueueSyncItem]) { serverQueue = items }
     func setSyncResponse(_ items: [QueueSyncItem]) { syncResponse = items }
+    func setCurrentPlayback(_ state: ProPlaybackState?) { _currentPlayback = state }
 
     func syncQueue(items: [QueueSyncItem]) async throws -> QueueSyncResult {
         syncQueueCalled = true
@@ -1371,8 +1582,10 @@ actor PlaybackSyncSpy: SyncClient {
         durationSec: Double?,
         nowPlaying: Bool?,
         completed: Bool?,
-        deviceId: String?
-    ) async throws {
+        deviceId: String?,
+        clientUpdatedAt: Date?,
+        baseVersion: Int64?
+    ) async throws -> ProPlaybackSyncResponse? {
         playbackSyncCalls.append(PlaybackSyncCall(
             podcastUrl: podcastUrl,
             episodeUrl: episodeUrl,
@@ -1381,12 +1594,14 @@ actor PlaybackSyncSpy: SyncClient {
             durationSec: durationSec,
             nowPlaying: nowPlaying,
             completed: completed,
-            deviceId: deviceId
+            deviceId: deviceId,
+            clientUpdatedAt: clientUpdatedAt
         ))
+        return nil
     }
 
-    func getCurrentPlayback() async throws -> ProPlaybackState? { nil }
-    var supportsPlaybackReconciliation: Bool { false }
+    func getCurrentPlayback() async throws -> ProPlaybackState? { _currentPlayback }
+    var supportsPlaybackReconciliation: Bool { _currentPlayback != nil }
 
     // MARK: - Unused protocol stubs
     func pushSubscriptions(add: [String], remove: [String], deviceId: String) async throws -> [URLRewrite] { [] }
@@ -1707,10 +1922,11 @@ final class PlaybackSyncImprovementTests: XCTestCase {
         // WHEN: action is sent
         podcastManager.bufferEpisodeAction(action)
 
-        // THEN: GUID should be in pending set
-        let pending = podcastManager.pendingUploadGuids
-        XCTAssertTrue(pending.contains(podcast.episodes.first!.guid),
-            "Action GUID should be tracked in pendingUploadGuids")
+        // THEN: action should be in the outbox
+        XCTAssertFalse(podcastManager.episodeActionSync.outbox.isEmpty,
+            "Action should be tracked in the outbox after bufferEpisodeAction")
+        XCTAssertNotNil(podcastManager.episodeActionSync.outbox[podcast.episodes.first!.guid],
+            "Action GUID should be in the outbox")
     }
 
     /// Flush should upload all pending actions and clear the pending set on success.
@@ -1731,9 +1947,9 @@ final class PlaybackSyncImprovementTests: XCTestCase {
         // WHEN: flush
         await podcastManager.flushPendingActions()
 
-        // THEN: pending should be empty, upload should have occurred
-        XCTAssertTrue(podcastManager.pendingUploadGuids.isEmpty,
-            "Pending GUIDs should be cleared after successful flush")
+        // THEN: outbox should be empty, upload should have occurred
+        XCTAssertTrue(podcastManager.episodeActionSync.outbox.isEmpty,
+            "Outbox should be cleared after successful flush")
         let uploads = await spy.uploadedActions
         XCTAssertFalse(uploads.isEmpty, "Actions should have been uploaded")
     }
@@ -2033,6 +2249,170 @@ final class ForegroundSyncCompletionTests: XCTestCase {
                        "Pre-fetched path must NOT call getCurrentPlayback() — it uses the provided state")
     }
 
+    // MARK: - Bug 1a: Empty player adopts the server's now-playing (web→iOS handoff)
+
+    /// THE FIX. When iOS has NO current item (queue consumed, or nothing started
+    /// this session) and the server reports a fresh now-playing episode that was
+    /// set on the web, the routine per-sync reconcile must ADOPT it into the mini
+    /// player. Previously `reconcileNowPlayingWithServer(preFetchedState:)` bailed
+    /// at the `currentItem != nil` guard, so the web episode was fetched and then
+    /// discarded — the user picked up iOS to an empty mini player.
+    func test_reconcile_emptyPlayer_adoptsServerNowPlaying() async {
+        let spy = ReconcileSpy()
+        podcastManager.setSyncClient(spy, deviceId: "test-device")
+        playerManager.setSyncClient(spy, deviceId: "test-device")
+
+        // Precondition: the player is empty (the reported symptom's state)
+        XCTAssertNil(audioManager.currentItem)
+
+        let preFetchedState = ProPlaybackState(
+            podcastUrl: "https://example.com/feed.xml",
+            episodeUrl: "https://example.com/web-ep.mp3",
+            episodeGuid: "web-ep",
+            positionSec: 300,
+            durationSec: 1800,
+            title: "Played on Web",
+            podcastTitle: "Podcast",
+            artUrl: nil,
+            updatedAt: ISO8601DateFormatter().string(from: Date()),
+            nowPlaying: true,
+            completed: nil,
+            hidden: nil
+        )
+
+        await playerManager.reconcileNowPlayingWithServer(preFetchedState: preFetchedState)
+
+        XCTAssertEqual(audioManager.currentItem?.audioUrl, "https://example.com/web-ep.mp3",
+                       "Empty player must adopt the server's now-playing episode set on the web")
+        XCTAssertFalse(audioManager.isPlaying,
+                       "Adopted episode must load PAUSED — the user presses play when ready")
+    }
+
+    /// The adopted episode must load at the server's last position so the user
+    /// resumes exactly where they left off on the web.
+    func test_reconcile_emptyPlayer_adoptsAtServerPosition() async {
+        let spy = ReconcileSpy()
+        podcastManager.setSyncClient(spy, deviceId: "test-device")
+        playerManager.setSyncClient(spy, deviceId: "test-device")
+
+        let preFetchedState = ProPlaybackState(
+            podcastUrl: "https://example.com/feed.xml",
+            episodeUrl: "https://example.com/web-ep.mp3",
+            episodeGuid: "web-ep",
+            positionSec: 754,
+            durationSec: 1800,
+            title: "Played on Web",
+            podcastTitle: "Podcast",
+            artUrl: nil,
+            updatedAt: ISO8601DateFormatter().string(from: Date()),
+            nowPlaying: true,
+            completed: nil,
+            hidden: nil
+        )
+
+        await playerManager.reconcileNowPlayingWithServer(preFetchedState: preFetchedState)
+
+        XCTAssertEqual(audioManager.currentItem?.positionSeconds, 754,
+                       "Adopted episode must resume at the server's last position")
+    }
+
+    /// CONSTRAINT (c): a completed server episode must NEVER be resurrected into an
+    /// empty player. (The server already filters completed rows out of
+    /// /playback/current, but the client guards defensively too.)
+    func test_reconcile_emptyPlayer_serverCompleted_doesNotAdopt() async {
+        let spy = ReconcileSpy()
+        podcastManager.setSyncClient(spy, deviceId: "test-device")
+        playerManager.setSyncClient(spy, deviceId: "test-device")
+
+        let preFetchedState = ProPlaybackState(
+            podcastUrl: "https://example.com/feed.xml",
+            episodeUrl: "https://example.com/web-ep.mp3",
+            episodeGuid: "web-ep",
+            positionSec: 1800,
+            durationSec: 1800,
+            title: "Finished on Web",
+            podcastTitle: "Podcast",
+            artUrl: nil,
+            updatedAt: ISO8601DateFormatter().string(from: Date()),
+            nowPlaying: false,
+            completed: true,
+            hidden: nil
+        )
+
+        await playerManager.reconcileNowPlayingWithServer(preFetchedState: preFetchedState)
+
+        XCTAssertNil(audioManager.currentItem,
+                     "A completed server episode must NOT be resurrected into an empty player")
+    }
+
+    /// CONSTRAINT: only a row the server actually marks now-playing is adopted.
+    /// A stray position-only row (nowPlaying != true) must not surface as the player.
+    func test_reconcile_emptyPlayer_serverNotNowPlaying_doesNotAdopt() async {
+        let spy = ReconcileSpy()
+        podcastManager.setSyncClient(spy, deviceId: "test-device")
+        playerManager.setSyncClient(spy, deviceId: "test-device")
+
+        let preFetchedState = ProPlaybackState(
+            podcastUrl: "https://example.com/feed.xml",
+            episodeUrl: "https://example.com/web-ep.mp3",
+            episodeGuid: "web-ep",
+            positionSec: 300,
+            durationSec: 1800,
+            title: "Not now-playing",
+            podcastTitle: "Podcast",
+            artUrl: nil,
+            updatedAt: ISO8601DateFormatter().string(from: Date()),
+            nowPlaying: false,
+            completed: nil,
+            hidden: nil
+        )
+
+        await playerManager.reconcileNowPlayingWithServer(preFetchedState: preFetchedState)
+
+        XCTAssertNil(audioManager.currentItem,
+                     "A non-now-playing server row must NOT be adopted into an empty player")
+    }
+
+    /// CONSTRAINT: a stale (>24h) now-playing state must not be adopted — mirrors the
+    /// login-restore staleness guard so a day-old web session doesn't surprise-load.
+    func test_reconcile_emptyPlayer_staleState_doesNotAdopt() async {
+        let spy = ReconcileSpy()
+        podcastManager.setSyncClient(spy, deviceId: "test-device")
+        playerManager.setSyncClient(spy, deviceId: "test-device")
+
+        let preFetchedState = ProPlaybackState(
+            podcastUrl: "https://example.com/feed.xml",
+            episodeUrl: "https://example.com/web-ep.mp3",
+            episodeGuid: "web-ep",
+            positionSec: 300,
+            durationSec: 1800,
+            title: "Stale web session",
+            podcastTitle: "Podcast",
+            artUrl: nil,
+            updatedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-25 * 3600)),
+            nowPlaying: true,
+            completed: nil,
+            hidden: nil
+        )
+
+        await playerManager.reconcileNowPlayingWithServer(preFetchedState: preFetchedState)
+
+        XCTAssertNil(audioManager.currentItem,
+                     "A >24h-old now-playing state must NOT be adopted into an empty player")
+    }
+
+    /// CONSTRAINT: nil server state on an empty player stays a no-op (nothing to adopt).
+    func test_reconcile_emptyPlayer_serverNil_isNoOp() async {
+        let spy = ReconcileSpy()
+        podcastManager.setSyncClient(spy, deviceId: "test-device")
+        playerManager.setSyncClient(spy, deviceId: "test-device")
+
+        await playerManager.reconcileNowPlayingWithServer(preFetchedState: nil)
+
+        XCTAssertNil(audioManager.currentItem,
+                     "Nil server state on an empty player must remain a no-op")
+    }
+
     // MARK: - Bug 2: Post-sync queue cleanup
 
     /// After episode actions mark an episode as isPlayed in SwiftData,
@@ -2169,5 +2549,235 @@ final class ForegroundSyncCompletionTests: XCTestCase {
 
         XCTAssertNotNil(audioManager.currentItem,
                         "Items without SwiftData match must be preserved")
+    }
+}
+
+// MARK: - Client Event-Time Stamping (AudioManager + model)
+
+/// The device that made the most-recent *change* should win, regardless of who
+/// syncs last. iOS stamps each playback push with a client event time:
+///   - actively playing → `now` (this device is the live source → wins)
+///   - paused / idle / offline → the frozen last-change time (stale → loses)
+/// These tests pin the AudioManager stamping + the wire encoding. The server-side
+/// "newest event time wins" enforcement is specified separately (clients-first).
+@MainActor
+final class PlaybackEventTimeTests: XCTestCase {
+
+    private func clearKeys() {
+        for k in ["savedQueue", "savedCurrentItem", "savedCurrentPosition", "savedPlaybackEventTime"] {
+            UserDefaults.standard.removeObject(forKey: k)
+        }
+    }
+    override func setUp() { super.setUp(); clearKeys() }
+    override func tearDown() { clearKeys(); super.tearDown() }
+
+    private func makeItem(id: String = "ep-1") -> QueueItem {
+        QueueItem(
+            id: id, title: "Ep", podcastTitle: "Pod",
+            audioUrl: "https://example.com/\(id).mp3", artworkUrl: nil,
+            durationSeconds: 3600, positionSeconds: 0,
+            podcastUrl: "https://example.com/feed.xml", pubDate: nil
+        )
+    }
+
+    // MARK: AudioManager stamps the event time on every state change
+
+    func test_playEpisode_stampsEventTime() async {
+        let t = Date(timeIntervalSince1970: 1_000)
+        let mgr = AudioManager(now: { t })
+        await mgr.playEpisode(makeItem())
+        XCTAssertEqual(mgr.playbackEventTime, t,
+                       "playEpisode must stamp the event time to the action clock")
+    }
+
+    func test_pause_stampsEventTime() async {
+        var clock = Date(timeIntervalSince1970: 1_000)
+        let mgr = AudioManager(now: { clock })
+        await mgr.playEpisode(makeItem())
+        clock = Date(timeIntervalSince1970: 2_000)
+        mgr.pause()
+        XCTAssertEqual(mgr.playbackEventTime, Date(timeIntervalSince1970: 2_000),
+                       "pause must re-stamp the event time")
+    }
+
+    func test_seek_stampsEventTime() async {
+        var clock = Date(timeIntervalSince1970: 1_000)
+        let mgr = AudioManager(now: { clock })
+        await mgr.playEpisode(makeItem())
+        clock = Date(timeIntervalSince1970: 3_000)
+        mgr.seek(to: 120)
+        XCTAssertEqual(mgr.playbackEventTime, Date(timeIntervalSince1970: 3_000),
+                       "seek must re-stamp the event time")
+    }
+
+    func test_stop_stampsEventTime() async {
+        var clock = Date(timeIntervalSince1970: 1_000)
+        let mgr = AudioManager(now: { clock })
+        await mgr.playEpisode(makeItem())
+        clock = Date(timeIntervalSince1970: 5_000)
+        mgr.stop()
+        XCTAssertEqual(mgr.playbackEventTime, Date(timeIntervalSince1970: 5_000),
+                       "stop must re-stamp the event time")
+    }
+
+    // MARK: playbackEventTimeForSync — isPlaying-aware
+
+    func test_eventTimeForSync_whilePaused_returnsFrozenLastChange() {
+        var clock = Date(timeIntervalSince1970: 1_000)
+        let mgr = AudioManager(now: { clock })
+        mgr.pause()                                    // frozen = 1000, isPlaying=false
+        clock = Date(timeIntervalSince1970: 9_000)
+        XCTAssertEqual(mgr.playbackEventTimeForSync, Date(timeIntervalSince1970: 1_000),
+                       "Paused/idle → report the frozen last-change time (stale loses)")
+    }
+
+    func test_eventTimeForSync_whilePlaying_returnsNow() {
+        var clock = Date(timeIntervalSince1970: 1_000)
+        let mgr = AudioManager(now: { clock })
+        mgr.pause()                                    // frozen = 1000
+        mgr.isPlaying = true                           // simulate active playback
+        clock = Date(timeIntervalSince1970: 4_000)
+        XCTAssertEqual(mgr.playbackEventTimeForSync, Date(timeIntervalSince1970: 4_000),
+                       "Actively playing → this device is the live source → report now")
+    }
+
+    // MARK: persistence (force-quit offline device must report its stale time)
+
+    func test_eventTime_persistsAcrossRestore() async {
+        var clock = Date(timeIntervalSince1970: 1_000)
+        let mgr = AudioManager(now: { clock })
+        await mgr.playEpisode(makeItem())              // sets currentItem
+        clock = Date(timeIntervalSince1970: 1_234)
+        mgr.pause()                                    // stamps 1234
+        mgr.persistQueueToDisk()
+
+        let restored = AudioManager(now: { Date(timeIntervalSince1970: 9_999) })
+        restored.restoreQueue()
+        XCTAssertEqual(restored.playbackEventTime, Date(timeIntervalSince1970: 1_234),
+                       "Event time must survive relaunch (force-quit offline device reports stale time)")
+    }
+
+    // MARK: wire encoding
+
+    func test_ProPlaybackSyncRequest_encodesClientUpdatedAtAsISO8601() throws {
+        let date = Date(timeIntervalSince1970: 1_700_000_000)   // 2023-11-14T22:13:20Z
+        let req = ProPlaybackSyncRequest(
+            podcastUrl: "https://example.com/feed",
+            episodeUrl: "https://example.com/ep1.mp3",
+            episodeGuid: "g", positionSec: 10, durationSec: 100,
+            nowPlaying: true, completed: nil, deviceId: "d", clientUpdatedAt: date)
+        let data = try JSONEncoder().encode(req)
+        let dict = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        guard let str = dict["clientUpdatedAt"] as? String else {
+            return XCTFail("clientUpdatedAt must encode as an ISO8601 string")
+        }
+        let fmt = ISO8601DateFormatter()
+        fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let parsed = fmt.date(from: str) ?? ISO8601DateFormatter().date(from: str)
+        XCTAssertNotNil(parsed, "clientUpdatedAt must be valid ISO8601: \(str)")
+        XCTAssertEqual(parsed!.timeIntervalSince1970, 1_700_000_000, accuracy: 1)
+    }
+
+    func test_ProPlaybackSyncRequest_omitsClientUpdatedAtWhenNil() throws {
+        let req = ProPlaybackSyncRequest(
+            podcastUrl: "https://example.com/feed",
+            episodeUrl: "https://example.com/ep1.mp3",
+            episodeGuid: nil, positionSec: 0, durationSec: nil,
+            nowPlaying: nil, completed: nil, deviceId: nil, clientUpdatedAt: nil)
+        let data = try JSONEncoder().encode(req)
+        let dict = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        XCTAssertNil(dict["clientUpdatedAt"], "nil clientUpdatedAt must be omitted from the payload")
+    }
+}
+
+// MARK: - Now-Playing Re-assertion Event Time (clobber prevention)
+
+/// A device that re-asserts now-playing WITHOUT a fresh user action — the
+/// scenePhase `.background` lifecycle flush, which fires on the iOS-app-on-Mac
+/// every time its window loses focus — must stamp the push with the FROZEN
+/// playback event time, not `Date()`. Otherwise a paused, stale device looks
+/// "newer" than an actively-listening device and clobbers its now-playing on
+/// the server (the event-time guard can't help: the stale device's timestamp
+/// genuinely IS `now`). This is the second half of the iOS-app-on-Mac handoff
+/// bug — the push side, complementing the pull-side cancellation fix.
+@MainActor
+final class NowPlayingReassertEventTimeTests: XCTestCase {
+
+    private func clearKeys() {
+        for k in ["savedQueue", "savedCurrentItem", "savedCurrentPosition", "savedPlaybackEventTime"] {
+            UserDefaults.standard.removeObject(forKey: k)
+        }
+    }
+    override func setUp() { super.setUp(); clearKeys() }
+    override func tearDown() { clearKeys(); super.tearDown() }
+
+    private func makeItem(id: String = "ep-stale") -> QueueItem {
+        QueueItem(
+            id: id, title: "Ep", podcastTitle: "Pod",
+            audioUrl: "https://example.com/\(id).mp3", artworkUrl: nil,
+            durationSeconds: 3600, positionSeconds: 0,
+            podcastUrl: "https://example.com/feed.xml", pubDate: nil
+        )
+    }
+
+    /// Paused/idle device → the re-assertion carries the FROZEN last-change time,
+    /// so a newer device wins on the server (no clobber). FAILS against the old
+    /// code, which stamped `Date()` (≈ real now) regardless of play state.
+    ///
+    /// State is set directly (no `playEpisode`) to avoid a real `AVPlayer` URL
+    /// load whose async 404 would clear `currentItem` mid-test.
+    func test_reassertNowPlaying_whilePaused_stampsFrozenEventTime() async {
+        var clock = Date(timeIntervalSince1970: 2_000)
+        let audio = AudioManager(now: { clock })
+        audio.pause()                                   // frozen = 2000, isPlaying=false
+        audio.currentItem = makeItem()                  // load now-playing without network
+        clock = Date(timeIntervalSince1970: 9_000)      // device sits idle; time marches on
+
+        let spy = PlaybackSyncSpy()
+        await spy.setSupportsQueue(true)
+        let player = PlayerManager(audioManager: audio)
+        player.setSyncClient(spy, deviceId: "mac-device")
+        try? await Task.sleep(for: .milliseconds(200))  // let the login task settle
+
+        let baseline = await spy.playbackSyncCalls.count
+        player.syncNowPlayingToProServer()              // .background lifecycle flush
+        try? await Task.sleep(for: .milliseconds(200))
+
+        let calls = await spy.playbackSyncCalls
+        XCTAssertGreaterThan(calls.count, baseline, "the explicit re-assertion must push to the server")
+        let mine = calls.last { $0.episodeGuid == "ep-stale" && $0.nowPlaying == true }
+        XCTAssertNotNil(mine, "now-playing re-assertion must reach the server")
+        XCTAssertEqual(mine?.clientUpdatedAt, Date(timeIntervalSince1970: 2_000),
+                       "Paused re-assertion must stamp the FROZEN event time (stale loses), not Date().")
+    }
+
+    /// Actively-playing device → the re-assertion carries `now`, so the live
+    /// source still wins (no regression to active-device handoff).
+    func test_reassertNowPlaying_whilePlaying_stampsNow() async {
+        var clock = Date(timeIntervalSince1970: 2_000)
+        let audio = AudioManager(now: { clock })
+        audio.pause()                                   // frozen baseline
+        audio.currentItem = makeItem()                  // load now-playing without network
+
+        let spy = PlaybackSyncSpy()
+        await spy.setSupportsQueue(true)
+        let player = PlayerManager(audioManager: audio)
+        player.setSyncClient(spy, deviceId: "phone-device")
+        try? await Task.sleep(for: .milliseconds(200))  // login task settles (it resets isPlaying)
+
+        // Assert active playback AFTER settle, immediately before the push — the
+        // event time is read synchronously at the top of syncNowPlayingToProServer.
+        clock = Date(timeIntervalSince1970: 7_000)
+        audio.isPlaying = true
+        let baseline = await spy.playbackSyncCalls.count
+        player.syncNowPlayingToProServer()
+        try? await Task.sleep(for: .milliseconds(200))
+
+        let calls = await spy.playbackSyncCalls
+        XCTAssertGreaterThan(calls.count, baseline, "the explicit re-assertion must push to the server")
+        let mine = calls.last { $0.episodeGuid == "ep-stale" && $0.nowPlaying == true }
+        XCTAssertNotNil(mine)
+        XCTAssertEqual(mine?.clientUpdatedAt, Date(timeIntervalSince1970: 7_000),
+                       "Actively-playing re-assertion must stamp now (live source wins).")
     }
 }

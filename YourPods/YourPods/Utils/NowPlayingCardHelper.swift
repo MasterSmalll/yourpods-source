@@ -28,7 +28,7 @@ enum NowPlayingCardHelper {
         if let durationSeconds, durationSeconds > 0 {
             if position > 0 && totalDuration > 0 {
                 let percent = Int((position / totalDuration) * 100)
-                parts.append("\(percent)% listened")
+                parts.append(DurationFormatting.percentListened(percent))
             } else {
                 parts.append(PlayerManager.formatTimestamp(TimeInterval(durationSeconds)))
             }

@@ -20,8 +20,13 @@ enum EpisodeDownloadHelper {
     
     /// Returns the VoiceOver accessibility action name for the download button.
     /// - Parameter isDownloaded: Whether the episode is currently downloaded.
-    /// - Returns: "Download" or "Remove Download".
+    /// - Returns: "Download" or "Remove Download", localized.
+    ///
+    /// Forwards to `EpisodeAccessibility.Action` so this and the rotor action
+    /// lists share one catalog key per command. A second literal here would be
+    /// a second key, free to drift to a different word in German.
     static func accessibilityActionName(isDownloaded: Bool) -> String {
-        isDownloaded ? "Remove Download" : "Download"
+        isDownloaded ? EpisodeAccessibility.Action.removeDownload
+                     : EpisodeAccessibility.Action.download
     }
 }

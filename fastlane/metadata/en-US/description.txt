@@ -1,0 +1,44 @@
+YourPods delivers a smooth and secure podcast experience across all your devices—even your vehicle. Native playback on iPhone, iPad, Apple Watch, and Apple CarPlay. No ads. No tracking. Ever.
+
+We believe your listening habits belong to you, which is why we give you total control over your data. Listen using a secure, local-only account to keep your library lightning-fast and 100% private right on your device. For self-hosters and privacy purists, YourPods offers seamless, native integration with gPodder-compatible servers (like Nextcloud gPodder Sync, NextPod, and RePod). Sync your entire library across devices on your own terms—without ever relying on Big Tech corporate clouds.
+
+Now in English, German, Spanish, French, Italian, and Dutch.
+
+PRIVACY YOU CAN SEE
+P3 — Privacy Preserving Playback strips tracking redirects from episode URLs before your device ever connects.
+
+SYNC YOUR WAY
+Choose how your data travels — or keep it local:
+- Vault Mode: Everything stays on your device. No account or server required.
+- Nextcloud / Self-Hosted: Bring your own gPodder-compatible server for full control.
+- gpodder.net: Free public sync with no server setup required.
+- YourPods Cloud: a free account syncs subscriptions and listening positions across your devices. YourPods Pro adds the web player, queue sync, stats, and notes sync — optional, never needed to use the app you bought.
+
+POWERFUL PLAYBACK
+- Per-podcast Listening Profiles: playback speed, skip intro, skip outro, auto-download, and AutoPilot queue management
+- Chapters read straight from the audio file, with chapter artwork — plus auto-extraction from show notes
+- Transcripts (SRT, VTT, JSON, Markdown, RTF, plain text), with search
+- Notes: annotate an episode while you listen, then export to Markdown, Obsidian, or Nextcloud
+- Trim silence, and a sleep timer with DriftOff Mode
+- Download episodes for offline listening
+- Smart episode notifications with per-podcast controls
+- Hide episodes to declutter without marking them played
+
+NATIVE APPLE ECOSYSTEM
+• One purchase: buy it once, use it on iPhone, iPad, and Apple Watch.
+• Apple Watch Freedom: a full player on your wrist — download episodes for fast, offline, phone-free workouts.
+• Siri & Shortcuts: a complete actions catalog for hands-free listening and your own automations.
+• CarPlay: a beautifully integrated CarPlay UI.
+• Home Screen widget, Dynamic Island, and Lock Screen: feels like an app Apple designed themselves.
+
+TECHNICAL
+YourPods is open source. No advertising identifiers. No third-party analytics. The Privacy Manifest declares exactly what data is collected — and in Vault Mode, the answer is nothing. View the full data transparency screen in Settings.
+• Private Feeds: securely add password-protected premium RSS feeds (like Patreon). Stored locally with their credentials, never sync'd to any server.
+• Sync Backend: optimized for the gPodder Sync Nextcloud app (apps.nextcloud.com/apps/gpoddersync). Standard gPodder services may work, but are untested.
+• Protocol: implements the Open Podcast Sync protocol for subscriptions (SubscriptionDelta) and actions (EpisodeAction).
+• Architecture: written natively in Swift and SwiftUI. Playback runs on AVQueuePlayer with gapless auto-advance and automatic stream recovery.
+• Podcast 2.0: many features supported today, and we keep expanding.
+
+HUGE thank you to our TestFlight testers!!
+Get help or request features: https://asc.is/support/
+Privacy Policy: https://yourpods.app/privacy

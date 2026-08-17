@@ -2,7 +2,7 @@ import XCTest
 import SwiftData
 @testable import YourPods
 
-/// Tests for the Pro sync fix — Phase 2 additions:
+/// Tests for the Pro sync fix:
 /// 1. Per-podcast settings push/pull during Pro sync
 /// 2. Queue pull replaces (not merges) local queue
 /// 3. Batch upload excludes currently-playing episode from nowPlaying reset
@@ -189,6 +189,94 @@ final class PerPodcastSettingsSyncTests: XCTestCase {
 
         // No keys should be present for nil fields
         XCTAssertTrue(payload.isEmpty, "Empty PodcastSettings should produce empty payload")
+    }
+
+    // MARK: - autoHideUnplayedDays Tri-State Roundtrip
+
+    /// autoHideUnplayedDays: nil should not appear in payload.
+    func test_podcastSettings_autoHideUnplayedDays_nil_roundTrips() {
+        var settings = PodcastSettings()
+        settings.autoHideUnplayedDays = nil
+        let payload = settings.toServerPayload()
+        XCTAssertNil(payload["autoHideUnplayedDays"], "nil autoHideUnplayedDays should not appear in payload")
+    }
+
+    /// autoHideUnplayedDays: 0 (disabled) should round-trip.
+    func test_podcastSettings_autoHideUnplayedDays_zero_roundTrips() {
+        var settings = PodcastSettings()
+        settings.autoHideUnplayedDays = 0
+        let payload = settings.toServerPayload()
+        XCTAssertEqual(payload["autoHideUnplayedDays"], .int(0))
+
+        let decoded = PodcastSettings.fromServerPayload(payload)
+        XCTAssertEqual(decoded.autoHideUnplayedDays, 0, "0 must round-trip through server payload")
+    }
+
+    /// autoHideUnplayedDays: N (custom) should round-trip.
+    func test_podcastSettings_autoHideUnplayedDays_custom_roundTrips() {
+        var settings = PodcastSettings()
+        settings.autoHideUnplayedDays = 14
+        let payload = settings.toServerPayload()
+        XCTAssertEqual(payload["autoHideUnplayedDays"], .int(14))
+
+        let decoded = PodcastSettings.fromServerPayload(payload)
+        XCTAssertEqual(decoded.autoHideUnplayedDays, 14, "Custom days must round-trip through server payload")
+    }
+
+    /// Merging: local autoHideUnplayedDays takes priority over server.
+    func test_podcastSettings_autoHideUnplayedDays_mergingRespectsLocalPriority() {
+        var local = PodcastSettings()
+        local.autoHideUnplayedDays = 7
+
+        var server = PodcastSettings()
+        server.autoHideUnplayedDays = 30
+
+        let merged = local.merging(serverSettings: server)
+        XCTAssertEqual(merged.autoHideUnplayedDays, 7, "Local autoHideUnplayedDays must win over server")
+    }
+
+    /// Merging: nil local falls back to server value.
+    func test_podcastSettings_autoHideUnplayedDays_mergingFallsBackToServer() {
+        let local = PodcastSettings()  // nil
+
+        var server = PodcastSettings()
+        server.autoHideUnplayedDays = 30
+
+        let merged = local.merging(serverSettings: server)
+        XCTAssertEqual(merged.autoHideUnplayedDays, 30, "nil local should fall back to server value")
+    }
+
+    // MARK: - autoDownloadEpisodeLimit Roundtrip (latent-bug regression)
+
+    /// autoDownloadEpisodeLimit: nil must not appear in the payload.
+    func test_podcastSettings_autoDownloadEpisodeLimit_nil_omitted() {
+        var settings = PodcastSettings()
+        settings.autoDownloadEpisodeLimit = nil
+        let payload = settings.toServerPayload()
+        XCTAssertNil(payload["autoDownloadEpisodeLimit"], "nil autoDownloadEpisodeLimit should not appear in payload")
+    }
+
+    /// autoDownloadEpisodeLimit: a custom value must round-trip through the server payload.
+    /// Regression for the latent bug where this field was declared/decoded/merged but never
+    /// added to toServerPayload()/knownKeys — so it was silently lost on reinstall and never
+    /// shared cross-device.
+    func test_podcastSettings_autoDownloadEpisodeLimit_custom_roundTrips() {
+        var settings = PodcastSettings()
+        settings.autoDownloadEpisodeLimit = 5
+        let payload = settings.toServerPayload()
+        XCTAssertEqual(payload["autoDownloadEpisodeLimit"], .int(5))
+
+        let decoded = PodcastSettings.fromServerPayload(payload)
+        XCTAssertEqual(decoded.autoDownloadEpisodeLimit, 5, "autoDownloadEpisodeLimit must round-trip through server payload")
+    }
+
+    /// autoDownloadEpisodeLimit must be a KNOWN key — read into the typed field, NOT dumped
+    /// into serverExtras (which is the symptom of it being absent from knownKeys).
+    func test_podcastSettings_autoDownloadEpisodeLimit_isKnownKey_notServerExtras() {
+        let payload: [String: AnyCodableValue] = ["autoDownloadEpisodeLimit": .int(3)]
+        let settings = PodcastSettings.fromServerPayload(payload)
+        XCTAssertEqual(settings.autoDownloadEpisodeLimit, 3)
+        XCTAssertNil(settings.serverExtras["autoDownloadEpisodeLimit"], "autoDownloadEpisodeLimit must be a known key, not a serverExtra")
     }
 
     // MARK: - Orchestrator: Per-Podcast Settings Pull
@@ -599,8 +687,10 @@ actor PerPodcastSyncSpy: SyncClient {
     func syncPlayback(
         podcastUrl: String, episodeUrl: String, episodeGuid: String?,
         positionSec: Double, durationSec: Double?,
-        nowPlaying: Bool?, completed: Bool?, deviceId: String?
-    ) async throws {}
+        nowPlaying: Bool?, completed: Bool?, deviceId: String?,
+        clientUpdatedAt: Date?,
+        baseVersion: Int64?
+    ) async throws -> ProPlaybackSyncResponse? { nil }
 
     // MARK: - Episode Actions
 

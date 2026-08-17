@@ -10,14 +10,16 @@ struct SleepTimerSheet: View {
     
     var body: some View {
         NavigationStack {
-            VStack(spacing: 24) {
-                if sleepTimer.isActive || sleepTimer.stopAfterCurrentEpisode {
-                    activeTimerView
-                } else {
-                    presetView
+            ScrollView {
+                VStack(spacing: 24) {
+                    if sleepTimer.isActive || sleepTimer.stopAfterCurrentEpisode {
+                        activeTimerView
+                    } else {
+                        presetView
+                    }
                 }
+                .padding()
             }
-            .padding()
             .navigationTitle("Sleep Timer")
             #if os(iOS)
             .inlineNavigationBarTitle()
@@ -54,7 +56,9 @@ struct SleepTimerSheet: View {
                     .font(.system(size: 48, weight: .bold, design: .monospaced))
                     .foregroundStyle(.primary)
                 
-                Text("remaining")
+                Text(String(localized: "player.sleep.remaining",
+                            defaultValue: "remaining",
+                            comment: "Caption under the large countdown clock on the sleep-timer sheet, reading as '12:30 / remaining'. The number is rendered separately above, so this stands alone — German 'verbleibend', Spanish 'restantes'."))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 
@@ -66,7 +70,7 @@ struct SleepTimerSheet: View {
                             .font(.subheadline.bold())
                             .padding(.horizontal, 16)
                             .padding(.vertical, 10)
-                            .background(.ultraThinMaterial)
+                            .yourPodsGlass(role: .control, cornerRadius: 20)
                             .clipShape(Capsule())
                     }
                     
@@ -77,7 +81,7 @@ struct SleepTimerSheet: View {
                             .font(.subheadline.bold())
                             .padding(.horizontal, 16)
                             .padding(.vertical, 10)
-                            .background(.ultraThinMaterial)
+                            .yourPodsGlass(role: .control, cornerRadius: 20)
                             .clipShape(Capsule())
                     }
                 }
@@ -164,6 +168,7 @@ struct SleepTimerSheet: View {
                         Image(systemName: "minus.circle.fill")
                             .font(.title2)
                     }
+                    .accessibilityLabel("Decrease duration by 5 minutes")
                     
                     Text("\(customMinutes) min")
                         .font(.title2.bold().monospacedDigit())
@@ -175,6 +180,7 @@ struct SleepTimerSheet: View {
                         Image(systemName: "plus.circle.fill")
                             .font(.title2)
                     }
+                    .accessibilityLabel("Increase duration by 5 minutes")
                 }
                 .foregroundStyle(.indigo)
                 

@@ -72,30 +72,58 @@ final class NotificationSyncTests: XCTestCase {
                       "applyFromProfile must set newEpisodeNotificationsEnabled from server payload")
     }
 
-    /// On second sync (first-sync guard engaged), server values should NOT overwrite local.
-    func test_applyFromProfile_doesNotOverwrite_afterFirstSync() {
+    /// After first sync, a server change to a toggle the user did NOT change
+    /// locally IS adopted (web→iOS propagation — the first-sync guard used to block this).
+    func test_applyFromProfile_adoptsServerChange_afterFirstSync_whenUntouched() {
         let settings = SettingsManager()
-        let testProfile = "test_notif_guard_\(UUID().uuidString)"
+        let testProfile = "test_notif_adopt_\(UUID().uuidString)"
         settings.newEpisodeNotificationsEnabled = true
 
-        // First sync — applies server value
-        let serverSettings1 = ProProfileSettings(
+        // First sync seeds the base from the server (server says ON).
+        settings.applyFromProfile(ProProfileSettings(
             profileName: testProfile,
             payload: ["newEpisodeNotificationsEnabled": .bool(true)],
             updatedAt: nil
-        )
-        settings.applyFromProfile(serverSettings1, profileName: testProfile)
+        ), profileName: testProfile)
+        XCTAssertTrue(settings.newEpisodeNotificationsEnabled)
 
-        // Second sync — should NOT overwrite
-        let serverSettings2 = ProProfileSettings(
+        // Web turns it OFF; local was not touched since the seed → adopt the server change.
+        settings.applyFromProfile(ProProfileSettings(
             profileName: testProfile,
             payload: ["newEpisodeNotificationsEnabled": .bool(false)],
             updatedAt: nil
-        )
-        settings.applyFromProfile(serverSettings2, profileName: testProfile)
+        ), profileName: testProfile)
 
-        XCTAssertTrue(settings.newEpisodeNotificationsEnabled,
-                      "After first sync, server value should NOT overwrite local toggle")
+        XCTAssertFalse(settings.newEpisodeNotificationsEnabled,
+                       "An untouched global toggle must adopt the server's change after first sync")
+    }
+
+    /// A toggle the user changed locally is NOT stomped by an unchanged server
+    /// value, and is pushed sparsely so the server adopts it (iOS→web).
+    func test_applyFromProfile_keepsLocallyChangedToggle_afterFirstSync() {
+        let settings = SettingsManager()
+        let testProfile = "test_notif_keep_\(UUID().uuidString)"
+        settings.newEpisodeNotificationsEnabled = true
+
+        // First sync seeds base (server ON).
+        settings.applyFromProfile(ProProfileSettings(
+            profileName: testProfile,
+            payload: ["newEpisodeNotificationsEnabled": .bool(true)],
+            updatedAt: nil
+        ), profileName: testProfile)
+
+        // User turns it OFF locally; server still reports the old ON value.
+        settings.newEpisodeNotificationsEnabled = false
+        let push = settings.applyFromProfile(ProProfileSettings(
+            profileName: testProfile,
+            payload: ["newEpisodeNotificationsEnabled": .bool(true)],
+            updatedAt: nil
+        ), profileName: testProfile)
+
+        XCTAssertFalse(settings.newEpisodeNotificationsEnabled,
+                       "A locally-changed toggle must not be stomped by an unchanged server value")
+        XCTAssertEqual(push["newEpisodeNotificationsEnabled"], .bool(false),
+                       "A locally-changed toggle must be pushed (sparsely) to the server")
     }
 
     // MARK: - Per-Podcast Sync (already wired — regression check)

@@ -5,6 +5,13 @@ import SwiftData
 /// Tests for stale episode detection and pruning during RSS feed refresh.
 /// Validates that episodes removed from the RSS feed are flagged as stale,
 /// and that stale episodes are excluded from counts, views, and auto-queue.
+///
+/// Retargeted onto the live path (`syncStore.applyFeedResults` +
+/// `reconcileAfterBackgroundWrites()`) — `PodcastManager.applyFeedResult` had
+/// zero production callers and has been deleted. Reads go through
+/// `manager.episodes(withGuids:)` rather than `podcast.episodes` relationship
+/// traversal, since `SyncStore` inserts/updates on its own background
+/// `ModelContext` (see `LivePathChurnTests` for the full rationale).
 @MainActor
 final class StaleEpisodePruningTests: XCTestCase {
     
@@ -103,8 +110,9 @@ final class StaleEpisodePruningTests: XCTestCase {
     
     // MARK: - Stale Detection Tests
     
-    func test_applyFeedResult_marksRemovedEpisodesAsStale() {
+    func test_applyFeedResults_marksRemovedEpisodesAsStale() async {
         // Given: podcast with 5 local episodes
+        let allGuids = (1...5).map { "ep-\($0)" }
         let podcast = insertPodcast(
             url: "https://example.com/feed",
             episodes: (1...5).map { i in
@@ -112,7 +120,7 @@ final class StaleEpisodePruningTests: XCTestCase {
             }
         )
         XCTAssertEqual(podcast.episodes.count, 5)
-        
+
         // When: feed only contains 3 of the 5 episodes (ep-1, ep-2, ep-3)
         let feedResult = makeFeedResult(
             url: "https://example.com/feed",
@@ -122,21 +130,23 @@ final class StaleEpisodePruningTests: XCTestCase {
                 (guid: "ep-3", audioUrl: "https://cdn.example.com/ep3.mp3"),
             ]
         )
-        _ = manager.applyFeedResult(feedResult, to: podcast)
-        
+        _ = await manager.syncStore.applyFeedResults([feedResult])
+        manager.reconcileAfterBackgroundWrites()
+
         // Then: ep-4 and ep-5 should be marked stale
-        let staleEpisodes = podcast.episodes.filter { $0.isStale }
-        let activeEpisodes = podcast.episodes.filter { !$0.isStale }
-        
+        let allEpisodes = manager.episodes(withGuids: allGuids)
+        let staleEpisodes = allEpisodes.filter { $0.isStale }
+        let activeEpisodes = allEpisodes.filter { !$0.isStale }
+
         XCTAssertEqual(staleEpisodes.count, 2, "2 episodes not in feed should be stale")
         XCTAssertEqual(activeEpisodes.count, 3, "3 episodes still in feed should be active")
-        
+
         let staleGuids = Set(staleEpisodes.map(\.guid))
         XCTAssertTrue(staleGuids.contains("ep-4"))
         XCTAssertTrue(staleGuids.contains("ep-5"))
     }
     
-    func test_applyFeedResult_unmarksStaleWhenEpisodeReappears() {
+    func test_applyFeedResults_unmarksStaleWhenEpisodeReappears() async {
         // Given: podcast with a stale episode
         let podcast = insertPodcast(
             url: "https://example.com/feed",
@@ -148,7 +158,7 @@ final class StaleEpisodePruningTests: XCTestCase {
         // Mark ep-2 as stale
         podcast.episodes.first(where: { $0.guid == "ep-2" })?.isStale = true
         try! context.save()
-        
+
         // When: feed includes ep-2 again
         let feedResult = makeFeedResult(
             url: "https://example.com/feed",
@@ -157,22 +167,23 @@ final class StaleEpisodePruningTests: XCTestCase {
                 (guid: "ep-2", audioUrl: "https://cdn.example.com/ep2.mp3"),
             ]
         )
-        _ = manager.applyFeedResult(feedResult, to: podcast)
-        
+        _ = await manager.syncStore.applyFeedResults([feedResult])
+        manager.reconcileAfterBackgroundWrites()
+
         // Then: ep-2 should no longer be stale
-        let ep2 = podcast.episodes.first(where: { $0.guid == "ep-2" })
+        let ep2 = manager.episodes(withGuids: ["ep-2"]).first
         XCTAssertFalse(ep2?.isStale ?? true, "Episode that reappears in feed should be un-staled")
     }
     
-    func test_applyFeedResult_matchesByGuidFirst() {
+    func test_applyFeedResults_matchesByGuidFirst() async {
         // Given: local episode with one audio URL
-        let podcast = insertPodcast(
+        insertPodcast(
             url: "https://example.com/feed",
             episodes: [
                 (guid: "stable-guid-1", audioUrl: "https://cdn.example.com/old-url.mp3", pubDate: Date()),
             ]
         )
-        
+
         // When: feed has the same GUID but a different audio URL (feed provider changed CDN)
         let feedResult = makeFeedResult(
             url: "https://example.com/feed",
@@ -180,22 +191,23 @@ final class StaleEpisodePruningTests: XCTestCase {
                 (guid: "stable-guid-1", audioUrl: "https://new-cdn.example.com/different-url.mp3"),
             ]
         )
-        _ = manager.applyFeedResult(feedResult, to: podcast)
-        
+        _ = await manager.syncStore.applyFeedResults([feedResult])
+        manager.reconcileAfterBackgroundWrites()
+
         // Then: episode should NOT be marked stale (GUID match takes priority)
-        let ep = podcast.episodes.first(where: { $0.guid == "stable-guid-1" })
+        let ep = manager.episodes(withGuids: ["stable-guid-1"]).first
         XCTAssertFalse(ep?.isStale ?? true, "GUID match should prevent stale marking even with different audio URL")
     }
     
-    func test_applyFeedResult_fallsToAudioUrlBasePathMatch() {
+    func test_applyFeedResults_fallsToAudioUrlBasePathMatch() async {
         // Given: local episode with a Megaphone URL including ?updated= param
-        let podcast = insertPodcast(
+        insertPodcast(
             url: "https://example.com/feed",
             episodes: [
                 (guid: "guid-changed", audioUrl: "https://traffic.megaphone.fm/VMP4797682566.mp3?updated=1776272842", pubDate: Date()),
             ]
         )
-        
+
         // When: feed has a different GUID but same audio base URL with a new ?updated= param
         let feedResult = makeFeedResult(
             url: "https://example.com/feed",
@@ -203,23 +215,25 @@ final class StaleEpisodePruningTests: XCTestCase {
                 (guid: "guid-changed-new", audioUrl: "https://traffic.megaphone.fm/VMP4797682566.mp3?updated=9999999999"),
             ]
         )
-        _ = manager.applyFeedResult(feedResult, to: podcast)
-        
+        _ = await manager.syncStore.applyFeedResults([feedResult])
+        manager.reconcileAfterBackgroundWrites()
+
         // Then: episode should NOT be marked stale (audio URL base path matches)
-        let ep = podcast.episodes.first(where: { $0.guid == "guid-changed" })
+        let ep = manager.episodes(withGuids: ["guid-changed"]).first
         XCTAssertFalse(ep?.isStale ?? true,
                        "Audio URL base-path match should prevent stale marking when GUID doesn't match")
     }
     
-    func test_applyFeedResult_doesNotMarkCurrentFeedEpisodesStale() {
+    func test_applyFeedResults_doesNotMarkCurrentFeedEpisodesStale() async {
         // Given: podcast with 3 episodes
-        let podcast = insertPodcast(
+        let allGuids = (1...3).map { "ep-\($0)" }
+        insertPodcast(
             url: "https://example.com/feed",
             episodes: (1...3).map { i in
                 (guid: "ep-\(i)", audioUrl: "https://cdn.example.com/ep\(i).mp3", pubDate: Date())
             }
         )
-        
+
         // When: feed contains all 3 episodes (nothing removed)
         let feedResult = makeFeedResult(
             url: "https://example.com/feed",
@@ -229,10 +243,13 @@ final class StaleEpisodePruningTests: XCTestCase {
                 (guid: "ep-3", audioUrl: "https://cdn.example.com/ep3.mp3"),
             ]
         )
-        _ = manager.applyFeedResult(feedResult, to: podcast)
-        
+        _ = await manager.syncStore.applyFeedResults([feedResult])
+        manager.reconcileAfterBackgroundWrites()
+
         // Then: no episodes should be stale
-        let staleCount = podcast.episodes.filter { $0.isStale }.count
+        let all = manager.episodes(withGuids: allGuids)
+        XCTAssertEqual(all.count, 3, "Fetch must actually find the 3 episodes — an empty fetch would falsely pass the stale-count check below")
+        let staleCount = all.filter { $0.isStale }.count
         XCTAssertEqual(staleCount, 0, "No episodes should be stale when all are in the feed")
     }
     
@@ -240,14 +257,14 @@ final class StaleEpisodePruningTests: XCTestCase {
     
     func test_stripQueryParams_removesMegaphoneTimestamp() {
         let url = "https://traffic.megaphone.fm/VMP4797682566.mp3?updated=1776272842"
-        let stripped = PodcastManager.stripQueryParams(url)
+        let stripped = stripQueryParams(url)
         XCTAssertEqual(stripped, "https://traffic.megaphone.fm/VMP4797682566.mp3",
                        "Should strip ?updated= query parameter")
     }
-    
+
     func test_stripQueryParams_preservesBasePath() {
         let url = "https://cdn.example.com/episodes/my-episode.mp3"
-        let stripped = PodcastManager.stripQueryParams(url)
+        let stripped = stripQueryParams(url)
         XCTAssertEqual(stripped, url, "URL without query params should be unchanged")
     }
     

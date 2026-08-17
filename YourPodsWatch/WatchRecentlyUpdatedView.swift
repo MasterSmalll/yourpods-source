@@ -64,7 +64,7 @@ struct WatchRecentlyUpdatedView: View {
                                     }
                                     
                                     if let pubDate = episode.pubDate {
-                                        Text("·")
+                                        Text(verbatim: "·")
                                             .font(.caption2)
                                             .foregroundColor(.gray)
                                         Text(relativeDate(pubDate))
@@ -101,38 +101,35 @@ struct WatchRecentlyUpdatedView: View {
     
     // MARK: - Helpers
     
-    /// Format a date as a short relative string (e.g. "2h ago", "3d ago").
+    /// Format a date as a relative string (e.g. "2 hours ago", "3 days ago").
+    ///
+    /// The four hand-rolled branches this replaces were four English suffixes
+    /// ("2h ago", "3d ago") that no catalog entry could reach — German needs
+    /// "vor 2 Stunden", a prefix. The system formatter covers every unit in
+    /// every language, and is signed, so a future date no longer reads as past.
     private func relativeDate(_ date: Date) -> String {
-        let interval = Date().timeIntervalSince(date)
-        
-        if interval < 3600 {
-            let mins = max(1, Int(interval / 60))
-            return "\(mins)m ago"
-        } else if interval < 86400 {
-            let hours = Int(interval / 3600)
-            return "\(hours)h ago"
-        } else if interval < 604800 {
-            let days = Int(interval / 86400)
-            return "\(days)d ago"
-        } else {
-            let weeks = Int(interval / 604800)
-            return "\(weeks)w ago"
-        }
+        DurationFormatting.relative(date)
     }
     
     /// Build a VoiceOver label for an episode row.
+    ///
+    /// Built as fragments joined by the shared separator rather than by `+=`
+    /// with embedded ", " — the separator is a language convention, and a
+    /// concatenation fixes the clause order in Swift where no translator can
+    /// reach it.
     private func accessibilityLabel(for episode: WatchEpisode) -> String {
-        var label = episode.title
+        var parts: [String] = [episode.title]
         if let podcastTitle = episode.podcastTitle {
-            label += ", from \(podcastTitle)"
+            parts.append(String(localized: "a11y.activity.fromPodcast",
+                                defaultValue: "from \(podcastTitle)",
+                                comment: "VoiceOver: names the show an episode belongs to. The argument is the podcast title."))
         }
         if let pubDate = episode.pubDate {
-            label += ", \(relativeDate(pubDate))"
+            parts.append(relativeDate(pubDate))
         }
         if episode.duration > 0 {
-            let mins = episode.duration / 60
-            label += ", \(mins) minutes"
+            parts.append(DurationFormatting.spoken(episode.duration))
         }
-        return label
+        return parts.joined(separator: EpisodeAccessibility.listSeparator)
     }
 }

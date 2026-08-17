@@ -59,8 +59,13 @@ final class QueueSyncTests: XCTestCase {
 
     // MARK: - Push Tests
 
-    func test_pushQueueToProServer_sendsCurrentItemAndQueue() async {
-        // GIVEN: A Pro sync client and a queue with current item + 2 upcoming
+    // Sync contract: the queue carries Up Next ONLY. The now-playing
+    // episode is owned by the playback channel (playback_states.now_playing /
+    // /playback/current) and MUST NOT be injected into the queue push at
+    // sortOrder 0 — that conflation was what made web's Up Next show the
+    // currently-playing episode. sortOrder is 1-based to match web.
+    func test_pushQueueToProServer_excludesNowPlaying_pushesUpNextOneBased() async {
+        // GIVEN: A Pro sync client and a current item + 2 upcoming
         let spy = SpySyncClientForQueueSync()
         await spy.setSupportsQueue(true)
         playerManager.setSyncClient(spy, deviceId: "test-device")
@@ -74,16 +79,15 @@ final class QueueSyncTests: XCTestCase {
         // WHEN: Push is called
         await playerManager.pushQueueToProServer()
 
-        // THEN: 3 items pushed — current at sortOrder 0, queue at 1 and 2
+        // THEN: only the 2 Up Next items are pushed — current is NOT in the queue
         let pushed = await spy.syncedQueueItems
-        XCTAssertEqual(pushed.count, 3, "Should push currentItem + 2 queue items")
-        XCTAssertEqual(pushed[0].episodeGuid, "current")
-        XCTAssertEqual(pushed[0].sortOrder, 0)
-        XCTAssertEqual(pushed[0].positionSec, 120)
-        XCTAssertEqual(pushed[1].episodeGuid, "next-1")
-        XCTAssertEqual(pushed[1].sortOrder, 1)
-        XCTAssertEqual(pushed[2].episodeGuid, "next-2")
-        XCTAssertEqual(pushed[2].sortOrder, 2)
+        XCTAssertEqual(pushed.count, 2, "Should push ONLY Up Next items, not the now-playing item")
+        XCTAssertFalse(pushed.contains { $0.episodeGuid == "current" },
+                       "Now-playing item must NOT be injected into the queue push")
+        XCTAssertEqual(pushed[0].episodeGuid, "next-1")
+        XCTAssertEqual(pushed[0].sortOrder, 1, "Up Next is 1-based; sortOrder 0 is reserved/legacy")
+        XCTAssertEqual(pushed[1].episodeGuid, "next-2")
+        XCTAssertEqual(pushed[1].sortOrder, 2)
     }
 
     func test_pushQueueToProServer_sendsEmptyWhenNoQueue() async {
@@ -207,7 +211,8 @@ final class QueueSyncTests: XCTestCase {
             podcastUrl: "https://example.com/feed.xml",
             positionSeconds: 999
         )
-        audioManager.currentItem = item
+        // Up Next item (the now-playing item is no longer part of the queue push).
+        audioManager.appendToQueue([item])
 
         // WHEN
         await playerManager.pushQueueToProServer()
@@ -219,6 +224,7 @@ final class QueueSyncTests: XCTestCase {
         XCTAssertEqual(pushed[0].episodeUrl, "https://cdn.example.com/episode.mp3")
         XCTAssertEqual(pushed[0].episodeGuid, "guid-123")
         XCTAssertEqual(pushed[0].positionSec, 999)
+        XCTAssertEqual(pushed[0].sortOrder, 1, "Up Next is 1-based")
     }
 
     // MARK: - Merge Tests
@@ -660,8 +666,10 @@ actor QueueFixSpy: SyncClient {
         durationSec: Double?,
         nowPlaying: Bool?,
         completed: Bool?,
-        deviceId: String?
-    ) async throws {
+        deviceId: String?,
+        clientUpdatedAt: Date?,
+        baseVersion: Int64?
+    ) async throws -> ProPlaybackSyncResponse? {
         callOrder.append("syncPlayback")
         lastPlaybackSync = PlaybackSyncCall(
             podcastUrl: podcastUrl,
@@ -673,6 +681,7 @@ actor QueueFixSpy: SyncClient {
             completed: completed,
             deviceId: deviceId
         )
+        return nil
     }
 
     // MARK: - Unused protocol stubs
@@ -738,11 +747,56 @@ final class QueueSyncFlowTests: XCTestCase {
         )
     }
 
+    // MARK: - Queue version / optimistic concurrency
+
+    func test_proQueueSyncRequest_encodesBaseVersion() throws {
+        let req = ProQueueSyncRequest(items: [], baseVersion: 42)
+        let dict = try JSONSerialization.jsonObject(with: JSONEncoder().encode(req)) as! [String: Any]
+        XCTAssertEqual((dict["baseVersion"] as? NSNumber)?.int64Value, 42,
+                       "baseVersion must be encoded for CAS")
+    }
+
+    func test_proQueueSyncRequest_omitsBaseVersionWhenNil() throws {
+        let req = ProQueueSyncRequest(items: [])   // baseVersion defaults nil
+        let dict = try JSONSerialization.jsonObject(with: JSONEncoder().encode(req)) as! [String: Any]
+        XCTAssertNil(dict["baseVersion"],
+                     "nil baseVersion must be omitted — a legacy/no-token push is byte-identical to today")
+    }
+
+    /// On a 409 version conflict the client must re-pull (fresh version), re-merge
+    /// its local intent, and retry the push with the bumped base version — composing
+    /// with the concurrent remote add instead of clobbering it.
+    func test_syncQueueWithServer_repullsAndRetries_on409() async {
+        let serverA = QueueSyncItem(podcastUrl: "https://example.com/feed.xml",
+                                    episodeUrl: "https://example.com/a.mp3",
+                                    episodeGuid: "ep-a", sortOrder: 1, positionSec: 0,
+                                    title: "A", podcastTitle: "P", artworkUrl: nil, durationSec: 1800)
+        let concurrentB = QueueSyncItem(podcastUrl: "https://example.com/feed.xml",
+                                        episodeUrl: "https://example.com/b.mp3",
+                                        episodeGuid: "ep-b", sortOrder: 2, positionSec: 0,
+                                        title: "B", podcastTitle: "P", artworkUrl: nil, durationSec: 1800)
+        let spy = QueueCASSpy(serverItems: [serverA], serverVersion: 5,
+                              pendingConflict: true, concurrentAddOnConflict: concurrentB)
+        playerManager.setSyncClient(spy, deviceId: "test-device")
+        audioManager.replaceQueue([makeQueueItem(id: "ep-c", title: "C")])
+
+        await playerManager.syncQueueWithServer()
+
+        let getCount = await spy.getWithVersionCallCount
+        let syncCount = await spy.syncCallCount
+        let baseVersions = await spy.receivedBaseVersions
+        XCTAssertGreaterThanOrEqual(getCount, 2, "must re-pull after a 409")
+        XCTAssertEqual(syncCount, 2, "first push 409s, retry push succeeds")
+        XCTAssertEqual(baseVersions.first ?? -1, 5, "first push carries the pulled base version")
+        XCTAssertEqual(baseVersions.last ?? -1, 6, "retry carries the re-pulled (bumped) base version")
+    }
+
     // MARK: - Pull-Merge-Push Flow
 
-    /// When the server has items from another device and the local queue is empty,
-    /// syncQueueWithServer should adopt the server queue wholesale (fresh device).
-    /// sortOrder 0 becomes currentItem; no push-back to server.
+    /// Sync contract: a fresh device adopts the server queue as Up Next.
+    /// With no now-playing on the playback channel, a single server item — even at
+    /// sortOrder 0 (a valid Up Next position via web "add to top") — becomes Up
+    /// Next and is NOT lifted as currentItem. No push-back to server.
     func test_syncQueueWithServer_addsServerItemsToEmptyLocalQueue() async {
         let spy = QueueFlowSpy()
         await spy.setSupportsQueue(true)
@@ -758,17 +812,72 @@ final class QueueSyncFlowTests: XCTestCase {
         // WHEN
         await playerManager.syncQueueWithServer()
 
-        // THEN: sortOrder 0 becomes currentItem on fresh device (Bug 3 fix)
-        XCTAssertEqual(audioManager.currentItem?.id, "ep-server")
-        XCTAssertEqual(audioManager.currentItem?.title, "Server Episode")
-        XCTAssertEqual(audioManager.currentItem?.positionSeconds, 300)
+        // THEN: no now-playing on the playback channel → nothing lifted as current
+        XCTAssertNil(audioManager.currentItem,
+                     "A sortOrder-0 item must not be lifted as now-playing")
 
-        // No additional queue items (only one server item)
-        XCTAssertTrue(audioManager.queue.isEmpty)
+        // The server item becomes Up Next, carrying its position
+        XCTAssertEqual(audioManager.queue.map(\.id), ["ep-server"])
+        XCTAssertEqual(audioManager.queue.first?.positionSeconds, 300)
 
         // Fresh device should NOT push back to server
         let syncCalled = await spy.syncQueueCalled
         XCTAssertFalse(syncCalled, "Fresh device should adopt server queue without pushing back")
+    }
+
+    /// Sync contract: when a fresh device pulls a contract-compliant
+    /// queue (Up Next only, 1-based sortOrder, now-playing NOT in the queue), it
+    /// must adopt EVERY item as Up Next and leave currentItem nil. Now-playing is
+    /// restored separately via the playback channel (restoreNowPlayingFromProServer).
+    /// Regression guard: the old "sorted.first becomes currentItem" steal would
+    /// mistake Up Next item #1 for the now-playing episode.
+    func test_syncQueueWithServer_freshDevice_oneBasedQueue_adoptsAllAsUpNext() async {
+        let spy = QueueFlowSpy()
+        await spy.setSupportsQueue(true)
+        await spy.setServerQueue([
+            QueueSyncItem(podcastUrl: "https://example.com/feed.xml",
+                          episodeUrl: "https://example.com/a.mp3",
+                          episodeGuid: "ep-a", sortOrder: 1, positionSec: 0,
+                          title: "Up Next A", podcastTitle: "Podcast"),
+            QueueSyncItem(podcastUrl: "https://example.com/feed.xml",
+                          episodeUrl: "https://example.com/b.mp3",
+                          episodeGuid: "ep-b", sortOrder: 2, positionSec: 0,
+                          title: "Up Next B", podcastTitle: "Podcast"),
+        ])
+        playerManager.setSyncClient(spy, deviceId: "test-device")
+
+        // WHEN
+        await playerManager.syncQueueWithServer()
+
+        // THEN: no item is stolen as now-playing; all become Up Next
+        XCTAssertNil(audioManager.currentItem,
+                     "1-based queue has no now-playing item — currentItem must stay nil")
+        XCTAssertEqual(audioManager.queue.map(\.id), ["ep-a", "ep-b"],
+                       "Every server item becomes Up Next")
+    }
+
+    /// Sync contract: the now-playing item is owned by the playback
+    /// channel and must NOT appear in the queue push, even when present locally.
+    func test_syncQueueWithServer_excludesNowPlayingFromPush() async {
+        let spy = QueueFlowSpy()
+        await spy.setSupportsQueue(true)
+        await spy.setServerQueue([])  // server empty → not a fresh device (we have a current)
+        playerManager.setSyncClient(spy, deviceId: "test-device")
+
+        audioManager.currentItem = makeQueueItem(id: "current", title: "Now Playing")
+        audioManager.appendToQueue([
+            makeQueueItem(id: "ep-local", title: "Local Up Next")
+        ])
+
+        // WHEN
+        await playerManager.syncQueueWithServer()
+
+        // THEN
+        let pushed = await spy.syncedQueueItems
+        let pushedGuids = pushed.compactMap(\.episodeGuid)
+        XCTAssertFalse(pushedGuids.contains("current"),
+                       "Now-playing item must NOT be injected into the queue push")
+        XCTAssertTrue(pushedGuids.contains("ep-local"), "Up Next item must be pushed")
     }
 
     /// When local has items and server has different items (from another device),
@@ -1271,7 +1380,7 @@ final class QueueSyncFlowTests: XCTestCase {
     // MARK: - Queue Truncation (API Spec: Max 200 Items)
 
     /// When the local queue has >200 items, the push to server should be
-    /// truncated to 200 to comply with the API spec (Build 122).
+    /// truncated to 200 to comply with the API spec.
     /// Excess items are silently dropped from the sync payload.
     func test_syncQueueWithServer_truncatesPushTo200Items() async {
         let spy = QueueFlowSpy()
@@ -1850,6 +1959,73 @@ actor QueueFlowSpy: SyncClient {
     func deleteQueueItem(episodeUrl: String) async throws {
         callOrder.append("deleteQueueItem")
         lastDeletedQueueEpisodeUrl = episodeUrl
+    }
+
+    // MARK: - Unused protocol stubs
+    func pushSubscriptions(add: [String], remove: [String], deviceId: String) async throws -> [URLRewrite] { [] }
+    func pullSubscriptionChanges(deviceId: String, since: Int) async throws -> SubscriptionDelta {
+        SubscriptionDelta(add: [], remove: [], timestamp: 0)
+    }
+    func uploadEpisodeActions(_ actions: [EpisodeAction]) async throws -> [URLRewrite] { [] }
+    func getEpisodeActions(since: Int) async throws -> [EpisodeAction] { [] }
+}
+
+// MARK: - Queue version / CAS spy
+
+/// A SyncClient spy that models the server's optimistic-concurrency contract:
+/// `getQueueWithVersion()` returns a version token; `syncQueue(items:baseVersion:)`
+/// can throw `.conflict` once (simulating a concurrent write that bumped the
+/// version + added an item), then accept the retry. Records base versions + call
+/// counts so the retry behavior can be asserted.
+actor QueueCASSpy: SyncClient {
+    var supportsQueueSync: Bool { true }
+    var supportsSettingsSync: Bool { false }
+
+    private var serverItems: [QueueSyncItem]
+    private var serverVersion: Int64
+    private var pendingConflict: Bool
+    private let concurrentAddOnConflict: QueueSyncItem?
+
+    private(set) var getWithVersionCallCount = 0
+    private(set) var syncCallCount = 0
+    private(set) var receivedBaseVersions: [Int64?] = []
+
+    init(serverItems: [QueueSyncItem] = [], serverVersion: Int64 = 1,
+         pendingConflict: Bool = false, concurrentAddOnConflict: QueueSyncItem? = nil) {
+        self.serverItems = serverItems
+        self.serverVersion = serverVersion
+        self.pendingConflict = pendingConflict
+        self.concurrentAddOnConflict = concurrentAddOnConflict
+    }
+
+    func getQueueWithVersion() async throws -> QueueSyncPullResult {
+        getWithVersionCallCount += 1
+        return QueueSyncPullResult(items: serverItems, version: serverVersion)
+    }
+
+    func getQueue() async throws -> [QueueSyncItem] { serverItems }
+
+    func syncQueue(items: [QueueSyncItem], baseVersion: Int64?) async throws -> QueueSyncResult {
+        syncCallCount += 1
+        receivedBaseVersions.append(baseVersion)
+        if pendingConflict {
+            pendingConflict = false
+            // Simulate a concurrent server-side write: bump the version and add an
+            // item, so the client's re-pull sees fresh state to merge.
+            serverVersion += 1
+            if let add = concurrentAddOnConflict,
+               !serverItems.contains(where: { $0.episodeUrl == add.episodeUrl }) {
+                serverItems.append(add)
+            }
+            throw YourPodsProError.conflict
+        }
+        serverVersion += 1
+        serverItems = items
+        return QueueSyncResult(items: items, droppedItems: [], version: serverVersion)
+    }
+
+    func syncQueue(items: [QueueSyncItem]) async throws -> QueueSyncResult {
+        try await syncQueue(items: items, baseVersion: nil)
     }
 
     // MARK: - Unused protocol stubs

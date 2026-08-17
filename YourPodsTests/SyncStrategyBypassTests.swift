@@ -219,7 +219,12 @@ final class SyncStrategyBypassTests: XCTestCase {
         await bgService.performSync()
 
         // THEN: Server position should be applied (serverWins is explicit)
-        XCTAssertEqual(episode.listenedSeconds, 400,
+        // Refetch: async path writes on SyncStore background context.
+        // Direct Episode fetch avoids stale relationship caches.
+        let guid = episode.guid
+        let descriptor = FetchDescriptor<Episode>(predicate: #Predicate { $0.guid == guid })
+        let refetchedEp = try! context.fetch(descriptor).first
+        XCTAssertEqual(refetchedEp?.listenedSeconds, 400,
                        "Background sync with .serverWins should overwrite local with server position")
     }
 

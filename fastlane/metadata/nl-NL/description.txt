@@ -1,0 +1,44 @@
+YourPods geeft je een soepele, veilige podcastervaring op al je apparaten — ook onderweg in de auto. Native afspelen op iPhone, iPad, Apple Watch en Apple CarPlay. Geen advertenties. Geen tracking. Nooit.
+
+Waar je naar luistert, is van jou. Daarom houd jij de volledige controle over je gegevens. Kies voor een beveiligd account dat alleen op dit apparaat bestaat: je bibliotheek blijft bliksemsnel en 100% privé, hier op je toestel. Host je liever zelf, of ben je een privacypurist? Dan koppelt YourPods naadloos en native aan gPodder-compatibele servers (zoals Nextcloud gPodder Sync, NextPod en RePod). Synchroniseer je hele bibliotheek tussen al je apparaten, op jouw voorwaarden — zonder ooit afhankelijk te zijn van de bedrijfsclouds van Big Tech.
+
+Nu in het Engels, Duits, Spaans, Frans, Italiaans en Nederlands.
+
+PRIVACY DIE JE KUNT ZIEN
+P3 — Privacy Preserving Playback haalt trackingdoorverwijzingen uit de afleverings-URL's, nog voordat je apparaat verbinding maakt.
+
+SYNCHRONISEREN OP JOUW MANIER
+Jij bepaalt waar je gegevens heen gaan — of dat ze blijven waar ze zijn:
+- Kluismodus: alles blijft op je apparaat. Geen account of server nodig.
+- Nextcloud / zelf gehost: neem je eigen gPodder-compatibele server mee en houd alles in eigen hand.
+- gpodder.net: gratis openbare sync, zonder dat je zelf een server opzet.
+- YourPods Cloud: een gratis account synchroniseert je abonnementen en luisterposities tussen je apparaten. YourPods Pro voegt de webspeler, wachtrij, statistieken en notitiesync toe — optioneel, en nooit nodig om de app te gebruiken die je hebt gekocht.
+
+KRACHTIG AFSPELEN
+- Luisterprofielen per podcast: afspeelsnelheid, intro en outro overslaan, automatisch downloaden en wachtrijbeheer met AutoPilot
+- Hoofdstukken rechtstreeks uit het audiobestand, mét hoofdstukafbeeldingen, plus automatisch uit de shownotes
+- Transcripten (SRT, VTT, JSON, Markdown, RTF, platte tekst), met zoekfunctie
+- Notities: maak aantekeningen tijdens het luisteren en exporteer naar Markdown, Obsidian of Nextcloud
+- Stiltes inkorten, en een slaaptimer met DriftOff Mode
+- Download afleveringen om offline te luisteren
+- Slimme meldingen bij nieuwe afleveringen, per podcast in te stellen
+- Verberg afleveringen om op te ruimen, zonder ze als afgespeeld te markeren
+
+NATIVE IN HET APPLE-ECOSYSTEEM
+• Eén aankoop: koop één keer en gebruik YourPods op iPhone, iPad en Apple Watch.
+• Vrijheid op je Apple Watch: een volwaardige speler op je pols, met afleveringen erop om offline te sporten.
+• Siri en Opdrachten: een complete catalogus met acties voor handsfree luisteren en je eigen automatiseringen.
+• CarPlay: een prachtig geïntegreerde CarPlay-interface.
+• Widget op je beginscherm, Dynamic Island en toegangsscherm: voelt als een app die Apple zelf ontworpen heeft.
+
+TECHNISCH
+YourPods is open source. Geen advertentie-ID's. Geen analytics van derden. Het privacymanifest vermeldt precies welke gegevens worden verzameld — en in Kluismodus is het antwoord: geen. Bekijk het volledige transparantieoverzicht in Instellingen.
+• Privéfeeds: voeg veilig premium RSS-feeds met wachtwoord toe (zoals van Patreon). Ze blijven met inloggegevens en al op dit apparaat en gaan naar geen enkele server.
+• Sync-backend: geoptimaliseerd voor de Nextcloud-app gPodder Sync (apps.nextcloud.com/apps/gpoddersync). Standaard gPodder-diensten werken mogelijk ook, maar zijn niet getest.
+• Protocol: implementeert het Open Podcast Sync-protocol voor abonnementen (SubscriptionDelta) en acties (EpisodeAction).
+• Architectuur: volledig native geschreven in Swift en SwiftUI. Het afspelen draait op AVQueuePlayer, met naadloos doorspelen en automatisch herstel van haperende streams.
+• Podcast 2.0: veel functies worden nu al ondersteund, en we breiden dat doorlopend uit.
+
+ENORM bedankt aan onze TestFlight-testers!!
+Hulp of een functieverzoek: https://asc.is/support/
+Privacybeleid: https://yourpods.app/privacy

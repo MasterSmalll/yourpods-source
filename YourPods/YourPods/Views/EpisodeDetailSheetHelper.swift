@@ -40,7 +40,8 @@ enum EpisodeDetailSheetHelper {
     }
     
     /// Determines whether marking an episode as played should route through PlayerManager
-    /// (which stops playback and advances the queue) vs. PodcastManager only (data-layer update).
+    /// (which advances to the next Up Next episode, stopping only when Up Next is empty)
+    /// vs. PodcastManager only (data-layer update).
     ///
     /// - Parameters:
     ///   - episodeGuid: The GUID of the episode being marked as played

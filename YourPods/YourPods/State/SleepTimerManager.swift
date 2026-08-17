@@ -83,10 +83,12 @@ final class SleepTimerManager {
     }
     
     /// Formatted remaining time string (e.g. "14:32").
+    ///
+    /// A countdown, not a clock: minutes never roll over to hours, so a timer
+    /// extended past an hour reads "61:01", not "1:01:01". See
+    /// `DurationFormatting.countdown(_:)`.
     var formattedRemaining: String {
-        let m = remainingSeconds / 60
-        let s = remainingSeconds % 60
-        return String(format: "%d:%02d", m, s)
+        DurationFormatting.countdown(remainingSeconds)
     }
     
     deinit {

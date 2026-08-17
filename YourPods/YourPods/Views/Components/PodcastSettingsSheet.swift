@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Listening Profile — per-podcast settings sheet.
+/// Listening Profile — per-podcast settings sheet. Port of podcast_settings_sheet.dart.
 struct PodcastSettingsSheet: View {
     @Bindable var podcast: Podcast
     @Environment(\.dismiss) private var dismiss
@@ -58,7 +58,7 @@ struct PodcastSettingsSheet: View {
                         HStack {
                             Text("Speed Override")
                             Spacer()
-                            Text("\(speed, specifier: "%.1f")×")
+                            Text(DurationFormatting.speed(speed))
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -101,8 +101,14 @@ struct PodcastSettingsSheet: View {
                         set: { podcast.effectiveSettings.privacyMode = $0 }
                     )) {
                         Text("Global Setting").tag(Bool?.none)
-                        Text("On").tag(Bool?.some(true))
-                        Text("Off").tag(Bool?.some(false))
+                        Text(String(localized: "settings.toggle.on",
+                                    defaultValue: "On",
+                                    comment: "Picker option meaning this setting is enabled for this podcast, shown next to 'Off' and 'Default'. The STATE of a switch, not the preposition."))
+                            .tag(Bool?.some(true))
+                        Text(String(localized: "settings.toggle.off",
+                                    defaultValue: "Off",
+                                    comment: "Picker option meaning this setting is disabled for this podcast, shown next to 'On' and 'Default'. The STATE of a switch, not the preposition."))
+                            .tag(Bool?.some(false))
                     }
                     .accessibilityLabel("Privacy Preserving Playback")
                 } header: {
@@ -122,6 +128,34 @@ struct PodcastSettingsSheet: View {
                     Label("Notifications", systemImage: "bell.badge")
                 } footer: {
                     Text("Get a local notification when new episodes are discovered. Requires notifications to be enabled in Settings → Background Refresh.")
+                }
+                
+                Section {
+                    Picker("Auto-Hide Duration", selection: Binding<Int?>(
+                        get: { podcast.effectiveSettings.autoHideUnplayedDays },
+                        set: { podcast.effectiveSettings.autoHideUnplayedDays = $0 }
+                    )) {
+                        Text("Use Global Default").tag(Int?.none)
+                        Text("Disabled").tag(Int?.some(0))
+                        Text("7 days").tag(Int?.some(7))
+                        Text("14 days").tag(Int?.some(14))
+                        Text("30 days").tag(Int?.some(30))
+                        Text("90 days").tag(Int?.some(90))
+                    }
+                    .accessibilityLabel("Auto-Hide Duration Override")
+                    .accessibilityHint("Override the global auto-hide threshold for this podcast")
+                } header: {
+                    Label("Auto-Hide", systemImage: "eye.slash")
+                } footer: {
+                    if let days = podcast.effectiveSettings.autoHideUnplayedDays {
+                        if days == 0 {
+                            Text("Auto-hide is disabled for this podcast, even if enabled globally.")
+                        } else {
+                            Text("Unplayed episodes older than \(days) days will be auto-hidden for this podcast.")
+                        }
+                    } else {
+                        Text("Uses your global auto-hide setting from Settings → Feed Management.")
+                    }
                 }
                 
                 // Feed Credentials (only for protected feeds)

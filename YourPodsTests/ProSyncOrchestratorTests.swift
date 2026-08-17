@@ -17,6 +17,7 @@ final class ProSyncOrchestratorTests: XCTestCase {
     private var audioManager: AudioManager!
     private var settingsManager: SettingsManager!
     private var downloadManager: DownloadManager!
+    private var baselineDir: URL!
     private let testProfileId = "test-profile-pro-orch"
 
     override func setUp() {
@@ -49,10 +50,22 @@ final class ProSyncOrchestratorTests: XCTestCase {
         downloadManager = DownloadManager()
         manager.downloadManager = downloadManager
         manager.settingsManager = settingsManager
+
+        // Step 5d now pushes under CAS, so the sync reads and writes the per-episode
+        // baseline store. Left on its default it is a real profile-scoped file in the
+        // container, shared with every other run of this class.
+        baselineDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pro-orch-baselines-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: baselineDir, withIntermediateDirectories: true)
+        playerManager.playbackBaselines = PlaybackBaselineStore(
+            fileURL: baselineDir.appendingPathComponent("baselines.json")
+        )
     }
 
     override func tearDown() {
         clearTestDefaults()
+        try? FileManager.default.removeItem(at: baselineDir)
+        baselineDir = nil
         downloadManager = nil
         settingsManager = nil
         playerManager = nil
@@ -77,6 +90,7 @@ final class ProSyncOrchestratorTests: XCTestCase {
             "savedCurrentPosition",
             "serverProfiles",
             "proFirstSyncCompleted_testpro",
+            "proSettingsBase_testpro",
         ]
         for key in keys {
             UserDefaults.standard.removeObject(forKey: key)
@@ -168,8 +182,12 @@ final class ProSyncOrchestratorTests: XCTestCase {
         XCTAssertTrue(conflicts.isEmpty,
                       "Empty server data should produce no conflicts")
     }
-    /// Pro sync must push profile settings to the server.
+    /// Pro sync must push profile settings to the server when the device has a
+    /// customization (sparse push — a fresh all-defaults device with no server view
+    /// pushes nothing, by design).
     func test_pro_pushesProfileSettings() async {
+        settingsManager.playbackSpeed = 1.7   // a customization to push
+
         let spy = ProOrchestratorSpy()
         manager.setSyncClient(spy, deviceId: "test-device")
         playerManager.setSyncClient(spy, deviceId: "test-device")
@@ -292,6 +310,259 @@ final class ProSyncOrchestratorTests: XCTestCase {
         XCTAssertEqual(settingsManager.defaultAutoQueueMode, .priority,
                        "Server 'playNext' must be applied as .priority on first sync")
     }
+
+    // MARK: - Step ordering invariants
+
+    /// Helper: run a full sync against a fresh spy and return its call order.
+    private func runSyncAndCaptureOrder() async -> [String] {
+        let spy = ProOrchestratorSpy()
+        manager.setSyncClient(spy, deviceId: "test-device")
+        playerManager.setSyncClient(spy, deviceId: "test-device")
+        let orchestrator = ProSyncOrchestrator(client: spy)
+        _ = await orchestrator.sync(
+            podcastManager: manager,
+            playerManager: playerManager,
+            downloadManager: downloadManager,
+            settingsManager: settingsManager,
+            conflictStrategy: .serverWins
+        )
+        return await spy.callOrder
+    }
+
+    /// Pull-before-push contract for profile settings (ProSyncOrchestrator Step 1).
+    /// Pulling first lets the three-way merge detect genuine same-key conflicts before
+    /// our own push masks them; the push that follows is SPARSE (only changed keys), so
+    /// pulling first no longer risks a stale server value overwriting a local edit.
+    func test_pro_pullsProfileSettingsBeforePush() async {
+        let order = await runSyncAndCaptureOrder()
+        guard let pullIdx = order.firstIndex(of: "getProfileSettings"),
+              let pushIdx = order.firstIndex(of: "patchProfileSettings") else {
+            XCTFail("Expected both getProfileSettings and patchProfileSettings, got: \(order)")
+            return
+        }
+        XCTAssertLessThan(pullIdx, pushIdx,
+                          "Profile settings pull must precede push (merge detects conflicts; push is sparse)")
+    }
+
+    /// Pre-fetch-before-queue contract: server playback state is captured
+    /// (Step 5b-read) before queue sync (Step 7) adopts merged queue state.
+    func test_pro_prefetchesPlaybackBeforeQueueSync() async {
+        let order = await runSyncAndCaptureOrder()
+        guard let playbackIdx = order.firstIndex(of: "getCurrentPlayback"),
+              let queueIdx = order.firstIndex(of: "getQueue") else {
+            XCTFail("Expected both getCurrentPlayback and getQueue, got: \(order)")
+            return
+        }
+        XCTAssertLessThan(playbackIdx, queueIdx,
+                          "Playback pre-fetch must precede queue sync")
+    }
+
+    /// Episode actions (Step 5) must precede the playback chain (Step 5b)
+    /// so reconciliation sees applied positions.
+    func test_pro_syncsEpisodeActionsBeforePlaybackChain() async {
+        let order = await runSyncAndCaptureOrder()
+        guard let actionsIdx = order.firstIndex(of: "getEpisodeActions"),
+              let playbackIdx = order.firstIndex(of: "getCurrentPlayback") else {
+            XCTFail("Expected both getEpisodeActions and getCurrentPlayback, got: \(order)")
+            return
+        }
+        XCTAssertLessThan(actionsIdx, playbackIdx,
+                          "Episode action sync must precede playback reconciliation")
+    }
+
+    // MARK: - Fix C: stop the resurrection push
+
+    private func runSync(spy: ProOrchestratorSpy) async {
+        manager.setSyncClient(spy, deviceId: "test-device")
+        playerManager.setSyncClient(spy, deviceId: "test-device")
+        let orchestrator = ProSyncOrchestrator(client: spy)
+        _ = await orchestrator.sync(
+            podcastManager: manager,
+            playerManager: playerManager,
+            downloadManager: downloadManager,
+            settingsManager: settingsManager,
+            conflictStrategy: .serverWins
+        )
+    }
+
+    private func setupCurrentItem(guid: String, isPlayed: Bool) {
+        let podcast = Podcast(url: "https://example.com/pod", title: "Pod")
+        context.insert(podcast)
+        let ep = Episode(
+            guid: guid,
+            title: "Ep \(guid)",
+            audioUrl: "https://example.com/\(guid).mp3",
+            pubDate: Date(),
+            durationSeconds: 3600
+        )
+        ep.podcast = podcast
+        ep.isPlayed = isPlayed
+        context.insert(ep)
+        podcast.episodes = [ep]
+        manager.subscriptions = [podcast]
+        audioManager.currentItem = QueueItem(
+            id: guid,
+            title: "Ep \(guid)",
+            podcastTitle: "Pod",
+            audioUrl: "https://example.com/\(guid).mp3",
+            artworkUrl: nil,
+            durationSeconds: 3600,
+            positionSeconds: 100,
+            podcastUrl: "https://example.com/pod",
+            pubDate: nil
+        )
+    }
+
+    /// A finished current item (server already says completed → Episode.isPlayed)
+    /// must NOT be re-pushed as nowPlaying:true, and must be cleared from the player.
+    func test_pro_finishedCurrentItem_doesNotResurrectAsNowPlaying() async {
+        setupCurrentItem(guid: "fin-1", isPlayed: true)
+        let spy = ProOrchestratorSpy()
+        await runSync(spy: spy)
+
+        let calls = await spy.syncPlaybackCalls
+        XCTAssertFalse(
+            calls.contains { $0.episodeUrl == "https://example.com/fin-1.mp3" && $0.nowPlaying == true },
+            "A finished current item must NOT be pushed as nowPlaying:true (resurrection)"
+        )
+        XCTAssertNil(audioManager.currentItem, "Finished current item should be cleared from the now-playing player")
+    }
+
+    /// Guard regression: an unplayed current item must STILL push nowPlaying:true
+    /// (gate is on isPlayed, not isPlaying) so cross-device handoff keeps working.
+    func test_pro_unplayedCurrentItem_stillPushesNowPlaying() async {
+        setupCurrentItem(guid: "live-1", isPlayed: false)
+        let spy = ProOrchestratorSpy()
+        await runSync(spy: spy)
+
+        let calls = await spy.syncPlaybackCalls
+        XCTAssertTrue(
+            calls.contains { $0.episodeUrl == "https://example.com/live-1.mp3" && $0.nowPlaying == true },
+            "An unplayed current item must still push nowPlaying:true for handoff"
+        )
+    }
+
+    // MARK: - Step 5d carries the CAS baseline
+
+    /// The periodic playback push is the one the reconciler's conflicts come back to, and
+    /// it was the last high-frequency site still sending `baseVersion: nil`. A versionless
+    /// push merges server-side, so it is not destructive — but it can never be *refused*,
+    /// and only a refusal produces the `conflicts[]` entry that becomes a `sync_conflicts`
+    /// row and reaches the sheet. Divergence arriving on this path was therefore invisible
+    /// to the whole conflict feature, no matter how correct the reconciler was.
+    ///
+    /// `0` is the right value with no stored baseline — "I believe no row exists" — and is
+    /// a positive claim. `nil` is the legacy opt-out, which is what this asserts against.
+    func test_pro_playbackPush_carriesACASBaseline() async {
+        setupCurrentItem(guid: "cas-1", isPlayed: false)
+        let spy = ProOrchestratorSpy()
+        await runSync(spy: spy)
+
+        let calls = await spy.syncPlaybackCalls
+        let push = calls.first { $0.episodeUrl == "https://example.com/cas-1.mp3" }
+        XCTAssertNotNil(push, "the current item must be pushed")
+        XCTAssertNotNil(
+            push?.baseVersion,
+            "an omitted baseVersion is legacy last-write-wins — the server cannot refuse it, "
+            + "so a divergence on this path never becomes a conflict row and never reaches the sheet"
+        )
+    }
+
+    /// Once the push is versioned the server stops merging and writes the value columns
+    /// verbatim, so `completed: nil` — which Go reads as `false` — silently un-completes the
+    /// episode. Step 5d sent exactly that for every unplayed item (`isPlayed ? true : nil`).
+    func test_pro_playbackPush_sendsExplicitCompleted() async {
+        setupCurrentItem(guid: "flag-1", isPlayed: false)
+        let spy = ProOrchestratorSpy()
+        await runSync(spy: spy)
+
+        let calls = await spy.syncPlaybackCalls
+        let push = calls.first { $0.episodeUrl == "https://example.com/flag-1.mp3" }
+        XCTAssertEqual(push?.completed, false,
+                       "a versioned push must state the flag it is asserting, not leave it to the decoder's zero value")
+    }
+
+    /// Per-podcast settings push-then-pull contract (Step 1b).
+    /// When dirty settings exist, push MUST precede pull to prevent stale
+    /// server values from overwriting local edits.
+    /// When no dirty settings exist, push is skipped but pull still runs.
+    func test_pro_pushesPerPodcastSettingsBeforePull() async {
+        let order = await runSyncAndCaptureOrder()
+        let pushIdx = order.firstIndex(of: "pushPodcastSettingsBatch")
+        let pullIdx = order.firstIndex(of: "pullPodcastSettings")
+        
+        // Pull must always be called
+        XCTAssertNotNil(pullIdx, "pullPodcastSettings must be called during sync, got: \(order)")
+        
+        // When push happens, it must be before pull
+        if let pushIdx, let pullIdx {
+            XCTAssertLessThan(pushIdx, pullIdx,
+                              "Per-podcast settings push must precede pull")
+        }
+    }
+
+    // MARK: - Incremental episode-action pull (anti-thrash)
+
+    /// Regression: a routine Pro sync must pull episode actions INCREMENTALLY from
+    /// the persisted cursor — not re-pull the entire history (`since=0`) every time.
+    ///
+    /// The Pro orchestrator was calling `syncEpisodeActions(strategy:)` without
+    /// `force:`, which defaults to `force: true` → `since=0`. On a large library that
+    /// re-fetches + re-applies the full action history every sync, blowing the iOS
+    /// disk-write budget and stranding the sync in a never-completes loop (the
+    /// "feeds not updating" root cause). gPodder already passes `force: false`.
+    func test_pro_routineSync_pullsEpisodeActionsIncrementally_fromCursor() async {
+        // Simulate a prior completed sync that advanced the cursor.
+        let priorCursor = 1_750_000_000
+        UserDefaults.standard.set(priorCursor, forKey: "lastEpisodeActionSync_\(testProfileId)")
+
+        let spy = ProOrchestratorSpy()
+        manager.setSyncClient(spy, deviceId: "test-device")
+        playerManager.setSyncClient(spy, deviceId: "test-device")
+        let orchestrator = ProSyncOrchestrator(client: spy)
+
+        _ = await orchestrator.sync(
+            podcastManager: manager,
+            playerManager: playerManager,
+            downloadManager: downloadManager,
+            settingsManager: settingsManager,
+            conflictStrategy: .serverWins
+        )
+
+        let since = await spy.lastGetEpisodeActionsSince
+        XCTAssertEqual(since, priorCursor,
+                       "Pro routine sync must pull episode actions incrementally from the persisted cursor, not re-pull all history (since=0) every sync")
+    }
+
+    // MARK: - Cancellation
+
+    /// A sync task that is already cancelled at the point it checks
+    /// should not perform the full pipeline.
+    func test_pro_cancelledBeforeStart_doesNotCompleteFullPipeline() async {
+        let spy = ProOrchestratorSpy()
+        manager.setSyncClient(spy, deviceId: "test-device")
+        playerManager.setSyncClient(spy, deviceId: "test-device")
+        let orchestrator = ProSyncOrchestrator(client: spy)
+
+        let syncTask = Task {
+            await orchestrator.sync(
+                podcastManager: manager,
+                playerManager: playerManager,
+                downloadManager: downloadManager,
+                settingsManager: settingsManager,
+                conflictStrategy: .serverWins
+            )
+        }
+        syncTask.cancel()
+        _ = await syncTask.value
+
+        let order = await spy.callOrder
+        // Cancelled task should NOT reach the end of the pipeline
+        // (getQueue = last step). Some early steps may have started
+        // before the cancellation check on @MainActor.
+        XCTAssertFalse(order.contains("getQueue"),
+                       "Cancelled sync must not reach queue sync, but called: \(order)")
+    }
 }
 
 // MARK: - Spy SyncClient for Pro Orchestrator Tests
@@ -306,6 +577,7 @@ actor ProOrchestratorSpy: SyncClient {
     var syncQueueCalled = false
     var getQueueCalled = false
     var getEpisodeActionsCalled = false
+    var lastGetEpisodeActionsSince: Int?
     var uploadEpisodeActionsCalled = false
     var pushSubscriptionsCalled = false
     var pullSubscriptionsCalled = false
@@ -315,6 +587,9 @@ actor ProOrchestratorSpy: SyncClient {
     var lastPatchProfilePayload: [String: AnyCodableValue]?
     private var profileSettingsResponse: ProProfileSettings?
 
+    /// Ordered names of every client call, for step-ordering assertions.
+    var callOrder: [String] = []
+
     func setProfileSettingsResponse(_ response: ProProfileSettings) {
         profileSettingsResponse = response
     }
@@ -322,23 +597,48 @@ actor ProOrchestratorSpy: SyncClient {
     // MARK: - Global Profile Settings
 
     func patchProfileSettings(profileName: String, payload: [String: AnyCodableValue]) async throws {
+        callOrder.append("patchProfileSettings")
         patchProfileSettingsCalled = true
         lastPatchProfilePayload = payload
     }
 
     func getProfileSettings(profileName: String) async throws -> ProProfileSettings? {
+        callOrder.append("getProfileSettings")
         getProfileSettingsCalled = true
         return profileSettingsResponse
+    }
+
+    // MARK: - Per-Podcast Settings
+
+    func pushPodcastSettingsBatch(
+        profileName: String,
+        items: [(podcastUrl: String, payload: [String: AnyCodableValue])]
+    ) async throws {
+        callOrder.append("pushPodcastSettingsBatch")
+    }
+
+    func pullPodcastSettings(profileName: String, since: Date?) async throws -> [ProPodcastSetting] {
+        callOrder.append("pullPodcastSettings")
+        return []
+    }
+
+    // MARK: - Playback
+
+    func getCurrentPlayback() async throws -> ProPlaybackState? {
+        callOrder.append("getCurrentPlayback")
+        return nil
     }
 
     // MARK: - Queue
 
     func syncQueue(items: [QueueSyncItem]) async throws -> QueueSyncResult {
+        callOrder.append("syncQueue")
         syncQueueCalled = true
         return QueueSyncResult(items: items, droppedItems: [])
     }
 
     func getQueue() async throws -> [QueueSyncItem] {
+        callOrder.append("getQueue")
         getQueueCalled = true
         return []
     }
@@ -346,11 +646,13 @@ actor ProOrchestratorSpy: SyncClient {
     // MARK: - Subscriptions
 
     func pushSubscriptions(add: [String], remove: [String], deviceId: String) async throws -> [URLRewrite] {
+        callOrder.append("pushSubscriptions")
         pushSubscriptionsCalled = true
         return []
     }
 
     func pullSubscriptionChanges(deviceId: String, since: Int) async throws -> SubscriptionDelta {
+        callOrder.append("pullSubscriptionChanges")
         pullSubscriptionsCalled = true
         return SubscriptionDelta(add: [], remove: [], timestamp: Int(Date().timeIntervalSince1970))
     }
@@ -358,12 +660,39 @@ actor ProOrchestratorSpy: SyncClient {
     // MARK: - Episode Actions
 
     func uploadEpisodeActions(_ actions: [EpisodeAction]) async throws -> [URLRewrite] {
+        callOrder.append("uploadEpisodeActions")
         uploadEpisodeActionsCalled = true
         return []
     }
 
     func getEpisodeActions(since: Int) async throws -> [EpisodeAction] {
+        callOrder.append("getEpisodeActions")
         getEpisodeActionsCalled = true
+        lastGetEpisodeActionsSince = since
         return []
+    }
+
+    // MARK: - Playback push (Fix C observability)
+
+    /// Records every now-playing/completed push so tests can assert a finished
+    /// current item is NOT re-asserted as nowPlaying:true (resurrection).
+    var syncPlaybackCalls: [(episodeUrl: String, nowPlaying: Bool?, completed: Bool?, baseVersion: Int64?)] = []
+
+    func syncPlayback(
+        podcastUrl: String,
+        episodeUrl: String,
+        episodeGuid: String?,
+        positionSec: Double,
+        durationSec: Double?,
+        nowPlaying: Bool?,
+        completed: Bool?,
+        deviceId: String?,
+        clientUpdatedAt: Date?,
+        baseVersion: Int64?
+    ) async throws -> ProPlaybackSyncResponse? {
+        callOrder.append("syncPlayback")
+        syncPlaybackCalls.append((episodeUrl: episodeUrl, nowPlaying: nowPlaying,
+                                  completed: completed, baseVersion: baseVersion))
+        return nil
     }
 }

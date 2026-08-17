@@ -14,6 +14,16 @@ actor RSSService {
         self.session = session
     }
     
+    /// Cached conditional request metadata per feed URL.
+    /// Stores ETag and Last-Modified values from successful responses
+    /// to enable 304 Not Modified on subsequent fetches.
+    private var conditionalCache: [String: ConditionalCacheEntry] = [:]
+
+    struct ConditionalCacheEntry {
+        let etag: String?
+        let lastModified: String?
+    }
+
     /// Parse raw RSS feed data without network fetch. Useful for testing.
     static func parseFeedData(_ data: Data) throws -> (podcast: ParsedPodcast, episodes: [ParsedEpisode]) {
         let parser = RSSXMLParser(data: data)
@@ -21,10 +31,11 @@ actor RSSService {
     }
     
     /// Fetch and parse an RSS feed, returning podcast metadata and episodes.
+    /// Returns `nil` when the server responds with 304 Not Modified (feed unchanged).
     func fetchFeed(
         url feedUrl: String,
         authHeader: String? = nil
-    ) async throws -> (podcast: ParsedPodcast, episodes: [ParsedEpisode]) {
+    ) async throws -> (podcast: ParsedPodcast, episodes: [ParsedEpisode])? {
         let sanitizedUrl = URLSanitizer.sanitize(feedUrl)
         guard let url = URL(string: sanitizedUrl) else {
             throw RSSError.invalidURL
@@ -35,6 +46,16 @@ actor RSSService {
         if let authHeader {
             request.setValue(authHeader, forHTTPHeaderField: "Authorization")
         }
+
+        // Conditional request headers — skip re-download if feed is unchanged
+        if let cached = conditionalCache[sanitizedUrl] {
+            if let etag = cached.etag {
+                request.setValue(etag, forHTTPHeaderField: "If-None-Match")
+            }
+            if let lastModified = cached.lastModified {
+                request.setValue(lastModified, forHTTPHeaderField: "If-Modified-Since")
+            }
+        }
         
         // Use a delegate that handles auth challenges and re-attaches
         // the Authorization header on redirects (URLSession strips it by default)
@@ -42,11 +63,26 @@ actor RSSService {
         let (data, response) = try await session.data(for: request, delegate: delegate)
         
         if let http = response as? HTTPURLResponse {
+            // 304 Not Modified — feed hasn't changed since last fetch
+            if http.statusCode == 304 {
+                return nil
+            }
+
             guard (200...299).contains(http.statusCode) else {
                 if http.statusCode == 401 || http.statusCode == 403 {
                     throw RSSError.authRequired
                 }
                 throw RSSError.httpError(http.statusCode)
+            }
+
+            // Cache conditional headers for next request
+            let etag = http.value(forHTTPHeaderField: "ETag")
+            let lastModified = http.value(forHTTPHeaderField: "Last-Modified")
+            if etag != nil || lastModified != nil {
+                conditionalCache[sanitizedUrl] = ConditionalCacheEntry(
+                    etag: etag,
+                    lastModified: lastModified
+                )
             }
         }
         
@@ -169,7 +205,9 @@ struct ParsedEpisode: Sendable {
     var link: String?
     var chaptersUrl: String?
     var transcriptUrl: String?
-    
+    /// MIME type from `<podcast:transcript type="...">`, belonging to `transcriptUrl`.
+    var transcriptType: String?
+
     // Podlove Simple Chapters (inline XML)
     var inlineChapters: [InlineChapter]?
     
@@ -180,7 +218,36 @@ struct ParsedEpisode: Sendable {
     var episodeDisplay: String?
     var episodeType: String?
     var explicit: Bool?
+    
+    /// Position of this episode in the feed's document order (0-based).
+    var feedItemIndex: Int?
 }
+
+// MARK: - Feed Fetching Abstraction
+
+/// Abstraction over RSS feed fetching.
+///
+/// Lets callers (e.g. `PodcastManager`) be unit-tested with a fake that returns
+/// canned feeds — and that can observe concurrency — without hitting the network.
+/// `RSSService` is the production conformer.
+protocol FeedFetching: Sendable {
+    func fetchFeed(
+        url feedUrl: String,
+        authHeader: String?
+    ) async throws -> (podcast: ParsedPodcast, episodes: [ParsedEpisode])?
+}
+
+extension FeedFetching {
+    /// Convenience for call sites that don't pass auth (the protocol requirement
+    /// has no default argument, unlike `RSSService.fetchFeed`).
+    func fetchFeed(
+        url feedUrl: String
+    ) async throws -> (podcast: ParsedPodcast, episodes: [ParsedEpisode])? {
+        try await fetchFeed(url: feedUrl, authHeader: nil)
+    }
+}
+
+extension RSSService: FeedFetching {}
 
 // MARK: - XML Parser
 
@@ -200,6 +267,9 @@ private final class RSSXMLParser: NSObject, XMLParserDelegate {
     private var isInCategory = false  // tracking itunes:category nesting
     private var isInPSCChapters = false  // tracking psc:chapters context
     private var currentInlineChapters: [InlineChapter] = []
+    
+    /// Incrementing counter for feed document order (feedItemIndex).
+    private var itemCounter = 0
     
     /// Depth counter for skipping namespaced elements whose local names collide with
     /// core RSS 2.0 names (e.g. Acast's <podaccess:item> and <podaccess:channel>).
@@ -300,6 +370,9 @@ private final class RSSXMLParser: NSObject, XMLParserDelegate {
                 let existingPriority = transcriptPriority(currentTranscriptType ?? "")
                 if currentEpisode?.transcriptUrl == nil || newPriority > existingPriority {
                     currentEpisode?.transcriptUrl = url
+                    // Carry the winning tag's type through — it is the only reliable
+                    // format signal, since transcript URLs often lack an extension.
+                    currentEpisode?.transcriptType = type.isEmpty ? nil : type
                     currentTranscriptType = type
                 }
             }
@@ -457,6 +530,8 @@ private final class RSSXMLParser: NSObject, XMLParserDelegate {
                     if episode.guid.isEmpty {
                         episode.guid = episode.audioUrl ?? UUID().uuidString
                     }
+                    episode.feedItemIndex = itemCounter
+                    itemCounter += 1
                     episodes.append(episode)
                 }
                 currentEpisode = nil
@@ -527,27 +602,9 @@ private final class RSSXMLParser: NSObject, XMLParserDelegate {
         return lower == "yes" || lower == "true" || lower == "explicit"
     }
     
-    /// Parse RSS date strings (RFC 822 / RFC 2822)
+    /// Parse RSS date strings — delegates to FeedDateParser for comprehensive format support.
     private func parseRSSDate(_ string: String) -> Date? {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        
-        // Try multiple common RSS date formats
-        let formats = [
-            "EEE, dd MMM yyyy HH:mm:ss zzz",
-            "EEE, dd MMM yyyy HH:mm:ss Z",
-            "dd MMM yyyy HH:mm:ss zzz",
-            "yyyy-MM-dd'T'HH:mm:ssZ",
-        ]
-        
-        for format in formats {
-            formatter.dateFormat = format
-            if let date = formatter.date(from: string) {
-                return date
-            }
-        }
-        
-        return ISO8601DateFormatter().date(from: string)
+        FeedDateParser.parse(string)
     }
     
     /// Parse ISO 8601 dates with optional fractional seconds.
@@ -560,8 +617,8 @@ private final class RSSXMLParser: NSObject, XMLParserDelegate {
         if let date = fractional.date(from: string) {
             return date
         }
-        // Fall back to standard ISO 8601
-        return ISO8601DateFormatter().date(from: string)
+        // Fall back to standard ISO 8601, then FeedDateParser for edge cases
+        return ISO8601DateFormatter().date(from: string) ?? FeedDateParser.parse(string)
     }
     
     /// Parse iTunes duration strings: "HH:MM:SS", "MM:SS", or plain seconds
@@ -615,6 +672,7 @@ enum RSSError: LocalizedError {
     case authRequired
     case httpError(Int)
     case parseFailed(String)
+    case emptyFeed
     
     var errorDescription: String? {
         switch self {
@@ -622,6 +680,7 @@ enum RSSError: LocalizedError {
         case .authRequired: return "Feed requires authentication"
         case .httpError(let code): return "Feed request failed (\(code))"
         case .parseFailed(let msg): return "Failed to parse feed: \(msg)"
+        case .emptyFeed: return "Feed returned no content"
         }
     }
 }

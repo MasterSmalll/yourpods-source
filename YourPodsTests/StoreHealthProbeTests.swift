@@ -177,15 +177,19 @@ final class StoreHealthProbeTests: XCTestCase {
         let storeURL = tempDir.appendingPathComponent("default.store")
         let schema = Schema([Podcast.self, Episode.self])
         let config = ModelConfiguration(schema: schema, url: storeURL)
-        let container = try ModelContainer(for: schema, configurations: [config])
         
-        // Write something to ensure the store file exists with valid content
-        let ctx = container.mainContext
-        let probe = Podcast(url: "__preflight_test__", title: "Test")
-        ctx.insert(probe)
-        try ctx.save()
-        ctx.delete(probe)
-        try ctx.save()
+        // Release the container before preflight — matches production flow
+        // where preflightCheck runs before ModelContainer is created.
+        // preflightCheck deletes the SHM file; an active container would break.
+        try autoreleasepool {
+            let container = try ModelContainer(for: schema, configurations: [config])
+            let ctx = container.mainContext
+            let probe = Podcast(url: "__preflight_test__", title: "Test")
+            ctx.insert(probe)
+            try ctx.save()
+            ctx.delete(probe)
+            try ctx.save()
+        }
         
         // Act: preflight check on a healthy store
         let isHealthy = StoreHealthProbe.preflightCheck(storeURL: storeURL)
@@ -272,24 +276,22 @@ final class StoreHealthProbeTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: tempDir) }
         
         let storeURL = tempDir.appendingPathComponent("default.store")
-        
-        // Create a valid store and leave a WAL file
         let schema = Schema([Podcast.self, Episode.self])
         let config = ModelConfiguration(schema: schema, url: storeURL)
-        let container = try ModelContainer(for: schema, configurations: [config])
-        let ctx = container.mainContext
-        let podcast = Podcast(url: "__wal_preserve_test__", title: "WAL Preserve")
-        ctx.insert(podcast)
-        try ctx.save()
         
-        // Create WAL and SHM files (may already exist from save)
+        // Release container before preflight — matches production flow.
+        try autoreleasepool {
+            let container = try ModelContainer(for: schema, configurations: [config])
+            let ctx = container.mainContext
+            let podcast = Podcast(url: "__wal_preserve_test__", title: "WAL Preserve")
+            ctx.insert(podcast)
+            try ctx.save()
+        }
+        
+        // Ensure WAL file exists (create if save didn't leave one)
         let walPath = storeURL.path + "-wal"
-        let shmPath = storeURL.path + "-shm"
         if !FileManager.default.fileExists(atPath: walPath) {
             FileManager.default.createFile(atPath: walPath, contents: Data(repeating: 0x00, count: 32))
-        }
-        if !FileManager.default.fileExists(atPath: shmPath) {
-            FileManager.default.createFile(atPath: shmPath, contents: Data(repeating: 0x00, count: 32))
         }
         
         // Act: run preflight
@@ -298,13 +300,9 @@ final class StoreHealthProbeTests: XCTestCase {
         // Assert: store is healthy
         XCTAssertTrue(isHealthy, "Healthy store must pass preflight")
         
-        // Assert: WAL and SHM files must NOT be deleted
-        // Deleting them between preflight and ModelContainer creation was
-        // the root cause of the pread() crash in build 37.
-        // (Note: the WAL file may no longer exist if the PASSIVE checkpoint
-        // succeeded and SQLite decided to remove it on close. We only assert
-        // that the preflight code itself does not force-delete them.
-        // The key protection is the absence of explicit removeItem calls.)
+        // Assert: WAL file must NOT be deleted — it may contain committed transactions.
+        // (Note: the WAL may be truncated to 0 bytes by the TRUNCATE checkpoint,
+        // but the file itself must not be force-deleted.)
     }
     
     // MARK: - Raw Write Probe (replaces ModelContext.save probe)
@@ -366,10 +364,13 @@ final class StoreHealthProbeTests: XCTestCase {
         XCTAssertFalse(writeOk, "Raw write probe must fail on a corrupted store")
     }
     
-    /// Preflight must NOT delete WAL/SHM files after a successful checkpoint.
-    /// Deleting these files between preflight and ModelContainer creation
-    /// can leave the database in an inconsistent state for Core Data,
-    /// which is the root cause of the pread() crash.
+    /// Preflight must NOT delete the WAL file after a successful checkpoint.
+    /// Deleting the WAL file between preflight and ModelContainer creation
+    /// can leave the database in an inconsistent state for Core Data.
+    ///
+    /// The SHM file IS intentionally deleted before the preflight opens the
+    /// database (to prevent pread() crashes on corrupt SHM), then SQLite
+    /// recreates it. After preflight, the SHM should exist (rebuilt by SQLite).
     func test_preflightCheck_doesNotDeleteWalFiles() throws {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
@@ -377,41 +378,98 @@ final class StoreHealthProbeTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: tempDir) }
         
         let storeURL = tempDir.appendingPathComponent("default.store")
-        
-        // Create a valid store
         let schema = Schema([Podcast.self, Episode.self])
         let config = ModelConfiguration(schema: schema, url: storeURL)
-        let container = try ModelContainer(for: schema, configurations: [config])
-        let ctx = container.mainContext
-        let podcast = Podcast(url: "__no_delete_wal_test__", title: "No WAL Delete")
-        ctx.insert(podcast)
-        try ctx.save()
         
+        // Release container before preflight — matches production flow.
+        try autoreleasepool {
+            let container = try ModelContainer(for: schema, configurations: [config])
+            let ctx = container.mainContext
+            let podcast = Podcast(url: "__no_delete_wal_test__", title: "No WAL Delete")
+            ctx.insert(podcast)
+            try ctx.save()
+        }
+        
+        // Ensure WAL file exists (create if save didn't leave one)
         let walPath = storeURL.path + "-wal"
-        let shmPath = storeURL.path + "-shm"
-        
-        // Ensure WAL and SHM files exist (create if save didn't leave them)
         if !FileManager.default.fileExists(atPath: walPath) {
             FileManager.default.createFile(atPath: walPath, contents: Data(repeating: 0x00, count: 32))
         }
-        if !FileManager.default.fileExists(atPath: shmPath) {
-            FileManager.default.createFile(atPath: shmPath, contents: Data(repeating: 0x00, count: 32))
-        }
         
         XCTAssertTrue(FileManager.default.fileExists(atPath: walPath), "WAL must exist before preflight")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: shmPath), "SHM must exist before preflight")
         
         // Act
         let isHealthy = StoreHealthProbe.preflightCheck(storeURL: storeURL)
         XCTAssertTrue(isHealthy, "Healthy store must pass preflight")
         
-        // WAL and SHM must NOT be deleted — SQLite manages its own WAL lifecycle
+        // WAL file must NOT be deleted — it may contain committed transactions
         XCTAssertTrue(FileManager.default.fileExists(atPath: walPath),
                        "WAL file must NOT be deleted — deleting it between preflight and ModelContainer causes pread() crashes")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: shmPath),
-                       "SHM file must NOT be deleted — SQLite manages its own WAL lifecycle")
     }
     
+    // MARK: - Corrupt SHM Recovery (pread crash loop fix)
+    
+    /// When the SHM file is corrupt (e.g., from a previous crash during save),
+    /// preflightCheck must NOT crash with pread(). It should delete the SHM
+    /// before opening the database, allowing SQLite to rebuild the WAL index.
+    ///
+    /// Root cause: After a guarded_pwrite_np signal crash during save,
+    /// the SHM file is left in a corrupt state. On next launch, preflightCheck
+    /// opens the database read-only, SQLite reads the corrupt SHM via pread()
+    /// in walIndexReadHdr, and crashes with a signal — creating an infinite
+    /// crash loop that only store deletion can break.
+    func test_preflightCheck_corruptSHM_recoversGracefully() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        
+        let storeURL = tempDir.appendingPathComponent("default.store")
+        let schema = Schema([Podcast.self, Episode.self])
+        let config = ModelConfiguration(schema: schema, url: storeURL)
+        
+        // Release container before corrupting SHM and running preflight.
+        try autoreleasepool {
+            let container = try ModelContainer(for: schema, configurations: [config])
+            let ctx = container.mainContext
+            let podcast = Podcast(url: "__shm_corrupt_test__", title: "SHM Corrupt")
+            ctx.insert(podcast)
+            try ctx.save()
+        }
+        
+        // Corrupt the SHM file with garbage data — simulates the state left
+        // after a guarded_pwrite_np crash during save.
+        let shmPath = storeURL.path + "-shm"
+        let shmURL = URL(fileURLWithPath: shmPath)
+        let corruptSHM = Data(repeating: 0xDE, count: 32768) // 32KB of garbage
+        try corruptSHM.write(to: shmURL)
+        
+        // Verify corrupt SHM is in place
+        let shmBefore = try Data(contentsOf: shmURL)
+        XCTAssertEqual(shmBefore.count, 32768, "Corrupt SHM must be in place before test")
+        XCTAssertEqual(shmBefore[0], 0xDE, "SHM must contain our garbage data")
+        
+        // Act: preflightCheck must NOT crash — it should delete the corrupt SHM
+        // and let SQLite rebuild the WAL index.
+        let isHealthy = StoreHealthProbe.preflightCheck(storeURL: storeURL)
+        
+        // The store data is valid — only the SHM was corrupt.
+        // preflightCheck should return true (healthy) after recovering.
+        XCTAssertTrue(isHealthy,
+                      "Healthy store with corrupt SHM must pass preflight after SHM recovery")
+        
+        // Verify the corrupt SHM was replaced (not the same garbage data)
+        if FileManager.default.fileExists(atPath: shmPath) {
+            let shmAfter = try Data(contentsOf: shmURL)
+            // The recreated SHM should NOT be our garbage data
+            let isStillCorrupt = shmAfter.count == 32768 && shmAfter[0] == 0xDE
+            XCTAssertFalse(isStillCorrupt,
+                           "SHM must be rebuilt by SQLite, not left as corrupt garbage")
+        }
+        // If SHM doesn't exist after preflight, that's also acceptable —
+        // SQLite may have cleaned it up during close.
+    }
+
     /// A WAL file with an invalid header that can't be checkpointed
     /// must cause preflight to fail (preventing the pread crash later).
     func test_preflightCheck_invalidWalHeader_returnsFalse() throws {

@@ -8,12 +8,19 @@ import SwiftData
 /// child tasks that accessed SwiftData's `ModelContext` off the main actor.
 /// The fix separates network I/O (concurrent) from SwiftData mutations (sequential).
 ///
-/// These tests verify:
-/// 1. `applyFeedResult(_:to:)` correctly creates new episodes on the main actor
-/// 2. `applyFeedResult(_:to:)` updates existing podcast metadata
-/// 3. `applyFeedResult(_:to:)` skips duplicate episodes (idempotent)
-/// 4. `applyFeedResult(_:to:)` updates existing episodes with new metadata
-/// 5. Feed URL migration via `itunes:new-feed-url` works in the extracted method
+/// Retargeted onto the live path (`syncStore.applyFeedResults` +
+/// `reconcileAfterBackgroundWrites()`) — `PodcastManager.applyFeedResult` had
+/// zero production callers and has been deleted. See `LivePathChurnTests` for
+/// why `SyncStore` writes on its own background `ModelContext` and why reads
+/// for newly-inserted episodes go through `manager.episodes(withGuids:)`
+/// rather than relationship traversal.
+///
+/// These tests verify, on the live path:
+/// 1. New episodes are created on `SyncStore`'s background actor
+/// 2. Existing podcast metadata is updated
+/// 3. Duplicate episodes are skipped (idempotent)
+/// 4. Existing episodes are updated with new metadata
+/// 5. Feed URL migration via `itunes:new-feed-url` works
 @MainActor
 final class RefreshAllFeedsConcurrencyTests: XCTestCase {
     
@@ -108,11 +115,11 @@ final class RefreshAllFeedsConcurrencyTests: XCTestCase {
         )
     }
     
-    // MARK: - Test: applyFeedResult creates new episodes
+    // MARK: - Test: applyFeedResults creates new episodes
     
-    func test_applyFeedResult_createsNewEpisodes() {
+    func test_applyFeedResults_createsNewEpisodes() async {
         let podcast = insertPodcast(url: "https://example.com/feed1", title: "My Podcast")
-        
+
         let parsedEpisodes = [
             ParsedEpisode(
                 guid: "new-ep-1",
@@ -129,43 +136,48 @@ final class RefreshAllFeedsConcurrencyTests: XCTestCase {
                 durationSeconds: 2400
             )
         ]
-        
+
         let result = makeFetchResult(
             url: "https://example.com/feed1",
             episodes: parsedEpisodes
         )
-        
-        let newEpisodes = manager.applyFeedResult(result, to: podcast)
-        
-        XCTAssertEqual(newEpisodes.count, 2, "Should create 2 new episodes")
-        XCTAssertTrue(newEpisodes.contains(where: { $0.guid == "new-ep-1" }))
-        XCTAssertTrue(newEpisodes.contains(where: { $0.guid == "new-ep-2" }))
-        XCTAssertEqual(podcast.episodes.count, 2)
+
+        let outcome = await manager.syncStore.applyFeedResults([result])
+        manager.reconcileAfterBackgroundWrites()
+
+        XCTAssertEqual(outcome.newEpisodeGuids.count, 2, "Should create 2 new episodes")
+        XCTAssertTrue(outcome.newEpisodeGuids.contains("new-ep-1"))
+        XCTAssertTrue(outcome.newEpisodeGuids.contains("new-ep-2"))
+        let found = manager.episodes(withGuids: outcome.newEpisodeGuids)
+        XCTAssertEqual(found.count, 2)
+        XCTAssertTrue(found.allSatisfy { $0.podcast?.url == podcast.url },
+                      "New episodes must be attached to the right podcast")
     }
     
-    // MARK: - Test: applyFeedResult updates podcast metadata
+    // MARK: - Test: applyFeedResults updates podcast metadata
     
-    func test_applyFeedResult_updatesPodcastMetadata() {
+    func test_applyFeedResults_updatesPodcastMetadata() async {
         let podcast = insertPodcast(url: "https://example.com/feed1", title: "Old Title")
-        
+
         let result = makeFetchResult(
             url: "https://example.com/feed1",
             parsedTitle: "Brand New Title",
             parsedDescription: "Brand new description"
         )
-        
-        _ = manager.applyFeedResult(result, to: podcast)
-        
+
+        _ = await manager.syncStore.applyFeedResults([result])
+        manager.reconcileAfterBackgroundWrites()
+
         XCTAssertEqual(podcast.title, "Brand New Title")
         XCTAssertEqual(podcast.podcastDescription, "Brand new description")
     }
     
-    // MARK: - Test: applyFeedResult skips duplicates
+    // MARK: - Test: applyFeedResults skips duplicates
     
-    func test_applyFeedResult_skipsDuplicateEpisodes() {
+    func test_applyFeedResults_skipsDuplicateEpisodes() async {
         let podcast = insertPodcast(url: "https://example.com/feed1", title: "My Podcast", episodeCount: 2)
         let existingGuids = podcast.episodes.map(\.guid)
-        
+
         // Create parsed episodes that overlap with existing ones
         let parsedEpisodes = existingGuids.map { guid in
             ParsedEpisode(
@@ -180,24 +192,26 @@ final class RefreshAllFeedsConcurrencyTests: XCTestCase {
                 audioUrl: "https://cdn.example.com/new.mp3"
             )
         ]
-        
+
         let result = makeFetchResult(
             url: "https://example.com/feed1",
             episodes: parsedEpisodes
         )
-        
-        let newEpisodes = manager.applyFeedResult(result, to: podcast)
-        
-        XCTAssertEqual(newEpisodes.count, 1, "Only the non-duplicate should be new")
-        XCTAssertEqual(newEpisodes.first?.guid, "brand-new-ep")
-        XCTAssertEqual(podcast.episodes.count, 3, "2 existing + 1 new")
+
+        let outcome = await manager.syncStore.applyFeedResults([result])
+        manager.reconcileAfterBackgroundWrites()
+
+        XCTAssertEqual(outcome.newEpisodeGuids.count, 1, "Only the non-duplicate should be new")
+        XCTAssertEqual(outcome.newEpisodeGuids.first, "brand-new-ep")
+        XCTAssertEqual(manager.episodes(withGuids: existingGuids + ["brand-new-ep"]).count, 3,
+                       "2 existing + 1 new")
     }
     
-    // MARK: - Test: applyFeedResult updates existing episode metadata
+    // MARK: - Test: applyFeedResults updates existing episode metadata
     
-    func test_applyFeedResult_updatesExistingEpisodeMetadata() {
+    func test_applyFeedResults_updatesExistingEpisodeMetadata() async {
         let podcast = insertPodcast(url: "https://example.com/feed1", title: "My Podcast")
-        
+
         // Create an existing episode
         let existingEp = Episode(
             guid: "existing-ep",
@@ -206,7 +220,7 @@ final class RefreshAllFeedsConcurrencyTests: XCTestCase {
         )
         context.insert(existingEp)
         try! context.save()
-        
+
         // Feed returns updated metadata for the same episode
         let parsedEpisodes = [
             ParsedEpisode(
@@ -217,18 +231,20 @@ final class RefreshAllFeedsConcurrencyTests: XCTestCase {
                 episodeType: "full"
             )
         ]
-        
+
         let result = makeFetchResult(
             url: "https://example.com/feed1",
             episodes: parsedEpisodes
         )
-        
-        let newEpisodes = manager.applyFeedResult(result, to: podcast)
-        
-        XCTAssertEqual(newEpisodes.count, 0, "Existing episode should NOT be counted as new")
-        XCTAssertEqual(existingEp.seasonNumber, 2, "Season number should be updated")
-        XCTAssertEqual(existingEp.episodeNumber, 5, "Episode number should be updated")
-        XCTAssertEqual(existingEp.episodeType, "full", "Episode type should be updated")
+
+        let outcome = await manager.syncStore.applyFeedResults([result])
+        manager.reconcileAfterBackgroundWrites()
+
+        XCTAssertEqual(outcome.newEpisodeGuids.count, 0, "Existing episode should NOT be counted as new")
+        let updated = manager.episodes(withGuids: ["existing-ep"]).first
+        XCTAssertEqual(updated?.seasonNumber, 2, "Season number should be updated")
+        XCTAssertEqual(updated?.episodeNumber, 5, "Episode number should be updated")
+        XCTAssertEqual(updated?.episodeType, "full", "Episode type should be updated")
     }
     
     // MARK: - Test: FeedFetchResult is Sendable
@@ -256,10 +272,10 @@ final class RefreshAllFeedsConcurrencyTests: XCTestCase {
     
     // MARK: - Test: Multiple feeds applied sequentially
     
-    func test_applyFeedResults_multipleFeeds_allEpisodesCreated() {
-        let podcast1 = insertPodcast(url: "https://example.com/feed1", title: "Podcast 1")
-        let podcast2 = insertPodcast(url: "https://example.com/feed2", title: "Podcast 2")
-        
+    func test_applyFeedResults_multipleFeeds_allEpisodesCreated() async {
+        insertPodcast(url: "https://example.com/feed1", title: "Podcast 1")
+        insertPodcast(url: "https://example.com/feed2", title: "Podcast 2")
+
         let result1 = makeFetchResult(
             url: "https://example.com/feed1",
             episodes: [
@@ -275,33 +291,48 @@ final class RefreshAllFeedsConcurrencyTests: XCTestCase {
                 ParsedEpisode(guid: "p2-ep3", title: "P2 Ep3", audioUrl: "https://cdn.example.com/p2e3.mp3")
             ]
         )
-        
-        let new1 = manager.applyFeedResult(result1, to: podcast1)
-        let new2 = manager.applyFeedResult(result2, to: podcast2)
-        
-        XCTAssertEqual(new1.count, 2, "Feed 1 should create 2 episodes")
-        XCTAssertEqual(new2.count, 3, "Feed 2 should create 3 episodes")
-        XCTAssertEqual(podcast1.episodes.count, 2)
-        XCTAssertEqual(podcast2.episodes.count, 3)
+
+        // Both feeds in one call — matches how refreshAllFeeds batches Phase 2.
+        let outcome = await manager.syncStore.applyFeedResults([result1, result2])
+        manager.reconcileAfterBackgroundWrites()
+
+        let p1Guids = ["p1-ep1", "p1-ep2"]
+        let p2Guids = ["p2-ep1", "p2-ep2", "p2-ep3"]
+        XCTAssertEqual(outcome.newEpisodeGuids.filter { p1Guids.contains($0) }.count, 2,
+                       "Feed 1 should create 2 episodes")
+        XCTAssertEqual(outcome.newEpisodeGuids.filter { p2Guids.contains($0) }.count, 3,
+                       "Feed 2 should create 3 episodes")
+        let p1Episodes = manager.episodes(withGuids: p1Guids)
+        let p2Episodes = manager.episodes(withGuids: p2Guids)
+        XCTAssertEqual(p1Episodes.count, 2)
+        XCTAssertEqual(p2Episodes.count, 3)
+        XCTAssertTrue(p1Episodes.allSatisfy { $0.podcast?.url == "https://example.com/feed1" },
+                      "Feed 1's episodes must attach to podcast 1, not wherever the routing loop happens to land them")
+        XCTAssertTrue(p2Episodes.allSatisfy { $0.podcast?.url == "https://example.com/feed2" },
+                      "Feed 2's episodes must attach to podcast 2, not wherever the routing loop happens to land them")
     }
     
-    // MARK: - Test: Feed URL migration in applyFeedResult
+    // MARK: - Test: Feed URL migration in applyFeedResults
     
-    func test_applyFeedResult_handlesFeedUrlMigration() {
+    func test_applyFeedResults_handlesFeedUrlMigration() async {
         let podcast = insertPodcast(url: "https://old.example.com/feed", title: "My Podcast")
-        
+
         var parsed = ParsedPodcast(title: "My Podcast")
         parsed.newFeedUrl = "https://new.example.com/feed"
-        
+
         let result = FeedFetchResult(
             url: "https://old.example.com/feed",
             authHeader: nil,
             parsed: parsed,
             episodes: []
         )
-        
-        _ = manager.applyFeedResult(result, to: podcast)
-        
+
+        let outcome = await manager.syncStore.applyFeedResults([result])
+        manager.reconcileAfterBackgroundWrites()
+
+        XCTAssertEqual(outcome.urlMigrations.count, 1)
+        XCTAssertEqual(outcome.urlMigrations.first?.oldUrl, "https://old.example.com/feed")
+        XCTAssertEqual(outcome.urlMigrations.first?.newUrl, "https://new.example.com/feed")
         XCTAssertEqual(podcast.url, "https://new.example.com/feed",
                        "Podcast URL should be updated to new feed URL")
         XCTAssertNil(podcast.newFeedUrl,

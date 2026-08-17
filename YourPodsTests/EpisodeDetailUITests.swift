@@ -229,7 +229,21 @@ final class EpisodeDetailPresentationTests: XCTestCase {
 /// The button must always resolve a valid podcastUrl — even when the Episode's
 /// podcast relationship is nil (SwiftData lazy loading edge case).
 final class EpisodeDetailSheetTests: XCTestCase {
-    
+
+    override func setUp() {
+        super.setUp()
+        UserDefaults.standard.removeObject(forKey: "savedQueue")
+        UserDefaults.standard.removeObject(forKey: "savedCurrentItem")
+        UserDefaults.standard.removeObject(forKey: "savedCurrentPosition")
+    }
+
+    override func tearDown() {
+        UserDefaults.standard.removeObject(forKey: "savedQueue")
+        UserDefaults.standard.removeObject(forKey: "savedCurrentItem")
+        UserDefaults.standard.removeObject(forKey: "savedCurrentPosition")
+        super.tearDown()
+    }
+
     // MARK: - resolvePodcastUrl Tests
     
     func test_resolvePodcastUrl_returnsEpisodePodcastUrl_whenAvailable() {
@@ -311,14 +325,13 @@ final class EpisodeDetailSheetTests: XCTestCase {
                        "Mark-as-played when nothing is playing should go through PodcastManager only")
     }
     
-    // MARK: - Integration: markCurrentEpisodeAsPlayed stops playback
-    
+    // MARK: - Integration: markCurrentEpisodeAsPlayed (empty queue stops, non-empty advances)
+
     @MainActor
-    func test_markCurrentEpisodeAsPlayed_stopsPlaybackAndClearsCurrentItem() {
-        // Given: a playing episode with a next item in the queue
+    func test_markCurrentEpisodeAsPlayed_stopsPlayback_whenQueueEmpty() {
+        // Given: a playing episode and NOTHING queued
         let audioManager = AudioManager()
         let playerManager = PlayerManager(audioManager: audioManager)
-        
         let currentItem = QueueItem(
             id: "ep-playing", title: "Currently Playing", podcastTitle: "Pod",
             audioUrl: "https://example.com/ep1.mp3", artworkUrl: nil,
@@ -327,15 +340,47 @@ final class EpisodeDetailSheetTests: XCTestCase {
         )
         audioManager.currentItem = currentItem
         audioManager.testableSetPlaybackState(position: 1200, duration: 3600)
-        
-        // When: mark as played (simulating what EpisodeDetailSheet should do)
+        audioManager.isPlaying = true
+
+        // When
         playerManager.markCurrentEpisodeAsPlayed()
-        
-        // Then: playback should stop and the played episode should be gone
+
+        // Then: nothing to advance to — playback stops
         XCTAssertNil(audioManager.currentItem,
-                     "Current item should be nil after marking as played — playback must stop")
-        XCTAssertFalse(audioManager.isPlaying,
-                       "Playback should be stopped after marking current episode as played")
+                     "With an empty queue, mark-as-played stops playback")
+        XCTAssertFalse(audioManager.isPlaying)
+    }
+
+    @MainActor
+    func test_markCurrentEpisodeAsPlayed_advances_whenNextEpisodeQueued() async {
+        // Given: a playing episode WITH a next item queued (what the sheet's
+        // 'Played' button promises: mark played and keep the queue going)
+        let audioManager = AudioManager()
+        let playerManager = PlayerManager(audioManager: audioManager)
+        let currentItem = QueueItem(
+            id: "ep-playing", title: "Currently Playing", podcastTitle: "Pod",
+            audioUrl: "https://example.com/ep1.mp3", artworkUrl: nil,
+            durationSeconds: 3600, positionSeconds: 1200,
+            podcastUrl: "https://example.com/feed", pubDate: nil
+        )
+        let nextItem = QueueItem(
+            id: "ep-next", title: "Up Next", podcastTitle: "Pod",
+            audioUrl: "https://example.com/ep2.mp3", artworkUrl: nil,
+            durationSeconds: 1800, positionSeconds: 0,
+            podcastUrl: "https://example.com/feed", pubDate: nil
+        )
+        audioManager.currentItem = currentItem
+        audioManager.appendToQueue([nextItem])
+        audioManager.testableSetPlaybackState(position: 1200, duration: 3600)
+        audioManager.isPlaying = true
+
+        // When
+        playerManager.markCurrentEpisodeAsPlayed()
+
+        // Then
+        let advanced = await pollUntil { audioManager.currentItem?.id == "ep-next" }
+        XCTAssertTrue(advanced,
+                      "Mark-as-played from the detail sheet advances to the queued episode")
     }
 }
 
@@ -608,4 +653,20 @@ final class EpisodeDetailResolveTests: XCTestCase {
                        "REGRESSION: Episode-specific artwork URL must carry through from QueueItem — " +
                        "using podcast-level artwork shows the wrong image in the detail sheet")
     }
+}
+
+/// Poll until `condition` is true or `timeout` elapses, yielding to the main actor
+/// between checks. No real-time sleeps — the advance Task runs on the main actor,
+/// and playEpisode sets currentItem in its synchronous prefix, so a few yields
+/// are enough on the happy path.
+@MainActor
+fileprivate func pollUntil(
+    timeout: TimeInterval = 2.0,
+    _ condition: () -> Bool
+) async -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    while !condition() && Date() < deadline {
+        await Task.yield()
+    }
+    return condition()
 }

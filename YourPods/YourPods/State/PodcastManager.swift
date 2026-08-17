@@ -12,7 +12,6 @@ struct FeedFetchResult: Sendable {
 }
 
 /// Manages podcast subscriptions, episode data, feed refreshing, and gPodder sync.
-/// Subscription and episode state manager — owns the SwiftData ModelContext.
 @Observable
 @MainActor
 final class PodcastManager {
@@ -25,6 +24,59 @@ final class PodcastManager {
     /// Used by loadSubscriptions to avoid blanking the library mid-sync.
     var isSyncing = false
     
+    /// In-flight sync task for single-flight guard.
+    /// Late callers join this task instead of starting a parallel sync.
+    private var syncTask: Task<[SyncConflict], Never>?
+
+    /// Whether the in-flight `syncTask` is a background sync. Used by the
+    /// single-flight guard so a user-initiated foreground refresh does not adopt
+    /// an in-flight background sync (which defers RSS refresh to last). See
+    /// `SyncCoalescing`.
+    private var syncTaskIsBackground = false
+
+    /// Cancel actions for tracked auxiliary syncs — direct
+    /// syncSubscriptions/syncEpisodeActions calls from view tasks (force
+    /// pull/push, onboarding, profile activation, vault promotion, activity
+    /// refresh, per-track playback sync). Keyed by UUID; entries remove
+    /// themselves when their sync completes.
+    private var trackedSyncCancellations: [UUID: () -> Void] = [:]
+
+    /// Cancel the in-flight shared sync pipeline and all tracked auxiliary
+    /// syncs, if any.
+    ///
+    /// Called from lifecycle handlers on backgrounding: view-initiated syncs
+    /// (pull-to-refresh, Home buttons, force pull, onboarding flows) are
+    /// started from tasks that no lifecycle hook can reach, so without this
+    /// the pipeline keeps opening SQLite write transactions in the background
+    /// (0xDEAD10CC exposure).
+    func cancelActiveSync() {
+        syncTask?.cancel()
+        for cancel in trackedSyncCancellations.values { cancel() }
+    }
+
+    /// Run a sync operation as a tracked, cancellable task.
+    ///
+    /// Two-way cancellation: `cancelActiveSync()` (lifecycle) cancels the
+    /// task via the registry, AND the caller's own cancellation propagates in
+    /// via `withTaskCancellationHandler` — so wrapping the sync entry points
+    /// in this does not break the orchestrator pipeline's existing
+    /// cancellation chain.
+    private func withTrackedSync<T: Sendable>(
+        _ operation: @escaping @MainActor () async throws -> T
+    ) async throws -> T {
+        let id = UUID()
+        let task = Task { @MainActor in
+            try await operation()
+        }
+        trackedSyncCancellations[id] = { task.cancel() }
+        defer { trackedSyncCancellations[id] = nil }
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+    
     /// Set when any sync backend (Pro or gPodder) returns an error, so the UI
     /// can show a banner. Cleared on the next successful sync or user dismissal.
     var lastSyncError: String?
@@ -34,7 +86,7 @@ final class PodcastManager {
     var subscriptionSyncProgress: (completed: Int, total: Int)?
     
     private let modelContext: ModelContext
-    private let rssService = RSSService()
+    private let rssService: FeedFetching
     private var syncClient: (any SyncClient)?
     private var deviceId = "swift-client"
     
@@ -55,6 +107,15 @@ final class PodcastManager {
     
     /// Isolated service owning episode action sync, action map, and conflict tracking.
     private(set) var episodeActionSync: EpisodeActionSyncService!
+
+    /// Annotation (notes) CRUD and sync service. Available to all users locally;
+    /// sync calls are gated on Pro in the orchestrator.
+    private(set) var annotationService: AnnotationService!
+    
+    /// Background write actor for sync pipeline writes (episode actions, feed
+    /// application, subscription persistence). Lazy context created inside actor
+    /// isolation — avoids the @ModelActor main-thread executor gotcha.
+    let syncStore: SyncStore
     
     /// Network monitor for checking WiFi vs cellular before autodownloads.
     var networkMonitor: NetworkMonitoring?
@@ -66,7 +127,7 @@ final class PodcastManager {
     
     /// Minimum interval between disk saves for progress-only updates (seconds).
     /// Reduces disk write rate from ~95 KB/s to ~8 KB/s during sustained playback.
-    /// See: Crash 1 — excessive disk writes (bug_type 145, Incident 6AA549C6).
+    /// See: the excessive-disk-writes crash (Apple `bug_type 145`).
     private static let progressSaveInterval: TimeInterval = 60
     
     /// Timestamp of the last progress-triggered `modelContext.save()`.
@@ -76,8 +137,24 @@ final class PodcastManager {
     /// Exposed as `private(set)` so tests can assert on throttle behavior.
     private(set) var progressSaveCount = 0
     
-    init(modelContext: ModelContext) {
+    init(modelContext: ModelContext, feedFetcher: FeedFetching = RSSService()) {
         self.modelContext = modelContext
+        self.rssService = feedFetcher
+        self.syncStore = SyncStore(
+            container: modelContext.container,
+            storeURL: YourPodsApp.modelStoreURL(),
+            storeHealthCheck: {
+                StoreHealthProbe.rawWriteProbe(storeURL: YourPodsApp.modelStoreURL())
+            }
+        )
+        // Configure the main context merge policy:
+        // Prevents NSMergeConflict crashes when both SyncStore and main
+        // context save the same row (e.g. progress timer vs sync).
+        // NOTE: enableAutomaticMerging() was removed — it caused the viewContext
+        // to merge EVERY background batch save on the main queue, accumulating
+        // into watchdog-killing main-thread blocking. Instead, we reconcile
+        // once at the end of each sync cycle via refreshAllFromStore().
+        modelContext.applyObjectTrumpMergePolicy()
         // Create episode action service with closure-based DI.
         // Closures capture `self` weakly to avoid retain cycles.
         self.episodeActionSync = EpisodeActionSyncService(
@@ -85,11 +162,41 @@ final class PodcastManager {
             subscriptionsProvider: { [weak self] in self?.subscriptions ?? [] },
             syncClientProvider: { [weak self] in self?.syncClient },
             profileIdProvider: { [weak self] in self?.activeProfileId },
-            deviceIdProvider: { [weak self] in self?.deviceId ?? "swift-client" },
+            deviceIdProvider: { InstallIdentity.installId },
             storeHealthCheck: {
                 StoreHealthProbe.rawWriteProbe(storeURL: YourPodsApp.modelStoreURL())
-            }
+            },
+            syncStore: syncStore
         )
+        // Wire callbacks after init (can't capture self in stored-property init)
+        self.episodeActionSync.onMainContextRefreshNeeded = { [weak self] in
+            self?.reconcileAfterBackgroundWrites()
+        }
+        self.episodeActionSync.currentlyPlayingGuidProvider = { [weak self] in
+            self?.playerManager?.currentEpisodeGuid
+        }
+        self.annotationService = AnnotationService(modelContext: modelContext)
+        loadSubscriptions()
+    }
+    
+    /// Refresh the main context after SyncStore has written to the shared SQLite store.
+    ///
+    /// Faults all materialized objects back to the persistent store's current state,
+    /// then reloads the subscriptions array so the UI sees background changes.
+    ///
+    /// This runs once at the end of each sync operation — NOT per-batch-save.
+    /// A full sync cycle typically triggers 1-2 reconcile calls, keeping
+    /// main-thread blocking to a single ~200ms window instead of the
+    /// continuous blocking from automaticallyMergesChangesFromParent.
+    func reconcileAfterBackgroundWrites() {
+        // Silent-no-op detector: refreshAllFromStore() is the load-bearing step that
+        // makes background SyncStore inserts visible to the main context. If the
+        // underlying NSManagedObjectContext can't be resolved (e.g. a SwiftData
+        // internals change), refreshAllObjects() never runs and feeds appear stale.
+        if modelContext.underlyingNSContext == nil {
+            logger.error("reconcileAfterBackgroundWrites: underlyingNSContext is nil — refreshAllFromStore() is a NO-OP; background writes stay invisible until a cold fetch. Feeds will appear stale.")
+        }
+        modelContext.refreshAllFromStore()
         loadSubscriptions()
     }
     
@@ -167,15 +274,15 @@ final class PodcastManager {
     
     /// Save the SwiftData model context. Used by views for lightweight changes (e.g., groupId).
     ///
-    /// Pre-validates store health using `StoreHealthProbe.rawWriteProbe()` to prevent
-    /// pread() signal crashes during WAL checkpoint. Throws `StoreError.storeUnhealthy`
-    /// if the probe fails.
+    /// Routes through `guardedSave` so the commit runs INSIDE the suspension
+    /// assertion. The previous shape (guarded probe, then raw
+    /// `modelContext.save()`) released the assertion before the actual commit
+    /// began — the lock-holding write transaction ran unprotected (TOCTOU).
+    /// Throws `StoreError.storeUnhealthy` if the probe or save fails.
     func saveContext() throws {
-        let storeURL = YourPodsApp.modelStoreURL()
-        guard StoreHealthProbe.rawWriteProbe(storeURL: storeURL) else {
+        guard modelContext.guardedSave(storeURL: YourPodsApp.modelStoreURL()) else {
             throw StoreError.storeUnhealthy
         }
-        try modelContext.save()
     }
     
     // MARK: - Vault → Sync Promotion
@@ -438,7 +545,9 @@ final class PodcastManager {
         }
         
         // Fetch the feed to get metadata
-        let (parsed, episodes) = try await rssService.fetchFeed(url: url, authHeader: authHeader)
+        guard let (parsed, episodes) = try await rssService.fetchFeed(url: url, authHeader: authHeader) else {
+            throw RSSError.emptyFeed // 304 on first fetch is unexpected
+        }
         
         let podcast = Podcast(
             url: url,
@@ -453,8 +562,8 @@ final class PodcastManager {
         podcast.sortOrder = subscriptions.count
         
         // Map new spec fields
-        mapParsedPodcastMetadata(parsed, to: podcast)
-        
+        FeedMetadataMapper.apply(parsed, to: podcast)
+
         // Store feed credentials in Keychain
         if let username, let password {
             KeychainHelper.shared.saveFeedCredentials(username: username, password: password, forPodcastUrl: url)
@@ -480,10 +589,10 @@ final class PodcastManager {
                 transcriptUrl: ep.transcriptUrl,
                 podcast: podcast
             )
-            mapParsedEpisodeMetadata(ep, to: episode)
+            FeedMetadataMapper.apply(ep, to: episode)
             modelContext.insert(episode)
         }
-        
+
         modelContext.guardedSave(storeURL: YourPodsApp.modelStoreURL())
         associateWithCurrentProfile(url: url)
         loadSubscriptions()
@@ -505,6 +614,254 @@ final class PodcastManager {
         }
 
         logger.info("Subscribed to \(parsed.title) with \(episodes.count) episodes")
+        
+        // Auto-hide old episodes if enabled (first-add only)
+        if settingsManager?.autoHideOldEpisodes == true {
+            autoHideOldEpisodes(for: podcast, keepRecent: settingsManager?.autoHideKeepRecentCount ?? 3)
+        }
+    }
+
+    /// Sequentially subscribe to a list of feeds (e.g. OPML import).
+    ///
+    /// Each `addSubscription` fully completes (fetch → insert → `guardedSave`)
+    /// before the next begins. This replaces the previous per-URL `Task {}`
+    /// fan-out in OPML import, where concurrent subscriptions raced Core Data's
+    /// INSERT bind-variable cleanup on the shared main `ModelContext`
+    /// (`_clearBindVariablesForInsertedRow` → `objc_msgSend` EXC_BAD_ACCESS).
+    ///
+    /// - Parameters:
+    ///   - urls: Feed URLs to subscribe to, processed in order.
+    ///   - onEach: Optional hook invoked on the main actor after each URL is
+    ///     attempted — used by OPML import to apply per-podcast group and
+    ///     settings without re-introducing concurrency.
+    func importSubscriptions(_ urls: [String], onEach: ((String) -> Void)? = nil) async {
+        for url in urls {
+            do {
+                try await addSubscription(url: url)
+            } catch {
+                logger.error("OPML import: failed to add \(url): \(error.localizedDescription)")
+            }
+            onEach?(url)
+        }
+    }
+
+    // MARK: - Auto-Hide Old Episodes
+    
+    /// Hide all but the `keepRecent` most recent episodes for a podcast.
+    /// Intended to be called once on first subscribe to avoid flooding the user
+    /// with hundreds of back-catalog episodes.
+    ///
+    /// Uses the existing hidden-episode infrastructure: `setHidden(guid:hidden:true)`
+    /// marks each episode as played and adds it to the hidden set. Server sync
+    /// is handled via `client.hideEpisodes()` for YourPods Pro users.
+    func autoHideOldEpisodes(for podcast: Podcast, keepRecent: Int) {
+        let sorted = podcast.episodes.sorted(by: episodesByFeedOrder)
+        
+        guard sorted.count > keepRecent else { return }
+        
+        let toHide = sorted.dropFirst(keepRecent)
+        
+        let changes = toHide.map { HiddenStateChange(guid: $0.guid, hidden: true) }
+        episodeActionSync.applyHiddenChanges(changes)
+        
+        logger.info("Auto-hid \(toHide.count) old episodes for \(podcast.title), kept \(keepRecent) most recent")
+    }
+    
+    // MARK: - Centralized Hide/Unhide
+    
+    /// Toggle hidden state for an episode, locally (suspension-safe) + best-effort server push (Pro).
+    func toggleHidden(guid: String, podcastUrl: String?, audioUrl: String?) {
+        let isHidden = episodeActionSync.isHidden(guid: guid)
+        episodeActionSync.applyHiddenChanges([
+            HiddenStateChange(guid: guid, hidden: !isHidden)
+        ])
+        // Sync to server (fire-and-forget)
+        Task {
+            guard let podcastUrl = podcastUrl, let audioUrl = audioUrl else { return }
+            guard let client = syncClient else { return }
+            if !isHidden {
+                try? await client.hideEpisodes([ProHideEpisodeRequest(episodeUrl: audioUrl, podcastUrl: podcastUrl)])
+            } else {
+                try? await client.unhideEpisode(episodeUrl: audioUrl)
+            }
+        }
+    }
+    
+    /// Toggle hidden state for a single episode.
+    /// Handles both local state and server sync.
+    func toggleHidden(episode: Episode) {
+        toggleHidden(guid: episode.guid, podcastUrl: episode.podcastUrl, audioUrl: episode.audioUrl)
+    }
+    
+    /// Hide a batch of episodes.
+    /// Handles both local state and server sync.
+    func hideEpisodes(_ episodes: [Episode]) {
+        guard !episodes.isEmpty else { return }
+        let changes = episodes.map { HiddenStateChange(guid: $0.guid, hidden: true) }
+        episodeActionSync.applyHiddenChanges(changes)
+        // Sync batch to server
+        Task {
+            var requests: [ProHideEpisodeRequest] = []
+            for ep in episodes {
+                if let podcastUrl = ep.podcastUrl, let audioUrl = ep.audioUrl {
+                    requests.append(ProHideEpisodeRequest(episodeUrl: audioUrl, podcastUrl: podcastUrl))
+                }
+            }
+            guard let client = syncClient, !requests.isEmpty else { return }
+            try? await client.hideEpisodes(requests)
+        }
+    }
+    
+    // MARK: - Duration-Based Auto-Hide Sweep
+    
+    /// Sweep all subscriptions and hide episodes that have been unplayed
+    /// for longer than the configured threshold.
+    ///
+    /// Skips: played, in-progress (listenedSeconds > 0), already-hidden,
+    /// nil pubDate episodes.
+    ///
+    /// - Returns: Number of episodes newly hidden.
+    @discardableResult
+    func autoHideUnplayedEpisodes(
+        settingsManager: SettingsManager,
+        downloadManager: DownloadManager? = nil,
+        now: Date = Date(),
+        progressCallback: ((String, Int, Int) -> Void)? = nil  // (podcastTitle, currentIndex, total)
+    ) async -> Int {
+        guard settingsManager.autoHideUnplayedEnabled else { return 0 }
+        
+        let globalDays = settingsManager.autoHideUnplayedDays
+        
+        var toHide: [Episode] = []
+        
+        for (index, podcast) in subscriptions.enumerated() {
+            progressCallback?(podcast.title, index, subscriptions.count)
+            if progressCallback != nil {
+                try? await Task.sleep(for: .milliseconds(40))
+            }
+            // Per-podcast tri-state: nil = use global, 0 = disabled, N = custom
+            let perPodcastDays = podcast.effectiveSettings.autoHideUnplayedDays
+            let effectiveDays: Int
+            if let override = perPodcastDays {
+                if override == 0 { continue }  // Explicitly disabled for this podcast
+                effectiveDays = override
+            } else {
+                effectiveDays = globalDays
+            }
+            
+            guard let cutoff = Calendar.current.date(byAdding: .day, value: -effectiveDays, to: now) else { continue }
+            
+            for episode in podcast.episodes {
+                guard !episode.isPlayed,
+                      !episode.isInteracted,
+                      !episode.isStale,
+                      !episodeActionSync.isHidden(guid: episode.guid),
+                      episode.listenedSeconds == 0,
+                      let pubDate = episode.pubDate,
+                      pubDate < cutoff
+                else { continue }
+                
+                // Skip downloaded episodes
+                if let dm = downloadManager, dm.isDownloaded(episode.guid) { continue }
+                
+                toHide.append(episode)
+            }
+        }
+        
+        guard !toHide.isEmpty else { return 0 }
+        
+        let changes = toHide.map { HiddenStateChange(guid: $0.guid, hidden: true) }
+        episodeActionSync.applyHiddenChanges(changes)
+        
+        // Sync batch to server
+        Task {
+            var requests: [ProHideEpisodeRequest] = []
+            for ep in toHide {
+                if let podcastUrl = ep.podcastUrl, let audioUrl = ep.audioUrl {
+                    requests.append(ProHideEpisodeRequest(episodeUrl: audioUrl, podcastUrl: podcastUrl))
+                }
+            }
+            guard let client = syncClient, !requests.isEmpty else { return }
+            try? await client.hideEpisodes(requests)
+        }
+        
+        logger.info("Duration auto-hide: hid \(toHide.count) episodes older than threshold")
+        
+        // Record to auto-hide log for undo
+        recordAutoHideLog(episodes: toHide)
+        
+        return toHide.count
+    }
+    
+    // MARK: - Auto-Hide Log
+    
+    struct AutoHideLogEntry: Codable {
+        var count: Int
+        var guids: [String]
+        var lastUpdated: Date
+    }
+    
+    private static let autoHideLogKey = "autoHideLog"
+    
+    /// Record auto-hidden episodes in the log, keyed by podcast URL.
+    private func recordAutoHideLog(episodes: [Episode]) {
+        guard !episodes.isEmpty else { return }
+        var log = loadAutoHideLog()
+        
+        // Group by podcast URL
+        for ep in episodes {
+            let key = ep.podcastUrl ?? "unknown"
+            var entry = log[key] ?? AutoHideLogEntry(count: 0, guids: [], lastUpdated: Date())
+            entry.count += 1
+            entry.guids.append(ep.guid)
+            entry.lastUpdated = Date()
+            log[key] = entry
+        }
+        
+        saveAutoHideLog(log)
+    }
+    
+    /// Load the auto-hide log, pruning entries older than 30 days.
+    func loadAutoHideLog() -> [String: AutoHideLogEntry] {
+        guard let data = UserDefaults.standard.data(forKey: Self.autoHideLogKey),
+              var log = try? JSONDecoder().decode([String: AutoHideLogEntry].self, from: data)
+        else { return [:] }
+        
+        let cutoff = Calendar.current.date(byAdding: .day, value: -30, to: Date()) ?? Date()
+        log = log.filter { $0.value.lastUpdated > cutoff }
+        return log
+    }
+    
+    private func saveAutoHideLog(_ log: [String: AutoHideLogEntry]) {
+        if let data = try? JSONEncoder().encode(log) {
+            UserDefaults.standard.set(data, forKey: Self.autoHideLogKey)
+        }
+    }
+    
+    /// Undo all auto-hidden episodes for a specific podcast URL.
+    func undoAutoHide(forPodcastUrl podcastUrl: String) {
+        var log = loadAutoHideLog()
+        guard let entry = log[podcastUrl] else { return }
+        
+        // Unhide all guids
+        let changes = entry.guids.map { HiddenStateChange(guid: $0, hidden: false) }
+        episodeActionSync.applyHiddenChanges(changes)
+        
+        // Server sync
+        Task {
+            guard let client = syncClient else { return }
+            for guid in entry.guids {
+                // Find the episode to get audioUrl
+                if let ep = subscriptions.flatMap({ $0.episodes }).first(where: { $0.guid == guid }),
+                   let audioUrl = ep.audioUrl {
+                    try? await client.unhideEpisode(episodeUrl: audioUrl)
+                }
+            }
+        }
+        
+        // Remove from log
+        log.removeValue(forKey: podcastUrl)
+        saveAutoHideLog(log)
     }
     
     func removeSubscription(_ podcast: Podcast) async {
@@ -690,13 +1047,13 @@ final class PodcastManager {
         podcast.sortOrder = subscriptions.count
         
         // Map new spec fields
-        mapParsedPodcastMetadata(parsed, to: podcast)
-        
+        FeedMetadataMapper.apply(parsed, to: podcast)
+
         // Set markedPlayedBefore to now so we don't flood the queue with back catalog
         podcast.effectiveSettings.markedPlayedBefore = Date()
-        
+
         modelContext.insert(podcast)
-        
+
         // Insert episodes
         for ep in episodes {
             let episode = Episode(
@@ -712,10 +1069,10 @@ final class PodcastManager {
                 transcriptUrl: ep.transcriptUrl,
                 podcast: podcast
             )
-            mapParsedEpisodeMetadata(ep, to: episode)
+            FeedMetadataMapper.apply(ep, to: episode)
             modelContext.insert(episode)
         }
-        
+
         // Associate with current profile (does NOT reload subscriptions)
         associateWithCurrentProfile(url: url)
         
@@ -841,109 +1198,12 @@ final class PodcastManager {
     
     /// Maximum number of concurrent RSS feed fetches.
     /// Balances speed vs memory/network pressure.
-    private static let maxConcurrentFetches = 6
+    private static let maxConcurrentFetches = 10
 
-    // MARK: - Feed Result Application (Main Actor)
-
-    /// Apply a pre-fetched RSS feed result to a podcast's SwiftData model.
-    ///
-    /// This method runs on `@MainActor` and handles all SwiftData mutations:
-    /// updating podcast metadata, creating new episodes, and updating existing
-    /// episode metadata. It does NOT call `modelContext.save()` — the caller
-    /// is responsible for saving after all results are applied.
-    ///
-    /// Extracted from `refreshFeed(for:)` to separate network I/O (concurrent)
-    /// from SwiftData mutations (sequential, main actor).
-    ///
-    /// - Parameters:
-    ///   - result: The pre-fetched feed data (podcast metadata + episodes).
-    ///   - podcast: The SwiftData `Podcast` model to update.
-    /// - Returns: Array of newly created `Episode` objects.
-    func applyFeedResult(_ result: FeedFetchResult, to podcast: Podcast) -> [Episode] {
-        let parsed = result.parsed
-        let parsedEpisodes = result.episodes
-
-        // ── Update podcast metadata ──
-        podcast.title = parsed.title
-        podcast.podcastDescription = parsed.description
-        podcast.logoUrl = parsed.logoUrl
-        podcast.website = parsed.website
-        podcast.author = parsed.author
-        mapParsedPodcastMetadata(parsed, to: podcast)
-
-        // ── Handle feed URL migration (itunes:new-feed-url) ──
-        if let newUrl = parsed.newFeedUrl, !newUrl.isEmpty, newUrl != podcast.url {
-            logger.warning("Feed \(podcast.title) declares new URL: \(newUrl). Auto-migrating.")
-            let oldUrl = podcast.url
-            podcast.url = newUrl
-            podcast.newFeedUrl = nil  // Clear after migration
-            disassociateFromCurrentProfile(url: oldUrl)
-            associateWithCurrentProfile(url: newUrl)
-            // Sync change to server (fire-and-forget — don't block save)
-            if let client = syncClient {
-                Task {
-                    _ = try? await client.pushSubscriptions(add: [newUrl], remove: [oldUrl], deviceId: deviceId)
-                }
-            }
-        }
-
-        // ── Create new episodes / update existing ──
-        let existingGuids = Set(podcast.episodes.map(\.guid))
-
-        var newEpisodes: [Episode] = []
-        for ep in parsedEpisodes where !existingGuids.contains(ep.guid) {
-            let episode = Episode(
-                guid: ep.guid,
-                title: ep.title,
-                episodeDescription: ep.description,
-                audioUrl: ep.audioUrl,
-                pubDate: ep.pubDate,
-                imageUrl: ep.imageUrl,
-                durationSeconds: ep.durationSeconds,
-                link: ep.link,
-                chaptersUrl: ep.chaptersUrl,
-                transcriptUrl: ep.transcriptUrl,
-                podcast: podcast
-            )
-            mapParsedEpisodeMetadata(ep, to: episode)
-            modelContext.insert(episode)
-            newEpisodes.append(episode)
-        }
-
-        // Update existing episodes with new metadata fields
-        for ep in parsedEpisodes where existingGuids.contains(ep.guid) {
-            if let existing = podcast.episodes.first(where: { $0.guid == ep.guid }) {
-                mapParsedEpisodeMetadata(ep, to: existing)
-            }
-        }
-
-        // ── Mark stale episodes ──
-        // Episodes that exist locally but are NOT in the current feed XML are stale.
-        // Match by GUID (primary) with audio URL base-path fallback.
-        let feedGuids = Set(parsedEpisodes.map(\.guid))
-        let feedAudioBaseURLs = Set(parsedEpisodes.compactMap { ep -> String? in
-            guard let url = ep.audioUrl else { return nil }
-            return Self.stripQueryParams(url)
-        })
-
-        for localEp in podcast.episodes {
-            let inFeedByGuid = feedGuids.contains(localEp.guid)
-            let inFeedByURL: Bool = {
-                guard let audioUrl = localEp.audioUrl else { return false }
-                return feedAudioBaseURLs.contains(Self.stripQueryParams(audioUrl))
-            }()
-
-            if inFeedByGuid || inFeedByURL {
-                // Episode is still in the feed — un-stale it (feed may re-add episodes)
-                if localEp.isStale { localEp.isStale = false }
-            } else {
-                // Episode is no longer in the feed
-                if !localEp.isStale { localEp.isStale = true }
-            }
-        }
-
-        return newEpisodes
-    }
+    /// How many existing unplayed episodes to back-fill when a podcast has
+    /// auto-download enabled but no explicit `autoDownloadEpisodeLimit`.
+    /// Mirrors the back-catalog restraint of `autoQueueExistingEpisodes`.
+    static let defaultAutoDownloadExistingLimit = 3
 
     // MARK: - Per-Podcast Settings Sync
 
@@ -968,7 +1228,10 @@ final class PodcastManager {
                 // server values fill in fields not set locally (cross-device adoption).
                 // e.g. user set skipIntro on phone, web set skipOutro → both survive.
                 let merged = podcast.effectiveSettings.merging(serverSettings: serverSettings)
-                podcast.effectiveSettings = merged
+                // Sync contract: assign only on genuine change — Core Data re-writes a row
+                // for ANY setter call, so an identical re-merge during a no-change
+                // sync re-pull is pure WAL churn.
+                setIfChanged(podcast, \.effectiveSettings, merged)
                 logger.debug("Per-podcast settings: field-level merge for \(podcast.url)")
             } else {
                 // No local overrides — adopt server settings wholesale
@@ -978,7 +1241,7 @@ final class PodcastManager {
                         merged.serverExtras[key] = value
                     }
                 }
-                podcast.effectiveSettings = merged
+                setIfChanged(podcast, \.effectiveSettings, merged)
             }
         }
     }
@@ -1012,7 +1275,15 @@ final class PodcastManager {
     func refreshAllFeeds() async -> [Episode] {
         isRefreshing = true
         defer { isRefreshing = false }
-        
+
+        // Cancellation gate: a cancelled refresh must not fetch, apply, or
+        // save — the orchestrator gates run BETWEEN steps; this protects the
+        // step body when cancellation lands during the preceding await.
+        guard !Task.isCancelled else {
+            logger.info("refreshAllFeeds cancelled — skipping fetch and save")
+            return []
+        }
+
         let feedsToRefresh = subscriptions
         guard !feedsToRefresh.isEmpty else { return [] }
         
@@ -1033,14 +1304,18 @@ final class PodcastManager {
                 return (url: podcast.url, authHeader: auth)
             }
             
+            let feedLogger = self.logger
             await withTaskGroup(of: FeedFetchResult?.self) { group in
                 for input in fetchInputs {
                     let rss = self.rssService
                     group.addTask {
                         do {
-                            let (parsed, episodes) = try await rss.fetchFeed(
+                            guard let (parsed, episodes) = try await rss.fetchFeed(
                                 url: input.url, authHeader: input.authHeader
-                            )
+                            ) else {
+                                // 304 Not Modified — feed unchanged, skip
+                                return nil
+                            }
                             return FeedFetchResult(
                                 url: input.url,
                                 authHeader: input.authHeader,
@@ -1048,7 +1323,8 @@ final class PodcastManager {
                                 episodes: episodes
                             )
                         } catch {
-                            // Log errors — don't crash the batch for one feed
+                            // Log the error — don't crash the batch for one feed
+                            feedLogger.error("Failed to fetch \(input.url): \(error.localizedDescription)")
                             return nil
                         }
                     }
@@ -1062,27 +1338,69 @@ final class PodcastManager {
             }
         }
         
-        // ── Phase 2: Sequential SwiftData mutations (@MainActor) ────────
-        // All model access happens here on the main actor — no data races.
-        var newEpisodes: [Episode] = []
-        
-        for result in fetchResults {
-            // Match fetch result to its podcast by URL.
-            // Use the result URL (not podcast.url) because feed migration may
-            // have changed podcast.url during a previous applyFeedResult call.
-            guard let podcast = subscriptions.first(where: { $0.url == result.url }) else {
-                logger.warning("No subscription found for fetched URL: \(result.url)")
-                continue
-            }
-            let created = applyFeedResult(result, to: podcast)
-            newEpisodes.append(contentsOf: created)
+        // Cancellation gate: cancellation lands during the Phase 1 fetches
+        // (e.g. BGTask expiration). Discard results instead of opening the
+        // probe + a potentially library-sized commit on the way out.
+        guard !Task.isCancelled else {
+            logger.info("refreshAllFeeds cancelled after fetch — discarding \(fetchResults.count) result(s), skipping save")
+            return []
         }
-        
-        // Single save for all mutations — much more efficient than per-feed saves
-        modelContext.guardedSave(storeURL: YourPodsApp.modelStoreURL())
+
+        // Diagnostic tally: distinguishes "all feeds unchanged/304" and "all fetches
+        // failed" from "fetched fine but nothing new" when investigating stale feeds.
+        logger.info("Feed fetch tally: \(feedsToRefresh.count) subscription(s) → \(fetchResults.count) returned new content (\(feedsToRefresh.count - fetchResults.count) unchanged/304 or failed)")
+
+        // ── Phase 2: Apply feed results on background actor ────────────
+        let outcome = await syncStore.applyFeedResults(fetchResults)
+
+        // Handle URL migrations on main actor (profile association is MainActor-only)
+        for migration in outcome.urlMigrations {
+            disassociateFromCurrentProfile(url: migration.oldUrl)
+            associateWithCurrentProfile(url: migration.newUrl)
+            // Sync change to server (fire-and-forget — don't block save)
+            if let client = syncClient {
+                Task {
+                    _ = try? await client.pushSubscriptions(
+                        add: [migration.newUrl], remove: [migration.oldUrl], deviceId: deviceId
+                    )
+                }
+            }
+        }
+
+        // Reconcile main context from background writes
+        reconcileAfterBackgroundWrites()
+
+        // Refetch new episodes from main context (SyncStore inserted on background)
+        let newEpisodes = episodes(withGuids: outcome.newEpisodeGuids)
         
         logger.info("Refreshed all feeds: \(newEpisodes.count) new episodes found")
         return newEpisodes
+    }
+
+    /// Fetch episodes from the main context by GUIDs.
+    /// Used after SyncStore background writes to get main-context references.
+    ///
+    /// Uses a FetchDescriptor instead of traversing `Podcast.episodes`
+    /// relationships — the relationship cache can be stale after cross-context
+    /// writes (SyncStore inserts on a background actor), causing newly inserted
+    /// episodes to be invisible even after `refreshAllFromStore()`.
+    func episodes(withGuids guids: [String]) -> [Episode] {
+        guard !guids.isEmpty else { return [] }
+        let guidSet = Set(guids)
+        do {
+            let descriptor = FetchDescriptor<Episode>(
+                predicate: #Predicate { guidSet.contains($0.guid) }
+            )
+            return try modelContext.fetch(descriptor)
+        } catch {
+            // A throw here (e.g. SwiftData failing to translate the Set-membership
+            // predicate on some OS versions) must NOT silently return [] — that would
+            // drop every new episode and resurface "feeds not updating" with no trace.
+            // Log it and fall back to an in-memory filter, which cannot throw.
+            logger.error("episodes(withGuids:) predicate fetch failed: \(error.localizedDescription) — falling back to in-memory filter")
+            let all = (try? modelContext.fetch(FetchDescriptor<Episode>())) ?? []
+            return all.filter { guidSet.contains($0.guid) }
+        }
     }
     
     // MARK: - Sync Building Blocks (called by SyncOrchestrators)
@@ -1120,7 +1438,7 @@ final class PodcastManager {
             // Auto-queue new episodes from RSS
             let queueMode = podSettings.autoQueueMode ?? settingsManager.defaultAutoQueueMode
             if queueMode != .off {
-                let sorted = newOnly.sorted { ($0.pubDate ?? .distantPast) > ($1.pubDate ?? .distantPast) }
+                let sorted = newOnly.sorted(by: episodesByFeedOrder)
                 playerManager.addToQueue(sorted, playNext: queueMode == .priority)
             }
 
@@ -1139,6 +1457,16 @@ final class PodcastManager {
                 }
             }
         }
+
+        // Back-fill auto-downloads for existing unplayed episodes (covers enabling
+        // auto-download on an already-subscribed podcast — the new-episode loop
+        // above only catches episodes this refresh just discovered).
+        //
+        // MUST run before autoQueueExistingEpisodes: auto-queue marks the episode
+        // it queues as interacted, and the download candidate filter excludes
+        // interacted episodes — so queuing first would hide the newest (most
+        // wanted) episode from the download back-fill.
+        autoDownloadExistingEpisodes(downloadManager: downloadManager, settingsManager: settingsManager)
 
         // Auto-queue existing unplayed episodes for all subscriptions
         autoQueueExistingEpisodes(playerManager: playerManager, settingsManager: settingsManager)
@@ -1238,24 +1566,95 @@ final class PodcastManager {
         playerManager: PlayerManager,
         downloadManager: DownloadManager,
         settingsManager: SettingsManager,
-        strategy: SyncStrategy = .serverWins
+        strategy: SyncStrategy = .serverWins,
+        isBackground: Bool = false
     ) async -> [SyncConflict] {
-        isSyncing = true
-        defer { isSyncing = false }
-        
-        let orchestrator = SyncOrchestratorFactory.make(
-            profile: settingsManager.activeProfile,
-            podcastManager: self,
-            syncClient: syncClient
-        )
+        // Single-flight guard: join the in-flight task when coalescing is allowed.
+        // withTaskCancellationHandler forwards the CALLER's cancellation into
+        // the shared sync task — without it, BGTask expiration and scenePhase
+        // cancellation never reach the pipeline (awaiting an unstructured
+        // Task's value does not propagate cancellation), and sync keeps
+        // opening SQLite write transactions after the background-execution
+        // assertion has ended → 0xDEAD10CC. A cancelled shared sync returns
+        // partial results; the next sync retries idempotently.
+        //
+        // Exception (SyncCoalescing): a user-initiated FOREGROUND refresh must NOT
+        // adopt an in-flight BACKGROUND sync — the background pipeline defers RSS
+        // refresh to last (Priority 5) and is cancellation-prone, so the user's
+        // "refresh feeds now" intent would inherit a sync that never reaches RSS.
+        if let existing = syncTask,
+           SyncCoalescing.canJoinInFlight(incomingIsBackground: isBackground, inFlightIsBackground: syncTaskIsBackground) {
+            return await withTaskCancellationHandler {
+                await existing.value
+            } onCancel: {
+                existing.cancel()
+            }
+        }
 
-        return await orchestrator.sync(
-            podcastManager: self,
-            playerManager: playerManager,
-            downloadManager: downloadManager,
-            settingsManager: settingsManager,
-            conflictStrategy: strategy
-        )
+        // Not joinable (foreground displacing background): cancel the in-flight
+        // background sync and wait for it to FULLY unwind — its `defer` clears
+        // `syncTask`, and every write is suspension-guarded + cancellation-gated,
+        // so the cancelled sync cannot leave a straddling SQLite write.
+        if let existing = syncTask {
+            existing.cancel()
+            _ = await existing.value
+        }
+
+        // Re-check after the await: another caller may have started a fresh sync
+        // while we waited. Joining it is safe (it is not the cancelled background
+        // sync), and avoids creating a second concurrent pipeline. The `syncTask`
+        // assignment below is synchronous with no intervening await, so two callers
+        // can never both create a task.
+        if let current = syncTask {
+            return await withTaskCancellationHandler {
+                await current.value
+            } onCancel: {
+                current.cancel()
+            }
+        }
+
+        let task = Task { @MainActor [weak self] () -> [SyncConflict] in
+            guard let self else { return [] }
+            
+            self.isSyncing = true
+            defer {
+                self.isSyncing = false
+                self.syncTask = nil
+            }
+            
+            // Cooperative cancellation checkpoint — allows BGTask expiration
+            // to bail out before starting the heavy sync work.
+            guard !Task.isCancelled else { return [] }
+            
+            let orchestrator = SyncOrchestratorFactory.make(
+                profile: settingsManager.activeProfile,
+                podcastManager: self,
+                syncClient: syncClient
+            )
+
+            let conflicts = await orchestrator.sync(
+                podcastManager: self,
+                playerManager: playerManager,
+                downloadManager: downloadManager,
+                settingsManager: settingsManager,
+                conflictStrategy: strategy,
+                isBackground: isBackground
+            )
+            
+            // Duration-based auto-hide sweep (runs after sync to catch newly fetched episodes)
+            if !Task.isCancelled {
+                await autoHideUnplayedEpisodes(settingsManager: settingsManager, downloadManager: downloadManager)
+            }
+            
+            return conflicts
+        }
+        syncTask = task
+        syncTaskIsBackground = isBackground
+        return await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
     }
     
     /// Whether the current network conditions allow autodownloads,
@@ -1277,77 +1676,6 @@ final class PodcastManager {
         }
         return allowed
     }
-    
-    func refreshFeed(for podcast: Podcast) async throws -> [Episode] {
-        let authHeader = podcast.requiresAuth
-            ? KeychainHelper.shared.buildBasicAuthHeader(forPodcastUrl: podcast.url)
-            : nil
-        
-        // ── Network fetch (off main actor is fine) ───────────────────────
-        let (parsed, parsedEpisodes) = try await rssService.fetchFeed(url: podcast.url, authHeader: authHeader)
-        
-        // ── SwiftData mutations (already on @MainActor via PodcastManager) ──
-        // Update podcast metadata
-        podcast.title = parsed.title
-        podcast.podcastDescription = parsed.description
-        podcast.logoUrl = parsed.logoUrl
-        podcast.website = parsed.website
-        podcast.author = parsed.author
-        
-        // Map new spec fields
-        mapParsedPodcastMetadata(parsed, to: podcast)
-        
-        // Handle feed URL migration (itunes:new-feed-url)
-        if let newUrl = parsed.newFeedUrl, !newUrl.isEmpty, newUrl != podcast.url {
-            logger.warning("Feed \(podcast.title) declares new URL: \(newUrl). Auto-migrating.")
-            let oldUrl = podcast.url
-            podcast.url = newUrl
-            podcast.newFeedUrl = nil  // Clear after migration
-            // Update profile associations
-            disassociateFromCurrentProfile(url: oldUrl)
-            associateWithCurrentProfile(url: newUrl)
-            // Sync change to server (fire-and-forget — don't block save)
-            if let client = syncClient {
-                Task {
-                    _ = try? await client.pushSubscriptions(add: [newUrl], remove: [oldUrl], deviceId: deviceId)
-                }
-            }
-        }
-        
-        // Find existing episode GUIDs
-        let existingGuids = Set(podcast.episodes.map(\.guid))
-        
-        var newEpisodes: [Episode] = []
-        for ep in parsedEpisodes where !existingGuids.contains(ep.guid) {
-            let episode = Episode(
-                guid: ep.guid,
-                title: ep.title,
-                episodeDescription: ep.description,
-                audioUrl: ep.audioUrl,
-                pubDate: ep.pubDate,
-                imageUrl: ep.imageUrl,
-                durationSeconds: ep.durationSeconds,
-                link: ep.link,
-                chaptersUrl: ep.chaptersUrl,
-                transcriptUrl: ep.transcriptUrl,
-                podcast: podcast
-            )
-            mapParsedEpisodeMetadata(ep, to: episode)
-            modelContext.insert(episode)
-            newEpisodes.append(episode)
-        }
-        
-        // Update existing episodes with new metadata fields
-        for ep in parsedEpisodes where existingGuids.contains(ep.guid) {
-            if let existing = podcast.episodes.first(where: { $0.guid == ep.guid }) {
-                mapParsedEpisodeMetadata(ep, to: existing)
-            }
-        }
-        
-        modelContext.guardedSave(storeURL: YourPodsApp.modelStoreURL())
-        return newEpisodes
-    }
-
     
     // MARK: - Episode Queries
     
@@ -1374,13 +1702,20 @@ final class PodcastManager {
     // MARK: - Auto-Queue Candidates
     
     func getAutoQueueCandidates(for podcast: Podcast, globalDefault: AutoQueueMode = .off) -> [Episode] {
-        let settings = podcast.effectiveSettings
-        let mode = settings.autoQueueMode ?? globalDefault
+        let mode = podcast.effectiveSettings.autoQueueMode ?? globalDefault
         guard mode != .off else { return [] }
-        
-        let markedBefore = settings.markedPlayedBefore
+        return freshUnplayedCandidates(for: podcast)
+    }
+
+    /// Episodes eligible for auto-queue / auto-download back-fill: not stale, not
+    /// played, not interacted (persisted or this session), newer than the
+    /// podcast's `markedPlayedBefore` back-catalog cutoff, and with audio.
+    /// Sorted newest-first. Shared by `getAutoQueueCandidates` and
+    /// `autoDownloadExistingEpisodes` so both apply identical filtering.
+    private func freshUnplayedCandidates(for podcast: Podcast) -> [Episode] {
+        let markedBefore = podcast.effectiveSettings.markedPlayedBefore
         let interacted = interactedKeys[podcast.url] ?? []
-        
+
         return podcast.episodes.filter { episode in
             // Skip if stale (no longer in feed)
             guard !episode.isStale else { return false }
@@ -1396,7 +1731,7 @@ final class PodcastManager {
             }
             // Must have audio
             return episode.audioUrl != nil
-        }.sorted { ($0.pubDate ?? .distantPast) > ($1.pubDate ?? .distantPast) }
+        }.sorted(by: episodesByFeedOrder)
     }
     
     /// Auto-queue the most recent unplayed episode for each subscription.
@@ -1411,6 +1746,41 @@ final class PodcastManager {
             guard let mostRecent = candidates.first else { continue }
             let mode = podcast.effectiveSettings.autoQueueMode ?? globalDefault
             playerManager.addToQueue([mostRecent], playNext: mode == .priority)
+        }
+    }
+
+    /// Auto-download already-present unplayed episodes for subscriptions that
+    /// have auto-download enabled, up to the per-podcast episode limit.
+    ///
+    /// Parallels `autoQueueExistingEpisodes`. The new-episode path in
+    /// `processNewEpisodes` only downloads episodes a refresh just discovered, so
+    /// without this, *enabling* "Download New Episodes" on a podcast that already
+    /// has unplayed episodes — or subscribing — downloaded nothing until the next
+    /// brand-new episode published. This back-fills the most-recent unplayed
+    /// episodes (newest-first) up to `autoDownloadEpisodeLimit`
+    /// (defaulting to `defaultAutoDownloadExistingLimit` when unset), gated by the
+    /// same network policy and played/interacted/back-catalog filters.
+    func autoDownloadExistingEpisodes(downloadManager: DownloadManager, settingsManager: SettingsManager) {
+        guard isAutoDownloadAllowed(settingsManager: settingsManager) else { return }
+        let globalDefault = settingsManager.defaultAutoDownload
+        for podcast in subscriptions {
+            let settings = podcast.effectiveSettings
+            let shouldDownload = settings.autoDownloadNewEpisodes ?? globalDefault
+            guard shouldDownload else { continue }
+            let limit = settings.autoDownloadEpisodeLimit ?? Self.defaultAutoDownloadExistingLimit
+            guard limit > 0 else { continue }
+            let candidates = freshUnplayedCandidates(for: podcast).prefix(limit)
+            for episode in candidates {
+                guard let audioUrl = episode.audioUrl, !downloadManager.isDownloaded(episode.guid) else {
+                    continue
+                }
+                let authHeaders: [String: String]? = podcast.requiresAuth
+                    ? KeychainHelper.shared.buildBasicAuthHeader(forPodcastUrl: podcast.url)
+                        .map { ["Authorization": $0] }
+                    : nil
+                let privacyMode = settings.privacyMode ?? settingsManager.p3Enabled
+                downloadManager.downloadEpisode(guid: episode.guid, audioUrl: audioUrl, authHeaders: authHeaders, privacyMode: privacyMode)
+            }
         }
     }
     
@@ -1459,14 +1829,20 @@ final class PodcastManager {
     }
     
     /// Update episode progress by guid only (used for conflict resolution where podcastUrl is unknown).
-    func updateEpisodeProgressByGuid(episodeGuid: String, position: Int) {
+    /// - Parameter forwardOnly: when true, a position at or behind the stored value is ignored so a
+    ///   stale/behind device (e.g. the watch) can never rewind progress.
+    func updateEpisodeProgressByGuid(episodeGuid: String, position: Int, forwardOnly: Bool = false) {
         for podcast in subscriptions {
-            if let episode = podcast.episodes.first(where: { $0.guid == episodeGuid }),
-               episode.listenedSeconds != position {
-                episode.listenedSeconds = position
-                modelContext.safeSave()
+            guard let episode = podcast.episodes.first(where: { $0.guid == episodeGuid }) else { continue }
+            if forwardOnly && position <= episode.listenedSeconds {
+                Logger(subsystem: "com.yourpods", category: "watch")
+                    .debug("Skipped watch position \(position)s ≤ stored \(episode.listenedSeconds)s for \(episodeGuid)")
                 return
             }
+            guard episode.listenedSeconds != position else { return }
+            episode.listenedSeconds = position
+            modelContext.safeSave()
+            return
         }
     }
     
@@ -1485,15 +1861,46 @@ final class PodcastManager {
         }
     }
     
+    /// Watch commands carry only an episode guid (no podcastUrl). Resolve it via
+    /// `episodes(withGuids:)` and delegate to the standard mark-played pipeline
+    /// (persisted flag + action outbox + server push) — never reimplement completion
+    /// semantics here.
+    /// - Returns: `true` if an episode was found and routed, `false` if the guid is unknown.
+    @discardableResult
+    func markEpisodeAsPlayedByGuid(_ guid: String) -> Bool {
+        guard let episode = episodes(withGuids: [guid]).first,
+              let podcastUrl = episode.podcast?.url else {
+            logger.debug("markEpisodeAsPlayedByGuid: no episode for guid \(guid)")
+            return false
+        }
+        markEpisodeAsPlayed(podcastUrl: podcastUrl, episodeGuid: guid)
+        return true
+    }
+
     /// Mark an episode as fully played (syncs with gPodder and marks as interacted).
     func markEpisodeAsPlayed(podcastUrl: String, episodeGuid: String) {
         // Mark as interacted locally
         markEpisodeAsInteracted(podcastUrl, episodeGuid)
-        
-        // Find the episode to get its audio URL and duration
-        let podcast = subscriptions.first { $0.url == podcastUrl }
-        let episode = podcast?.episodes.first { $0.guid == episodeGuid }
-        
+
+        // Find the episode to get its audio URL and duration. Uses the same
+        // `episodes(withGuids:)` FetchDescriptor lookup as markEpisodeAsPlayedByGuid
+        // instead of `subscriptions.first{...}.episodes.first{...}` relationship
+        // traversal — a watch `mark_as_played` command can race a background
+        // refresh, and the Podcast.episodes relationship cache can be stale after
+        // cross-context writes, silently no-op'ing this call (isPlayed never set)
+        // while the surrounding EpisodeAction/PendingCompletion still fire. This
+        // is defensive consistency of lookup mechanics ONLY — per repo memory
+        // `feed-refresh-reconcile-mechanics`, an `episodes(withGuids:)` change was
+        // already tried and REFUTED as a fix for the separate "feeds not
+        // updating" bug; this change makes no such claim.
+        let episode = episodes(withGuids: [episodeGuid]).first
+
+        // Read the playhead BEFORE completion overwrites it with the duration. It is the
+        // only observed position available for a feed that declares no duration, and
+        // without it the completion outbox had nothing to send but `0` (see
+        // `PendingCompletion.positionSec`).
+        let observedPosition = episode?.listenedSeconds
+
         // Update model
         episode?.isPlayed = true
         if let total = episode?.durationSeconds {
@@ -1520,23 +1927,24 @@ final class PodcastManager {
             await sendEpisodeAction(action)
         }
         
-        // Push completed=true to Pro server so other devices see the episode as finished.
-        // Without this, only natural playback completion (handleEpisodeCompleted) sent
-        // the completed flag — manual "Mark as Played" was invisible to cross-device sync.
-        if let syncClient {
-            let device = deviceId
-            Task {
-                try? await syncClient.syncPlayback(
-                    podcastUrl: podcastUrl,
-                    episodeUrl: audioUrl,
-                    episodeGuid: episodeGuid,
-                    positionSec: Double(total),
-                    durationSec: Double(total),
-                    nowPlaying: false,
-                    completed: true,
-                    deviceId: device
-                )
-            }
+        // Push completed=true to Pro server via the durable completion outbox.
+        // Previously used `Task { try? await syncClient.syncPlayback(...) }` which
+        // silently dropped on App Check 403 / network / background cancellation.
+        // Enqueuing ensures the push is retried on the next sync cycle.
+        if syncClient != nil {
+            let pending = PendingCompletion(
+                podcastUrl: podcastUrl,
+                episodeUrl: audioUrl,
+                episodeGuid: episodeGuid,
+                durationSec: Double(total),
+                eventTime: Date(),
+                // A known duration means the episode is at its end, which is what the local
+                // model was just set to. Without one, the last observed playhead is the
+                // honest answer — anything else invents a position the user never reached.
+                positionSec: episode?.durationSeconds.map(Double.init)
+                    ?? observedPosition.map(Double.init)
+            )
+            enqueueCompletion(pending)
         }
         
         handleDownloadCleanup(for: episodeGuid, podcastUrl: podcastUrl)
@@ -1559,17 +1967,28 @@ final class PodcastManager {
         }
     }
     
+    /// Clears the local played state for an episode without any server call.
+    /// Used internally so that callers that already handle the server call
+    /// (e.g. addToQueue via /queue/add which server-side un-completes)
+    /// don't need to issue a redundant uncompletePlayback POST.
+    func markEpisodeAsUnplayedLocally(podcastUrl: String, episodeGuid: String) {
+        let podcast = subscriptions.first { $0.url == podcastUrl }
+        let episode = podcast?.episodes.first { $0.guid == episodeGuid }
+        episode?.markUnplayedIfNeeded()
+        modelContext.safeSave()
+    }
+
     /// Mark an episode as unplayed (resets position)
     func markEpisodeAsUnplayed(podcastUrl: String, episodeGuid: String) {
         let podcast = subscriptions.first { $0.url == podcastUrl }
         let episode = podcast?.episodes.first { $0.guid == episodeGuid }
-        
-        episode?.isPlayed = false
-        episode?.listenedSeconds = 0
-        modelContext.safeSave()
-        
+
+        // Shared local mutation (churn-guarded via markUnplayedIfNeeded)
+        markEpisodeAsUnplayedLocally(podcastUrl: podcastUrl, episodeGuid: episodeGuid)
+
         let audioUrl = episode?.audioUrl ?? ""
-        
+
+        // gPodder path: emit action:"new" outbox row
         let action = EpisodeAction(
             podcast: podcastUrl,
             episode: audioUrl,
@@ -1581,11 +2000,29 @@ final class PodcastManager {
             total: episode?.durationSeconds ?? 0,
             device: deviceId
         )
-        
+
         Task {
             await sendEpisodeAction(action)
         }
-        
+
+        // Pro path: propagate the un-complete so other devices clear played state.
+        // (YourPodsProClient.uploadEpisodeActions drops non-"play" rows, so without
+        // this explicit call the un-complete never reached the Pro server.)
+        if let syncClient {
+            Task {
+                do {
+                    try await syncClient.uncompletePlayback(
+                        podcastUrl: podcastUrl,
+                        episodeUrl: audioUrl,
+                        episodeGuid: episodeGuid,
+                        clientUpdatedAt: Date()
+                    )
+                } catch {
+                    logger.error("uncompletePlayback failed: \(error.localizedDescription)")
+                }
+            }
+        }
+
         logger.info("Marked episode \(episodeGuid) as unplayed")
     }
     
@@ -1652,7 +2089,15 @@ final class PodcastManager {
                     durationSec: Double(action.total ?? 0),
                     nowPlaying: false,
                     completed: true,
-                    deviceId: device
+                    deviceId: device,
+                    clientUpdatedAt: Date(),
+                    // Sync contract: deliberately legacy last-write-wins, and it stays that way.
+                    // "Mark everything played" is an unconditional user assertion, not a
+                    // position claim to be reconciled — there is no divergence here worth
+                    // prompting about. Sending the `0` sentinel would instead conflict on
+                    // every episode with an existing row and turn one tap into N extra
+                    // resolving round trips for a result step (0) already agrees with.
+                    baseVersion: nil
                 )
             }
         }
@@ -1668,6 +2113,17 @@ final class PodcastManager {
     /// This prevents the "delete bounce-back" bug where a server pull re-adds a locally
     /// deleted subscription. Same pattern used for groups sync.
     func syncSubscriptions() async throws -> [URLRewriteConflict] {
+        // Tracked so cancelActiveSync() (scenePhase .background) can stop
+        // direct calls from view tasks (onboarding, profile activation, force
+        // pull, vault promotion) that no lifecycle hook otherwise reaches.
+        // Orchestrator callers keep their own cancellation: it propagates in.
+        try await withTrackedSync { [weak self] in
+            guard let self else { return [] }
+            return try await self.syncSubscriptionsBody()
+        }
+    }
+
+    private func syncSubscriptionsBody() async throws -> [URLRewriteConflict] {
         guard let client = syncClient else {
             logger.info("No sync client configured, skipping subscription sync")
             return []
@@ -1706,13 +2162,22 @@ final class PodcastManager {
         // ── Step 2: Pull server state ─────────────────────────────────────────
         let delta = try await client.pullSubscriptionChanges(deviceId: deviceId, since: since)
 
+        // Cancellation gate: cancellation lands during the await above. A
+        // cancelled sync must not delete podcasts or open write transactions
+        // on its way out — the timestamp is not advanced, so the next sync
+        // re-pulls the same delta.
+        guard !Task.isCancelled else {
+            logger.info("syncSubscriptions cancelled after pull — skipping apply and saves")
+            return []
+        }
+
         // ── Step 3: Apply server removals ─────────────────────────────────────
         for removeUrl in delta.remove {
             disassociateFromCurrentProfile(url: removeUrl)
-            if let podcast = subscriptions.first(where: { $0.url == removeUrl }) {
-                modelContext.delete(podcast)
-                logger.info("Removed subscription (server initiated): \(removeUrl)")
-            }
+        }
+        if !delta.remove.isEmpty {
+            await syncStore.deletePodcasts(urls: delta.remove)
+            reconcileAfterBackgroundWrites()
         }
 
         // ── Step 4: Apply server additions — but filter out locally-deleted URLs ─
@@ -1740,8 +2205,6 @@ final class PodcastManager {
         if !newUrls.isEmpty {
             subscriptionSyncProgress = (completed: 0, total: newUrls.count)
 
-            let batchSaveInterval = 10
-
             for batchStart in stride(from: 0, to: newUrls.count, by: Self.maxConcurrentFetches) {
                 let batchEnd = min(batchStart + Self.maxConcurrentFetches, newUrls.count)
                 let batch = Array(newUrls[batchStart..<batchEnd])
@@ -1754,7 +2217,8 @@ final class PodcastManager {
                         group.addTask { [weak self] in
                             guard let self else { return nil }
                             do {
-                                let (parsed, episodes) = try await self.rssService.fetchFeed(url: feedUrl)
+                                let result = try await self.rssService.fetchFeed(url: feedUrl)
+                                guard let (parsed, episodes) = result else { return nil }
                                 return (feedUrl, parsed, episodes)
                             } catch {
                                 await MainActor.run {
@@ -1772,17 +2236,34 @@ final class PodcastManager {
                     return collected
                 }
 
-                // Persist results on main actor (we're already @MainActor)
-                for (feedUrl, parsed, episodes) in results {
-                    persistPodcastFromSync(url: feedUrl, parsed: parsed, episodes: episodes)
-                    addedCount += 1
-                    subscriptionSyncProgress = (completed: addedCount, total: newUrls.count)
-                    logger.info("Added subscription from server (\(addedCount)/\(newUrls.count)): \(parsed.title)")
+                // Cancellation gate: cancellation lands during the batch fetch.
+                // Skip persisting — these feeds are re-fetched next sync.
+                if Task.isCancelled {
+                    subscriptionSyncProgress = nil
+                    logger.info("syncSubscriptions cancelled mid-fetch — skipping persist (\(addedCount) added so far)")
+                    return []
                 }
 
-                // Batch save every N podcasts to prevent memory buildup
-                if addedCount % batchSaveInterval == 0 || batchEnd == newUrls.count {
-                    modelContext.safeSave()
+                // Build payloads on main (snapshot sortOrder before crossing to actor)
+                let payloads = results.map { (feedUrl, parsed, episodes) in
+                    NewPodcastPayload(
+                        url: feedUrl,
+                        parsed: parsed,
+                        episodes: episodes,
+                        sortOrder: subscriptions.count + addedCount
+                    )
+                }
+
+                // Persist on background actor
+                let insertedUrls = await syncStore.persistNewPodcasts(payloads)
+                reconcileAfterBackgroundWrites()
+
+                // Associate inserted URLs with profile + update progress (MainActor)
+                for url in insertedUrls {
+                    associateWithCurrentProfile(url: url)
+                    addedCount += 1
+                    subscriptionSyncProgress = (completed: addedCount, total: newUrls.count)
+                    logger.info("Added subscription from server (\(addedCount)/\(newUrls.count)): \(url)")
                 }
             }
 
@@ -1851,6 +2332,15 @@ final class PodcastManager {
             logger.debug("Skipping remote deletion check — incremental sync (since=\(since)); explicit removals handled in Step 3")
         }
 
+        // Cancellation gate: Step 5a's push catch swallows CancellationError,
+        // so cancellation during that await would otherwise reach this save.
+        // Skipping the timestamp keeps the next sync re-pulling safely; an
+        // already-confirmed push is idempotent to re-push.
+        guard !Task.isCancelled else {
+            logger.info("syncSubscriptions cancelled before final save — skipping (next sync re-pulls)")
+            return []
+        }
+
         UserDefaults.standard.set(delta.timestamp, forKey: "lastSubscriptionSync_\(profileId)")
         modelContext.safeSave()
         loadSubscriptions()
@@ -1882,7 +2372,11 @@ final class PodcastManager {
     // MARK: - Episode Action Sync (forwarded to EpisodeActionSyncService)
     
     func syncEpisodeActions(force: Bool = true, strategy: SyncStrategy = .serverWins) async throws -> [SyncConflict] {
-        try await episodeActionSync.syncEpisodeActions(force: force, strategy: strategy)
+        // Tracked for the same reason as syncSubscriptions — see comment there.
+        try await withTrackedSync { [weak self] in
+            guard let self else { return [] }
+            return try await self.episodeActionSync.syncEpisodeActions(force: force, strategy: strategy)
+        }
     }
     
     @discardableResult
@@ -1909,50 +2403,159 @@ final class PodcastManager {
     func sendEpisodeAction(_ action: EpisodeAction) async {
         await episodeActionSync.sendEpisodeAction(action)
     }
-    
-    /// Queue an episode action locally without pushing to the server.
-    /// The action is written to the `actionMap` for deferred server push
+
+    /// Queue an episode action in the outbox without pushing to the server.
+    /// The action is stored in the outbox for deferred server push
     /// on the next foreground sync cycle. Used by `forceSyncProgress()`
     /// to avoid spawning async Tasks during app backgrounding (0xDEAD10CC fix).
     func queueEpisodeAction(_ action: EpisodeAction) {
-        episodeActionSync.sendActionLocally(action)
+        episodeActionSync.enqueueOutboxAction(action)
     }
-    
+
+    /// Enqueue a `completed: true` push for the given episode into the durable
+    /// completion outbox. Replaces fire-and-forget Tasks in call sites so App Check 403 /
+    /// network failures / background cancellation are retried on the next sync cycle.
+    func enqueueCompletion(_ pending: PendingCompletion) {
+        episodeActionSync.enqueueCompletion(pending)
+    }
+
+    /// Returns the set of episode GUIDs (or URLs) waiting in the completion outbox.
+    /// Used by the orchestrator's apply step (B3) to skip un-completing an episode
+    /// that we are about to re-push as completed.
+    func pendingCompletionGuids() -> Set<String> {
+        episodeActionSync.pendingCompletionGuids()
+    }
+
+    /// Drain the completion outbox, pushing each entry as `completed: true`.
+    /// Called by the orchestrator early in each sync cycle (before the apply step).
+    ///
+    /// `baselines` is the caller's `PlaybackBaselineStore` — `PlayerManager` owns the only
+    /// instance, and it is threaded in rather than looked up because two stores over one
+    /// file would each hold their own dictionary and the last `persist()` would win. Pass
+    /// `nil` only where there is genuinely no CAS baseline to keep (gPodder, tests that
+    /// assert on the push rather than the answer); a nil here silently opts the episode
+    /// out of the sync contract's CAS on its next push.
+    func drainCompletionOutbox(using client: any SyncClient, baselines: PlaybackBaselineStore?) async {
+        await episodeActionSync.drainCompletionOutbox(using: client, baselines: baselines)
+    }
+
     func getLatestAction(for guid: String) -> EpisodeAction? {
         episodeActionSync.getLatestAction(for: guid)
     }
     
     // MARK: - Conflict Resolution (forwarded)
     
-    func resolveConflict(_ conflict: SyncConflict, chosenPosition: Int) {
-        episodeActionSync.resolveConflict(conflict, chosenPosition: chosenPosition)
+    @discardableResult
+    func resolveConflict(_ conflict: SyncConflict, chosenPosition: Int) async -> ConflictResolveOutcome {
+        await episodeActionSync.resolveConflict(conflict, chosenPosition: chosenPosition)
+    }
+
+    /// Re-read the conflict list the sheet is showing, after the server has told us the
+    /// row we answered is out of date (`409 conflict_stale`).
+    ///
+    /// Not a sync step and deliberately not `refreshAndSync`: nothing is applied, no
+    /// cursor moves, no local state changes. It re-reads one list so the sheet stops
+    /// showing rows the server has already pruned. Returns `nil` when the list could not
+    /// be re-read at all, which the caller must not confuse with "there are none".
+    func refreshServerConflicts() async -> [SyncConflict]? {
+        guard let proClient = syncClient as? YourPodsProClient else { return nil }
+        do {
+            let response = try await proClient.getSyncConflicts()
+            return ProSyncOrchestrator.mergedServerPositionConflicts(
+                local: [], server: response.conflicts
+            )
+        } catch {
+            logger.error("Could not refresh conflicts after a stale resolution: \(error.localizedDescription)")
+            return nil
+        }
     }
     
     // MARK: - URL Rewrite Resolution
     
     /// Accept a server URL rewrite — update the local podcast's feed URL.
-    func acceptUrlRewrite(_ rewrite: URLRewriteConflict) {
-        guard let podcast = subscriptions.first(where: { $0.url == rewrite.oldUrl }) else {
+    /// Accept a server feed-URL rewrite. Returns whether it actually landed.
+    ///
+    /// **Server first, local rename second.** The previous order — rename locally, then fire
+    /// a `Task` that only logged its failure — is what left the library and the server
+    /// permanently disagreeing about a feed's URL with no way to retry: the prompt was gone,
+    /// the local URL had moved, and nothing recorded that the server never agreed. Web has
+    /// always held the prompt until success, which is why the server's new 500 hands it a
+    /// working retry for free.
+    ///
+    /// A `false` return means the caller must keep the prompt pending.
+    @discardableResult
+    func acceptUrlRewrite(_ rewrite: URLRewriteConflict) async -> Bool {
+        guard subscriptions.contains(where: { $0.url == rewrite.oldUrl }) else {
             logger.warning("Cannot apply URL rewrite: no podcast found for \(rewrite.oldUrl)")
-            return
+            return false
         }
-        
+
+        if let client = syncClient {
+            do {
+                let response = try await client.resolveUrlRewrite(
+                    oldUrl: rewrite.oldUrl,
+                    newUrl: rewrite.newUrl,
+                    accept: true
+                )
+                // `0` is a successful rename that matched nothing — worth seeing, since it
+                // means the server and this device disagreed about what was subscribed.
+                logger.info("Resolved URL rewrite on server: \(response.updated.map(String.init) ?? "unknown") row(s) moved")
+            } catch {
+                logger.error("URL rewrite rejected by server, leaving the library unchanged: \(error.localizedDescription)")
+                return false
+            }
+        }
+
+        // Re-resolve after the await: the subscription list can change while the request is
+        // in flight, and renaming a podcast that is no longer there would be a silent write
+        // against stale state.
+        guard let podcast = subscriptions.first(where: { $0.url == rewrite.oldUrl }) else {
+            logger.warning("URL rewrite resolved on the server but the podcast is gone locally: \(rewrite.oldUrl)")
+            return false
+        }
+
         let oldUrl = podcast.url
         podcast.url = rewrite.newUrl
-        
+
         // Update profile associations
         disassociateFromCurrentProfile(url: oldUrl)
         associateWithCurrentProfile(url: rewrite.newUrl)
-        
+
         modelContext.safeSave()
         loadSubscriptions()
-        
+
         logger.info("Accepted URL rewrite: \(oldUrl) → \(rewrite.newUrl)")
+        return true
     }
-    
-    /// Reject a server URL rewrite — keep the local URL unchanged.
-    func rejectUrlRewrite(_ rewrite: URLRewriteConflict) {
-        logger.info("Rejected URL rewrite for \(rewrite.oldUrl) → \(rewrite.newUrl). Keeping local URL.")
+
+    /// Reject a server URL rewrite — keep the local URL unchanged. Returns whether the
+    /// rejection was recorded server-side; a `false` return means the caller should keep the
+    /// prompt so the user's decision isn't silently lost.
+    @discardableResult
+    func rejectUrlRewrite(_ rewrite: URLRewriteConflict) async -> Bool {
+        // Local session suppression happens either way — the sheet must not re-pop at the
+        // user mid-session even if the server call fails.
+        playerManager?.recordRejectedUrlRewrite(oldUrl: rewrite.oldUrl)
+
+        guard let client = syncClient else {
+            logger.info("Rejected URL rewrite for \(rewrite.oldUrl) → \(rewrite.newUrl). Keeping local URL.")
+            return true
+        }
+
+        do {
+            // Durable rejection (current server releases): without it the bridge re-detects the same
+            // pair and re-prompts every sync cycle, so "no" only ever meant "not right now".
+            _ = try await client.resolveUrlRewrite(
+                oldUrl: rewrite.oldUrl,
+                newUrl: rewrite.newUrl,
+                accept: false
+            )
+            logger.info("Rejected URL rewrite for \(rewrite.oldUrl) → \(rewrite.newUrl). Keeping local URL.")
+            return true
+        } catch {
+            logger.error("Failed to record URL rewrite rejection: \(error.localizedDescription)")
+            return false
+        }
     }
     
     // MARK: - Action Map Persistence (forwarded)
@@ -1963,6 +2566,17 @@ final class PodcastManager {
     
     func loadConflictCounts() {
         episodeActionSync.loadConflictCounts()
+    }
+    
+    func loadOutbox() {
+        episodeActionSync.loadOutbox()
+        episodeActionSync.loadCompletionOutbox()
+    }
+    
+    /// Flush all pending outbox entries to the server.
+    /// Call on app resume, pause, and background transitions.
+    func flushPendingEpisodeActions() async {
+        await episodeActionSync.flushOutbox()
     }
     
     // MARK: - Profile Cleanup
@@ -1976,7 +2590,18 @@ final class PodcastManager {
         defaults.removeObject(forKey: "lastEpisodeActionSync_\(profileId)")
         defaults.removeObject(forKey: "pendingSubscriptionAdds_\(profileId)")
         defaults.removeObject(forKey: "pendingSubscriptionRemovals_\(profileId)")
+        episodeActionSync.removeOutboxEntries(forProfileId: profileId)
+        // Delete the profile's scoped action map + completion outbox so its positions
+        // can't leak into another profile's sync (and onward to that profile's server).
+        episodeActionSync.deleteProfileFiles(forProfileId: profileId)
         logger.info("Cleared data for profile \(profileId)")
+    }
+
+    /// Swap the episode-action state (action map, completion outbox) to another profile.
+    /// Call when activating a profile so a switch does not carry the previous profile's
+    /// positions into the newly active one.
+    func switchActiveProfile(to profileId: String) {
+        episodeActionSync.switchProfile(to: profileId)
     }
     
     /// Check whether other profiles exist (to distinguish migration from fresh profile).
@@ -1986,73 +2611,6 @@ final class PodcastManager {
             return false
         }
         return profiles.contains { $0.id != profileId }
-    }
-    
-    // MARK: - Parsed Metadata Mapping
-    
-    /// Map new RSS/iTunes/Podcasting 2.0 fields from parsed data to a Podcast model.
-    private func mapParsedPodcastMetadata(_ parsed: ParsedPodcast, to podcast: Podcast) {
-        podcast.language = parsed.language
-        podcast.copyright = parsed.copyright
-        podcast.categories = parsed.categories
-        podcast.subcategory = parsed.subcategory
-        podcast.explicit = parsed.explicit
-        podcast.showType = parsed.showType
-        podcast.isComplete = parsed.isComplete
-        podcast.newFeedUrl = parsed.newFeedUrl
-        podcast.podcastGuid = parsed.podcastGuid
-        podcast.fundingUrl = parsed.fundingUrl
-        podcast.fundingLabel = parsed.fundingLabel
-        podcast.publisher = parsed.publisher
-        podcast.supportsValue4Value = parsed.supportsValue4Value
-        podcast.hasLiveItem = parsed.hasLiveItem
-        podcast.liveItemStatus = parsed.liveItemStatus
-        podcast.liveItemStart = parsed.liveItemStart
-        podcast.liveItemContentLink = parsed.liveItemContentLink
-    }
-    
-    /// Map new iTunes/Podcasting 2.0 fields from parsed data to an Episode model.
-    private func mapParsedEpisodeMetadata(_ parsed: ParsedEpisode, to episode: Episode) {
-        episode.seasonNumber = parsed.seasonNumber
-        episode.seasonName = parsed.seasonName
-        episode.episodeNumber = parsed.episodeNumber
-        episode.episodeDisplay = parsed.episodeDisplay
-        episode.episodeType = parsed.episodeType
-        episode.explicit = parsed.explicit
-        
-        // Update transcript and chapters URLs (feeds may add these to existing episodes)
-        if let transcriptUrl = parsed.transcriptUrl, !transcriptUrl.isEmpty {
-            episode.transcriptUrl = transcriptUrl
-        }
-        if let chaptersUrl = parsed.chaptersUrl, !chaptersUrl.isEmpty {
-            episode.chaptersUrl = chaptersUrl
-        }
-        
-        // Encode Podlove inline chapters to JSON for persistence
-        if let chapters = parsed.inlineChapters, !chapters.isEmpty {
-            struct InlineChapterData: Codable {
-                let startTime: Double
-                let title: String
-                let img: String?
-                let url: String?
-            }
-            let encoded = chapters.map { InlineChapterData(startTime: $0.startTime, title: $0.title, img: $0.image, url: $0.href) }
-            if let data = try? JSONEncoder().encode(encoded) {
-                episode.chaptersJSON = String(data: data, encoding: .utf8)
-            }
-        }
-    }
-    
-    // MARK: - URL Comparison Helpers
-    
-    /// Strip query parameters from a URL string for base-path comparison.
-    /// Handles Megaphone's `?updated=TIMESTAMP` cache-busters and similar
-    /// query-param variations that change the URL without changing the content.
-    static func stripQueryParams(_ urlString: String) -> String {
-        guard var comps = URLComponents(string: urlString) else { return urlString }
-        comps.query = nil
-        comps.fragment = nil
-        return comps.string ?? urlString
     }
     
     // MARK: - Action Map Pruning (P2-1)
@@ -2094,66 +2652,15 @@ final class PodcastManager {
     
     // MARK: - Crash-Safe Batch Uploads (P1-2)
     
-    private static let pendingUploadGuidsKey = "pendingUploadGuids"
-    
-    /// GUIDs of episode actions that have been buffered locally but not yet
-    /// confirmed uploaded to the server. Persisted to UserDefaults so they
-    /// survive crashes between buffer and flush.
-    var pendingUploadGuids: Set<String> {
-        get {
-            guard let data = UserDefaults.standard.data(forKey: Self.pendingUploadGuidsKey),
-                  let guids = try? JSONDecoder().decode(Set<String>.self, from: data) else {
-                return []
-            }
-            return guids
-        }
-        set {
-            if let data = try? JSONEncoder().encode(newValue) {
-                UserDefaults.standard.set(data, forKey: Self.pendingUploadGuidsKey)
-            }
-        }
-    }
-    
     /// Buffer an episode action for later batch upload.
-    /// The action is stored in the action map immediately (persist-first)
-    /// and the GUID is added to the pending upload set.
+    /// Replaced by the outbox system — forwards to `queueEpisodeAction`.
     func bufferEpisodeAction(_ action: EpisodeAction) {
-        // Store in action map immediately (already persisted by episodeActionSync)
-        episodeActionSync.sendActionLocally(action)
-        episodeActionSync.forcePersistActionMap()
-        
-        // Track as pending upload
-        var pending = pendingUploadGuids
-        if let guid = action.guid {
-            pending.insert(guid)
-        }
-        pendingUploadGuids = pending
+        queueEpisodeAction(action)
     }
     
     /// Flush all pending buffered actions to the server.
-    /// On success, clears the pending set. On failure, GUIDs remain pending
-    /// for retry on the next flush.
+    /// Replaced by the outbox system — forwards to `flushPendingEpisodeActions`.
     func flushPendingActions() async {
-        guard let client = syncClient else { return }
-        let pending = pendingUploadGuids
-        guard !pending.isEmpty else { return }
-        
-        // Collect actions from the action map for all pending GUIDs
-        let actionsToUpload = pending.compactMap { actionMap[$0] }
-        guard !actionsToUpload.isEmpty else {
-            // GUIDs exist but actions don't — stale pending set, clear it
-            pendingUploadGuids = []
-            return
-        }
-        
-        do {
-            _ = try await client.uploadEpisodeActions(actionsToUpload)
-            // Success — clear pending set
-            pendingUploadGuids = []
-            logger.info("Flushed \(actionsToUpload.count) pending episode actions to server")
-        } catch {
-            logger.error("Failed to flush pending actions — will retry: \(error.localizedDescription)")
-            // Leave pendingUploadGuids intact for retry
-        }
+        await flushPendingEpisodeActions()
     }
 }

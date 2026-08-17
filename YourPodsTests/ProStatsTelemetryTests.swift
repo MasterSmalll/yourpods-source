@@ -3,8 +3,7 @@ import XCTest
 
 // MARK: - ProStatsEvent Schema Tests
 
-/// Tests for the updated ProStatsEvent schema (id + timestamp fields).
-/// Phase 1 (Red): These will fail until id/timestamp are added to the model.
+/// Tests for the ProStatsEvent schema (id + timestamp fields).
 final class ProStatsEventSchemaTests: XCTestCase {
 
     private let encoder = JSONEncoder()

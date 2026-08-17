@@ -15,17 +15,39 @@ import Foundation
 protocol SyncOrchestrator {
     /// Run the full sync cycle for this profile type.
     ///
+    /// - Parameter isBackground: When `true`, the orchestrator may reorder steps
+    ///   to prioritize high-value data (episode actions, queue) before RSS refresh,
+    ///   since BGTask gives ~30s and RSS can consume most of that time.
     /// - Returns: Any sync conflicts that need user resolution.
     func sync(
         podcastManager: PodcastManager,
         playerManager: PlayerManager,
         downloadManager: DownloadManager,
         settingsManager: SettingsManager,
-        conflictStrategy: SyncStrategy
+        conflictStrategy: SyncStrategy,
+        isBackground: Bool
     ) async -> [SyncConflict]
 }
 
-// MARK: - SyncOrchestratorFactory
+/// Default `isBackground = false` for callers that don't specify it.
+extension SyncOrchestrator {
+    func sync(
+        podcastManager: PodcastManager,
+        playerManager: PlayerManager,
+        downloadManager: DownloadManager,
+        settingsManager: SettingsManager,
+        conflictStrategy: SyncStrategy
+    ) async -> [SyncConflict] {
+        await sync(
+            podcastManager: podcastManager,
+            playerManager: playerManager,
+            downloadManager: downloadManager,
+            settingsManager: settingsManager,
+            conflictStrategy: conflictStrategy,
+            isBackground: false
+        )
+    }
+}
 
 /// Creates the appropriate `SyncOrchestrator` based on the active profile.
 ///

@@ -2,9 +2,6 @@ import SwiftUI
 
 /// Home screen showing recently updated episodes, quick actions, and now playing.
 struct HomeView: View {
-    /// Maximum number of episodes shown in the "Recently Updated" section.
-    /// Two rows × ~6 visible columns for horizontal scroll.
-    static let recentEpisodesLimit = 12
     @Environment(PodcastManager.self) private var podcastManager
     @Environment(PlayerManager.self) private var playerManager
     @Environment(DownloadManager.self) private var downloadManager
@@ -15,13 +12,16 @@ struct HomeView: View {
     @State private var episodeSheetItem: EpisodeSheetItem?
     
     /// Collect the newest unplayed, non-interacted episodes across all subscriptions.
-    /// Limited to episodes from the last 2 months to ensure podcast diversity.
-    private var recentEpisodes: [Episode] {
+    /// Limited to episodes from the last 3 months with per-podcast diversity guarantees.
+    private var recentFilterResult: RecentlyUpdatedFilter.FilterResult {
         RecentlyUpdatedFilter.filter(
             episodes: podcastManager.subscriptions.flatMap { $0.episodes },
-            limit: Self.recentEpisodesLimit
+            limit: settingsManager.recentlyUpdatedLimit
         )
     }
+    
+    private var recentEpisodes: [Episode] { recentFilterResult.episodes }
+    private var overflowCount: Int { recentFilterResult.overflowCount }
     
     var body: some View {
         NavigationStack {
@@ -37,9 +37,7 @@ struct HomeView: View {
                                 settingsManager: settingsManager,
                                 strategy: strategy
                             )
-                            if !conflicts.isEmpty && strategy == .ask {
-                                playerManager.pendingConflicts = conflicts
-                            }
+                            playerManager.deliverConflicts(conflicts, strategy: strategy)
                         }
                     }
                     
@@ -52,9 +50,30 @@ struct HomeView: View {
                     
                     // Recently Updated Episodes
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("Recently Updated")
-                            .font(.title2.bold())
-                            .padding(.horizontal)
+                        HStack {
+                            Text("Recently Updated")
+                                .font(.title2.bold())
+                            Spacer()
+                            // Persistent entry to the full new-episodes list. Shows
+                            // "+N more" when the settings limit hides some, else
+                            // "See All" so the full list is always reachable.
+                            if !recentEpisodes.isEmpty {
+                                NavigationLink {
+                                    AllRecentEpisodesView()
+                                } label: {
+                                    Group {
+                                        if overflowCount > 0 {
+                                            Text("+\(overflowCount) more")
+                                        } else {
+                                            Text("See All")
+                                        }
+                                    }
+                                    .font(.subheadline.weight(.medium))
+                                    .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        .padding(.horizontal)
                         
                         if recentEpisodes.isEmpty {
                             HStack {
@@ -111,9 +130,7 @@ struct HomeView: View {
                                         settingsManager: sm,
                                         strategy: strategy
                                     )
-                                    if !conflicts.isEmpty && strategy == .ask {
-                                        plm.pendingConflicts = conflicts
-                                    }
+                                    plm.deliverConflicts(conflicts, strategy: strategy)
                                 }
                             }
                             
@@ -174,25 +191,17 @@ struct HomeView: View {
     
     // MARK: - Recently Updated Layout
     
-    /// Card width constant shared between grid and horizontal scroll layouts.
-    private static let cardWidth: CGFloat = 110
-    /// Spacing between cards.
-    private static let cardSpacing: CGFloat = 12
-    /// Horizontal padding on each side.
-    private static let horizontalPadding: CGFloat = 16
-    
     /// Dynamically chooses centered grid or horizontal scroll based on available width.
     @ViewBuilder
     private func recentEpisodesGrid(episodes: [Episode]) -> some View {
         GeometryReader { geo in
-            let availableWidth = geo.size.width - (Self.horizontalPadding * 2)
-            let columnsPerRow = max(1, Int(availableWidth / (Self.cardWidth + Self.cardSpacing)))
-            let fitsOnScreen = episodes.count <= columnsPerRow * 2
+            let containerWidth = geo.size.width
+            let columnsPerRow = RecentGridLayout.columnsPerRow(availableWidth: containerWidth)
             
-            if fitsOnScreen {
+            if RecentGridLayout.fitsOnScreen(episodeCount: episodes.count, availableWidth: containerWidth) {
                 // All episodes fit in ≤2 rows — centered grid
-                let columns = Array(repeating: GridItem(.flexible(), spacing: Self.cardSpacing), count: columnsPerRow)
-                LazyVGrid(columns: columns, spacing: 14) {
+                let columns = Array(repeating: GridItem(.flexible(), spacing: RecentGridLayout.cardSpacing), count: columnsPerRow)
+                LazyVGrid(columns: columns, spacing: RecentGridLayout.rowSpacing) {
                     ForEach(episodes) { episode in
                         recentEpisodeButton(for: episode)
                     }
@@ -201,8 +210,8 @@ struct HomeView: View {
             } else {
                 // More episodes than fit — horizontally scrollable 2-row grid
                 ScrollView(.horizontal, showsIndicators: false) {
-                    let rows = Array(repeating: GridItem(.fixed(170), spacing: Self.cardSpacing), count: 2)
-                    LazyHGrid(rows: rows, spacing: Self.cardSpacing) {
+                    let rows = Array(repeating: GridItem(.fixed(RecentGridLayout.rowHeight), spacing: RecentGridLayout.cardSpacing), count: 2)
+                    LazyHGrid(rows: rows, spacing: RecentGridLayout.cardSpacing) {
                         ForEach(episodes) { episode in
                             recentEpisodeButton(for: episode)
                         }
@@ -211,14 +220,7 @@ struct HomeView: View {
                 }
             }
         }
-        .frame(height: recentEpisodesGridHeight(count: episodes.count))
-    }
-    
-    /// Calculates the height needed for the recent episodes section.
-    private func recentEpisodesGridHeight(count: Int) -> CGFloat {
-        let rowHeight: CGFloat = 170
-        let rows: CGFloat = count <= 3 ? 1 : 2
-        return (rowHeight * rows) + (rows > 1 ? 14 : 0)
+        .frame(height: RecentGridLayout.gridHeight(episodeCount: episodes.count, availableWidth: RecentGridLayout.screenWidth))
     }
     
     /// Shared episode card button with context menu — used by both grid and scroll layouts.
@@ -260,12 +262,15 @@ struct HomeView: View {
                 )
             }
             Button {
-                podcastManager.markEpisodeAsPlayed(
-                    podcastUrl: episode.podcastUrl ?? "",
-                    episodeGuid: episode.guid
-                )
+                markEpisodePlayed(episode)
             } label: {
                 Label("Mark as Played", systemImage: "checkmark.circle")
+            }
+            Button {
+                podcastManager.toggleHidden(episode: episode)
+            } label: {
+                let isHidden = podcastManager.episodeActionSync.isHidden(guid: episode.guid)
+                Label(isHidden ? "Unhide" : "Hide", systemImage: isHidden ? "eye" : "eye.slash")
             }
             Divider()
             Button {
@@ -288,18 +293,36 @@ struct HomeView: View {
             downloadAction(episode)
         }
         .accessibilityAction(named: "Mark as Played") {
-            podcastManager.markEpisodeAsPlayed(
-                podcastUrl: episode.podcastUrl ?? "",
-                episodeGuid: episode.guid
-            )
+            markEpisodePlayed(episode)
+        }
+        .accessibilityAction(named: podcastManager.episodeActionSync.isHidden(guid: episode.guid) ? "Unhide" : "Hide") {
+            podcastManager.toggleHidden(episode: episode)
         }
         .accessibilityAction(named: "Details") {
             episodeSheetItem = EpisodeSheetItem(episode: episode)
         }
     }
     
+    /// Mark an episode played. If it is the one currently playing, route through
+    /// PlayerManager so playback advances to the next queued episode (or stops when
+    /// Up Next is empty) instead of leaving a played episode playing — the same
+    /// gate EpisodeDetailSheet uses.
+    private func markEpisodePlayed(_ episode: Episode) {
+        if EpisodeDetailSheetHelper.shouldUsePlayerManager(
+            episodeGuid: episode.guid,
+            currentEpisodeGuid: playerManager.currentEpisodeGuid
+        ) {
+            playerManager.markCurrentEpisodeAsPlayed()
+        } else {
+            podcastManager.markEpisodeAsPlayed(
+                podcastUrl: episode.podcastUrl ?? "",
+                episodeGuid: episode.guid
+            )
+        }
+    }
+
     // MARK: - Download Action
-    
+
     /// Toggle download state for an episode from context menu.
     private func downloadAction(_ episode: Episode) {
         if downloadManager.isDownloaded(episode.guid) {
@@ -387,11 +410,14 @@ private struct RecentEpisodeCard: View {
                         }
                 }
                 .frame(width: 110, height: 110)
+                .clipped()
                 .clipShape(RoundedRectangle(cornerRadius: 10))
                 
                 // NEW badge
                 if isNew {
-                    Text("NEW")
+                    Text(String(localized: "episode.badge.new",
+                                defaultValue: "NEW",
+                                comment: "Small badge on an episode the user has not seen yet. English styles it all-caps; use your language's normal badge convention rather than copying the capitalisation."))
                         .font(.system(size: 9, weight: .bold))
                         .foregroundColor(.white)
                         .padding(.horizontal, 5)
@@ -419,21 +445,22 @@ private struct RecentEpisodeCard: View {
         .frame(width: 110)
         // MARK: VoiceOver
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel({
-            var label = episode.title
-            if let podcastTitle = episode.podcastTitle {
-                label += ", \(podcastTitle)"
-            }
-            if isNew { label += ", New episode" }
-            return label
-        }())
+        .accessibilityLabel(EpisodeAccessibility.cardLabel(
+            title: episode.title,
+            podcastTitle: episode.podcastTitle,
+            isNew: isNew
+        ))
     }
 }
 
 // MARK: - Quick Action Button
 
 private struct QuickActionButton: View {
-    let title: String
+    /// `LocalizedStringResource`, not `String`: as a `String` the literals at
+    /// the call sites bound the non-localizing overload and shipped in English
+    /// everywhere — verified under the double-length pseudolanguage, where
+    /// every label on the Home screen doubled except these two.
+    let title: LocalizedStringResource
     let icon: String
     var isLoading: Bool = false
     let action: () -> Void
@@ -451,11 +478,23 @@ private struct QuickActionButton: View {
             }
             .frame(maxWidth: .infinity)
             .padding()
-            .background(.ultraThinMaterial)
+            .yourPodsGlass(role: .card, cornerRadius: 12)
             .clipShape(RoundedRectangle(cornerRadius: 12))
         }
         .disabled(isLoading)
-        .accessibilityLabel(isLoading ? "\(title), loading" : title)
+        .accessibilityLabel(Self.actionCardLabel(title: title, isLoading: isLoading))
+    }
+
+    /// The card's title, with "loading" appended while its action runs.
+    ///
+    /// Written as a ternary between an interpolated literal and a bare
+    /// `String`, this bound the non-localizing overload: neither branch
+    /// extracted, so VoiceOver said "loading" in every language.
+    private static func actionCardLabel(title: LocalizedStringResource, isLoading: Bool) -> String {
+        guard isLoading else { return String(localized: title) }
+        return String(localized: "a11y.card.loading",
+                      defaultValue: "\(String(localized: title)), loading",
+                      comment: "VoiceOver label for an action card whose work is still running. The argument is the card's title.")
     }
 }
 
@@ -465,12 +504,21 @@ private struct NowPlayingCard: View {
     let item: QueueItem
     @Environment(PlayerManager.self) private var playerManager
     @Environment(PodcastManager.self) private var podcastManager
-    @State private var chapters: [Chapter] = []
+    @Environment(ChapterCoordinator.self) private var chapterCoordinator
     @State private var showChapters = false
-    
+
+    /// Chapters for the currently-playing item, owned by `ChapterCoordinator`
+    /// — the same resolved (embedded-first) list the mini player and CarPlay
+    /// show. This card is the now-playing card (it renders the current
+    /// `item`), so it's a currently-playing surface per the chapter-images
+    /// plan and reads the coordinator directly rather than running its own
+    /// feed-only `ChapterService.fetchAllChapters`, which showed nothing for
+    /// episodes whose chapters are embedded in the audio file.
+    private var chapters: [Chapter] { chapterCoordinator.visibleChapters }
+
     /// Artwork size — 15% smaller than the original 60pt.
     private static let artworkSize: CGFloat = 51
-    
+
     /// Current chapter based on playback position.
     private var currentChapter: Chapter? {
         guard !chapters.isEmpty else { return nil }
@@ -490,6 +538,7 @@ private struct NowPlayingCard: View {
                     RoundedRectangle(cornerRadius: 8).fill(.quaternary)
                 }
                 .frame(width: Self.artworkSize, height: Self.artworkSize)
+                .clipped()
                 .clipShape(RoundedRectangle(cornerRadius: 8))
                 .padding(.top, 10)
                 .padding(.bottom, 6)
@@ -516,7 +565,7 @@ private struct NowPlayingCard: View {
                                 totalDuration: playerManager.currentDuration
                             )
                             if !meta.isEmpty {
-                                Text("·")
+                                Text(verbatim: "·")
                                     .font(.caption2)
                                     .foregroundStyle(.tertiary)
                                 Text(meta)
@@ -544,7 +593,7 @@ private struct NowPlayingCard: View {
                 .padding(.horizontal, 12)
                 .padding(.bottom, 8)
             }
-            .background(.ultraThinMaterial)
+            .yourPodsGlass(role: .card, cornerRadius: 12)
             .clipShape(RoundedRectangle(cornerRadius: 12))
         }
         .buttonStyle(.plain)
@@ -563,14 +612,6 @@ private struct NowPlayingCard: View {
                 }
             }
         )
-        .task(id: playerManager.currentEpisodeGuid) {
-            chapters = []
-            chapters = await ChapterService.shared.fetchAllChapters(
-                chaptersUrl: item.chaptersUrl,
-                chaptersJSON: item.chaptersJSON,
-                description: item.episodeDescription
-            )
-        }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(EpisodeAccessibility.nowPlayingLabel(
             title: item.title,

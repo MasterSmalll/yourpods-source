@@ -1,6 +1,6 @@
 # YourPods — Spec Compliance Tracker
 
-> **Last Updated**: 2026-05-19 (Stats events v2 schema — id, timestamp, segment tracking, raw array format)  
+> **Last Updated**: 2026-08-17 (release 26.8.0 — embedded chapter extraction, Markdown/RTF transcripts)  
 > **Purpose**: Living document tracking YourPods support across podcast specs and sync protocols. Update when implementing features or when upstream specs change.
 
 ---
@@ -55,8 +55,8 @@
 
 | Tag | Scope | Status | Impl File(s) |
 |-----|-------|--------|-------------|
-| `podcast:transcript` | Item | ✅ | `RSSService.swift`, `TranscriptService.swift`, `TranscriptListSheet.swift` — SRT, VTT, JSON, `text/plain`, `text/html` |
-| `podcast:chapters` | Item | ✅ | `RSSService.swift`, `ChapterService.swift`, `ChapterListSheet.swift` |
+| `podcast:transcript` | Item | ✅ | `RSSService.swift`, `TranscriptService.swift`, `TranscriptListSheet.swift` — SRT, VTT, JSON, `text/plain`, `text/html`, `text/markdown`, `application/rtf` |
+| `podcast:chapters` | Item | ✅ | `RSSService.swift`, `ChapterService.swift`, `ChapterListSheet.swift`. Chapters embedded in the audio file (ID3 `CHAP`/`CTOC`, MP4 chapter tracks) are also read, via `Services/Chapters/` |
 | `podcast:guid` | Channel | ✅ | `RSSService.swift` |
 | `podcast:funding` | Channel + Item | ✅ | `RSSService.swift` |
 | `podcast:season` | Item | ✅ | `RSSService.swift` |
@@ -89,7 +89,7 @@
 
 **Score: 10/27** (excluding publisher/server-only)
 
-> **Web API availability**: `podcast:person`, `podcast:soundbite`, `podcast:medium`, `podcast:trailer`, `podcast:podroll`, and `podcast:remoteItem` are parsed server-side (Build 130) and available via `GET /api/yourpods/library` and `GET /api/yourpods/podcast?feedUrl=`. iOS can display these from the API without adding them to `RSSService.swift`.
+> **Web API availability**: `podcast:person`, `podcast:soundbite`, `podcast:medium`, `podcast:trailer`, `podcast:podroll`, and `podcast:remoteItem` are parsed server-side and available via `GET /api/yourpods/library` and `GET /api/yourpods/podcast?feedUrl=`. iOS can display these from the API without adding them to `RSSService.swift`.
 
 ---
 
@@ -202,7 +202,7 @@ YourPods Pro is an optional enhanced sync backend. Firebase is used for authenti
 
 **Pro Score: 26/26 endpoints** ✅
 
-> **v1→v2 Migration Status**: Complete. All settings sync uses v2 profile-scoped endpoints exclusively. v1 handlers (`/settings/global`, `/settings/podcasts`) are dead code on the iOS side — server team confirmed v1 endpoint removal and `podcast_settings` table deprecation is proceeding (2026-05-11).
+> **v1→v2 Migration Status**: Complete. All settings sync uses v2 profile-scoped endpoints exclusively; the v1 `/settings/global` and `/settings/podcasts` handlers are dead code on the iOS side.
 
 ---
 
@@ -222,4 +222,4 @@ YourPods Pro is an optional enhanced sync backend. Firebase is used for authenti
 
 ## Changelog
 
-_See `spec_compliance_changelog.md` for full history._
+_Per-release user-facing changes are in [RELEASE_NOTES.md](RELEASE_NOTES.md)._

@@ -248,6 +248,27 @@ final class RSSParserTests: XCTestCase {
         XCTAssertEqual(episodes[0].durationSeconds, 3958,
                        "Duration '1:05:58' should parse to 3958 seconds")
     }
+    
+    // MARK: - Date-only pubDate (qurangarden regression)
+    
+    func test_dateOnlyPubDate_parsesAndOrdersNewestFirst() throws {
+        let xml = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0"><channel><title>Quran Garden</title>
+          <item><title>Newest</title><guid>ep-newest</guid><pubDate>2026-06-12</pubDate>
+            <enclosure url="https://example.com/3.mp3" type="audio/mpeg"/></item>
+          <item><title>Middle</title><guid>ep-middle</guid><pubDate>2025-08-01</pubDate>
+            <enclosure url="https://example.com/2.mp3" type="audio/mpeg"/></item>
+          <item><title>Oldest</title><guid>ep-oldest</guid><pubDate>2025-02-04</pubDate>
+            <enclosure url="https://example.com/1.mp3" type="audio/mpeg"/></item>
+        </channel></rss>
+        """
+        let (_, episodes) = try RSSService.parseFeedData(Data(xml.utf8))
+        XCTAssertEqual(episodes.count, 3)
+        XCTAssertNotNil(episodes[0].pubDate, "bare yyyy-MM-dd must parse")
+        let sorted = episodes.sorted { ($0.pubDate ?? .distantPast) > ($1.pubDate ?? .distantPast) }
+        XCTAssertEqual(sorted.map { $0.guid }, ["ep-newest", "ep-middle", "ep-oldest"])
+    }
 }
 
 // MARK: - HTML Stripping Tests

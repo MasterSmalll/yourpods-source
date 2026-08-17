@@ -67,6 +67,9 @@ struct YourPodsWatch_Watch_AppApp: App {
         .backgroundTask(.appRefresh(BackgroundRefreshManager.refreshTaskId)) {
             await withCheckedContinuation { continuation in
                 Task { @MainActor in
+                    // Cold background launch: onAppear has NOT run. activate() is
+                    // idempotent — make sure WCSession is live before refreshing.
+                    WatchSessionManager.shared.activate()
                     BackgroundRefreshManager.shared.handleRefresh {
                         continuation.resume()
                     }

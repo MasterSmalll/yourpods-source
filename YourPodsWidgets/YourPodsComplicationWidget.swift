@@ -191,7 +191,7 @@ struct YourPodsComplicationWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind, provider: ComplicationTimelineProvider()) { entry in
             ComplicationContentView(data: entry.data)
-                .containerBackground(Color.blue, for: .widget)
+                .containerBackground(.clear, for: .widget)
         }
         .configurationDisplayName("YourPods")
         .description("Now playing and up next from your podcast queue.")

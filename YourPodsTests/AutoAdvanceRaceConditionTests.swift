@@ -155,4 +155,100 @@ final class AutoAdvanceRaceConditionTests: XCTestCase {
         // THEN: Should be rejected
         XCTAssertNil(result.completed, "Should not fire during active advance")
     }
+
+    // MARK: - Deferred playback-rate on .readyToPlay (silent-stop regression)
+
+    func test_playStartsAtPerEpisodeRate_whenItemBecomesReady_REGRESSION() {
+        // GIVEN: a non-1.0 rate was deferred because the freshly-loaded item
+        // wasn't .readyToPlay yet. Setting player.rate directly on an unready
+        // AVQueuePlayer item is silently dropped — the auto-advance "silent
+        // stop" bug. The rate must be applied once the item becomes ready.
+        let manager = AudioManager()
+        manager.testablePendingPlaybackRate = 1.5
+
+        // WHEN: the item reaches .readyToPlay and the status observer runs
+        manager.testableHandleItemReadyToPlay()
+
+        // THEN: the deferred rate is applied and the pending flag cleared, so
+        // playback actually starts (at the right speed) instead of staying silent.
+        XCTAssertNil(manager.testablePendingPlaybackRate,
+                     "Deferred rate must be applied and cleared once the item is ready")
+    }
+
+    func test_pauseClearsPendingRate() {
+        // GIVEN: a deferred rate is pending (item still loading)
+        let manager = AudioManager()
+        manager.testablePendingPlaybackRate = 1.5
+
+        // WHEN: the user pauses before the item became ready
+        manager.pause()
+
+        // THEN: the pending rate is dropped so it can't kick playback after pause.
+        XCTAssertNil(manager.testablePendingPlaybackRate,
+                     "pause() must clear a pending deferred rate")
+    }
+
+    // MARK: - skipToNext (manual advance — first direct coverage)
+
+    func test_skipToNext_advancesToNextAndFiresCompletionOnce() async {
+        let manager = AudioManager()
+        manager.currentItem = makeItem(id: "ep-1")
+        manager.appendToQueue([makeItem(id: "ep-2")])
+        manager.isPlaying = true
+        var completedIds: [String] = []
+        manager.onEpisodeCompleted = { completedIds.append($0.id) }
+
+        manager.skipToNext()
+
+        let advanced = await pollUntil { manager.currentItem?.id == "ep-2" }
+        XCTAssertTrue(advanced, "skipToNext must advance currentItem to the next queued episode")
+        XCTAssertEqual(completedIds, ["ep-1"],
+                       "exactly one completion callback for the skipped episode")
+        XCTAssertTrue(manager.queue.isEmpty, "next item must be popped from Up Next")
+    }
+
+    func test_skipToNext_emptyQueue_stopsWithoutFiringCompletion() {
+        let manager = AudioManager()
+        manager.currentItem = makeItem(id: "ep-1")
+        manager.isPlaying = true
+        var completedIds: [String] = []
+        manager.onEpisodeCompleted = { completedIds.append($0.id) }
+
+        manager.skipToNext()
+
+        XCTAssertNil(manager.currentItem, "empty-queue skip stops playback")
+        XCTAssertFalse(manager.isPlaying)
+        XCTAssertTrue(completedIds.isEmpty,
+                      "empty-queue skip must NOT fire onEpisodeCompleted — callers on this path mark played themselves (PlayerManager relies on this)")
+    }
+
+    func test_skipToNext_autoPlayFalse_advancesWithoutStartingPlayback() async {
+        let manager = AudioManager()
+        manager.currentItem = makeItem(id: "ep-1")
+        manager.appendToQueue([makeItem(id: "ep-2")])
+        manager.isPlaying = false   // user is paused
+
+        manager.skipToNext(autoPlay: false)
+
+        let advanced = await pollUntil { manager.currentItem?.id == "ep-2" }
+        XCTAssertTrue(advanced, "autoPlay:false must still advance the queue")
+        XCTAssertFalse(manager.isPlaying,
+                       "autoPlay:false must load the next episode paused — play() must never run (paused-handoff precedent)")
+    }
+}
+
+/// Poll until `condition` is true or `timeout` elapses, yielding to the main actor
+/// between checks. No real-time sleeps — the advance Task runs on the main actor,
+/// and playEpisode sets currentItem in its synchronous prefix, so a few yields
+/// are enough on the happy path.
+@MainActor
+fileprivate func pollUntil(
+    timeout: TimeInterval = 2.0,
+    _ condition: () -> Bool
+) async -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    while !condition() && Date() < deadline {
+        await Task.yield()
+    }
+    return condition()
 }

@@ -16,6 +16,7 @@ struct EpisodeDetailSheet: View {
     @State private var showChapters = false
     @State private var showTranscript = false
     @State private var showShareOptions = false
+    @State private var showAddNote = false
     @State private var chapters: [Chapter]
     @State private var transcript: Transcript?
     @State private var formattedDescription: AttributedString?
@@ -66,29 +67,22 @@ struct EpisodeDetailSheet: View {
                 // Yield to ensure view update completes before mutating state
                 try? await Task.sleep(for: .milliseconds(50))
                 
-                // Fetch chapters: URL → inline JSON → description
-                if let chaptersUrl = episode.chaptersUrl, !chaptersUrl.isEmpty {
-                    let fetched = await ChapterService.shared.fetchChapters(url: chaptersUrl)
-                    if !fetched.isEmpty {
-                        chapters = fetched
-                    }
-                }
-                // If URL-fetch didn't produce chapters, try inline JSON
-                if chapters.isEmpty, let json = episode.chaptersJSON, !json.isEmpty {
-                    let inline = ChapterService.parseInlineChaptersJSON(json)
-                    if !inline.isEmpty {
-                        chapters = inline
-                    }
-                }
-                // Fallback: parse chapters from episode description
-                if chapters.isEmpty, let desc = episode.episodeDescription {
-                    let parsed = ChapterService.parseChaptersFromDescription(desc)
-                    if !parsed.isEmpty {
-                        chapters = parsed
-                    }
-                }
+                // Fetch chapters: URL → inline Podlove JSON → description.
+                // This is a browsing surface for possibly-unplayed episodes,
+                // so it stays feed-only by design (no embedded AVAsset
+                // parsing) — fetchAllChapters already implements the full
+                // feed-source chain in one call, including the inline
+                // `chaptersJSON` source the old hand-rolled chain here used
+                // to skip entirely (bug fix: Podlove-only feeds
+                // showed no chapters).
+                chapters = await ChapterService.shared.fetchAllChapters(
+                    chaptersUrl: episode.chaptersUrl,
+                    chaptersJSON: episode.chaptersJSON,
+                    description: episode.episodeDescription)
                 if let transcriptUrl = episode.transcriptUrl, !transcriptUrl.isEmpty {
-                    transcript = await TranscriptService.shared.fetchTranscript(url: transcriptUrl)
+                    transcript = await TranscriptService.shared.fetchTranscript(
+                        url: transcriptUrl, type: episode.transcriptType
+                    )
                 }
                 // Pre-compute the HTML attributed string for the description.
                 // This MUST happen in .task (not in the view body) because
@@ -129,6 +123,23 @@ struct EpisodeDetailSheet: View {
                         }
                     }
                 }
+            }
+            .sheet(isPresented: $showAddNote) {
+                AddEditNoteSheet(
+                    episodeUrl: episode.audioUrl ?? "",
+                    podcastUrl: episode.podcastUrl ?? "",
+                    episodeGuid: episode.guid,
+                    timestampSec: isCurrentlyPlaying ? playerManager.currentPosition : TimeInterval(episode.listenedSeconds),
+                    podcastTitle: episode.podcastTitle,
+                    episodeTitle: episode.title,
+                    artUrl: episode.imageUrl ?? episode.podcast?.logoUrl,
+                    durationSec: episode.durationSeconds.map { TimeInterval($0) },
+                    transcriptUrl: episode.transcriptUrl
+                )
+                .environment(podcastManager)
+                #if os(iOS)
+                .presentationDetents([.medium, .large])
+                #endif
             }
 
             #if os(macOS)
@@ -175,11 +186,11 @@ struct EpisodeDetailSheet: View {
                     : playerManager.currentPosition
                 let remaining = playerManager.currentDuration - displayPosition
                 
-                Text(PlayerManager.formatDuration(displayPosition))
+                Text(PlayerManager.formatTimestamp(displayPosition))
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text("-\(PlayerManager.formatDuration(max(0, remaining)))")
+                Text(DurationFormatting.remainingTimestamp(max(0, remaining)))
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
@@ -218,13 +229,13 @@ struct EpisodeDetailSheet: View {
                 .tint(.accentColor)
             
             HStack {
-                Text(PlayerManager.formatDuration(TimeInterval(episode.listenedSeconds)))
+                Text(PlayerManager.formatTimestamp(TimeInterval(episode.listenedSeconds)))
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
                 Spacer()
                 if let total = episode.durationSeconds {
                     let remaining = max(0, total - episode.listenedSeconds)
-                    Text("-\(PlayerManager.formatDuration(TimeInterval(remaining)))")
+                    Text(DurationFormatting.remainingTimestamp(TimeInterval(remaining)))
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
@@ -242,6 +253,7 @@ struct EpisodeDetailSheet: View {
         } placeholder: {
             RoundedRectangle(cornerRadius: 16)
                 .fill(.ultraThinMaterial)
+                .yourPodsGlassFill(cornerRadius: 16)
                 .overlay {
                     Image(systemName: "waveform")
                         .font(.system(size: 60))
@@ -363,7 +375,8 @@ struct EpisodeDetailSheet: View {
     private var actionButtonsSection: some View {
         let isCurrentlyPlaying = episode.guid == playerManager.currentEpisodeGuid
         let isDownloaded = downloadManager.isDownloaded(episode.guid)
-        
+        let isDownloading = downloadManager.activeDownloads[episode.guid] != nil
+
         return VStack(spacing: 12) {
             // Primary play button
             if episode.isPlayed {
@@ -416,7 +429,8 @@ struct EpisodeDetailSheet: View {
                 
                 ActionButton(
                     title: isDownloaded ? "Downloaded" : "Download",
-                    icon: isDownloaded ? "checkmark.circle.fill" : "arrow.down.circle"
+                    icon: isDownloaded ? "checkmark.circle.fill" : "arrow.down.circle",
+                    isBusy: isDownloading
                 ) {
                     if isDownloaded {
                         downloadManager.deleteDownload(guid: episode.guid)
@@ -437,7 +451,8 @@ struct EpisodeDetailSheet: View {
                         episodeGuid: episode.guid,
                         currentEpisodeGuid: playerManager.currentEpisodeGuid
                     ) {
-                        // Currently-playing episode: stop playback + advance queue
+                        // Currently-playing episode: mark played and advance to the
+                        // next queued episode (stops when Up Next is empty)
                         playerManager.markCurrentEpisodeAsPlayed()
                     } else {
                         // Non-playing episode: data-layer update only
@@ -459,55 +474,45 @@ struct EpisodeDetailSheet: View {
                     title: isHidden ? "Unhide" : "Hide",
                     icon: isHidden ? "eye" : "eye.slash"
                 ) {
-                    podcastManager.episodeActionSync.setHidden(guid: episode.guid, hidden: !isHidden)
-                    podcastManager.episodeActionSync.persistHiddenGuids()
-                    Task {
-                        guard let podcastUrl = episode.podcastUrl, let audioUrl = episode.audioUrl else { return }
-                        if let client = podcastManager.currentSyncClient {
-                            if !isHidden {
-                                try? await client.hideEpisodes([ProHideEpisodeRequest(episodeUrl: audioUrl, podcastUrl: podcastUrl)])
-                            } else {
-                                try? await client.unhideEpisode(episodeUrl: audioUrl)
-                            }
-                        }
-                    }
+                    podcastManager.toggleHidden(episode: episode)
                     dismiss()
                 }
                 
                 Menu {
                     Button {
-                        SharePresenter.present(items: ShareService.shareEpisode(
-                            title: episode.title,
-                            podcastTitle: episode.podcastTitle ?? "",
-                            link: episode.link,
-                            audioUrl: episode.audioUrl
-                        ))
-                    } label: {
-                        Label("Share Episode", systemImage: "waveform")
-                    }
-                    
+                        Task { @MainActor in
+                            let items = await ShareLinkBuilder.shared.makeItems(for: ShareRequest(
+                                kind: .episode, podcastUrl: episode.podcastUrl ?? "",
+                                episodeUrl: episode.audioUrl, episodeGuid: episode.guid, startSec: nil,
+                                episodeTitle: episode.title, podcastTitle: episode.podcastTitle ?? "",
+                                episodeLink: episode.link))
+                            SharePresenter.present(items: items)
+                        }
+                    } label: { Label("Share Episode", systemImage: "waveform") }
+
                     Button {
-                        SharePresenter.present(items: ShareService.sharePodcast(
-                            title: episode.podcastTitle ?? "",
-                            website: episode.podcast?.website,
-                            feedUrl: episode.podcastUrl ?? ""
-                        ))
-                    } label: {
-                        Label("Share Podcast", systemImage: "antenna.radiowaves.left.and.right")
-                    }
-                    
+                        Task { @MainActor in
+                            let items = await ShareLinkBuilder.shared.makeItems(for: ShareRequest(
+                                kind: .podcast, podcastUrl: episode.podcastUrl ?? "",
+                                episodeUrl: nil, episodeGuid: nil, startSec: nil,
+                                episodeTitle: nil, podcastTitle: episode.podcastTitle ?? "",
+                                episodeLink: episode.podcast?.website))
+                            SharePresenter.present(items: items)
+                        }
+                    } label: { Label("Share Podcast", systemImage: "antenna.radiowaves.left.and.right") }
+
                     if isCurrentlyPlaying {
                         Button {
-                            SharePresenter.present(items: ShareService.sharePosition(
-                                episodeTitle: episode.title,
-                                podcastTitle: episode.podcastTitle ?? "",
-                                position: playerManager.currentPosition,
-                                link: episode.link,
-                                audioUrl: episode.audioUrl
-                            ))
-                        } label: {
-                            Label("Share Position", systemImage: "clock")
-                        }
+                            Task { @MainActor in
+                                let items = await ShareLinkBuilder.shared.makeItems(for: ShareRequest(
+                                    kind: .episode, podcastUrl: episode.podcastUrl ?? "",
+                                    episodeUrl: episode.audioUrl, episodeGuid: episode.guid,
+                                    startSec: Int(playerManager.currentPosition),
+                                    episodeTitle: episode.title, podcastTitle: episode.podcastTitle ?? "",
+                                    episodeLink: episode.link))
+                                SharePresenter.present(items: items)
+                            }
+                        } label: { Label("Share Position", systemImage: "clock") }
                     }
                 } label: {
                     VStack(spacing: 4) {
@@ -538,6 +543,9 @@ struct EpisodeDetailSheet: View {
                 ActionButton(title: "Transcript", icon: "text.quote") {
                     showTranscript = true
                 }
+            }
+            ActionButton(title: "Add Note", icon: "note.text.badge.plus") {
+                showAddNote = true
             }
         }
     }
@@ -577,13 +585,26 @@ struct EpisodeDetailSheet: View {
 private struct ActionButton: View {
     let title: String
     let icon: String
+    /// When true, the icon is replaced by a spinner and the button is disabled
+    /// (used by Download to show work is in progress).
+    var isBusy: Bool = false
     let action: () -> Void
-    
+
     var body: some View {
         Button(action: action) {
             VStack(spacing: 6) {
-                Image(systemName: icon)
-                    .font(.title3)
+                // Fixed height so swapping the icon for a spinner doesn't
+                // resize the button and shift the action grid.
+                Group {
+                    if isBusy {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: icon)
+                            .font(.title3)
+                    }
+                }
+                .frame(height: 22)
                 Text(title)
                     .font(.caption2)
                     .lineLimit(1)
@@ -594,5 +615,7 @@ private struct ActionButton: View {
             .clipShape(RoundedRectangle(cornerRadius: 10))
         }
         .foregroundStyle(.primary)
+        .disabled(isBusy)
+        .accessibilityValue(isBusy ? "Downloading" : "")
     }
 }
