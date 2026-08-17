@@ -113,6 +113,9 @@ gPodder sync, Nextcloud sync, and local Vault Mode are subscription-free and alw
 - `YourPodsWidgets/` — Now Playing widget, Live Activities, and Lock Screen widgets
 - `YourPodsComplication/` — watchOS complication widget
 - `YourPodsTests/` — Unit tests
+- `TestPlans/` — `Full.xctestplan` (the merge gate) and `Smoke.xctestplan` (Full minus the classes that wait on real time)
+- `Translations/` — Localization data and tooling: the file allowlist the guards scan, per-key digests of the English each translation was made from, and the Python tools that maintain them (`tools/`)
+- `fastlane/metadata/` — App Store listing copy, one directory per App Store Connect locale
 
 ## Per-Podcast Settings
 

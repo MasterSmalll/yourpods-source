@@ -281,6 +281,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for details and for running the test plan
 - `YourPodsWidgets/` — Now Playing widget, Live Activities, and Lock Screen widgets
 - `YourPodsComplication/` — watchOS complications
 - `YourPodsTests/` — Unit tests
+- `TestPlans/` — `Full.xctestplan` (merge gate) and `Smoke.xctestplan` (faster inner loop)
+- `Translations/` — Localization data and the Python tooling that maintains it
+- `fastlane/metadata/` — App Store listing copy, one directory per locale
 
 
 
