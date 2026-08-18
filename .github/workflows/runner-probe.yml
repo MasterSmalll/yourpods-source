@@ -1,7 +1,0 @@
-name: runner-probe
-on: [workflow_dispatch, push]
-jobs:
-  probe:
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "runner acquired on $RUNNER_NAME / $RUNNER_OS"
