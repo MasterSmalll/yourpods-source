@@ -5,6 +5,16 @@ import WatchKit
 import os
 import CoreMedia
 
+/// Hands-free bookmark captured from the watch while a podcast is playing.
+struct CapturedMoment: Codable, Identifiable {
+    let id: UUID
+    let episodeId: String
+    let podcastTitle: String
+    let episodeTitle: String
+    let timestampSec: Double
+    let capturedAt: Date
+}
+
 /// Persistent audio manager for the watch app.
 /// Owns the AVPlayer and survives view lifecycle — the key fix for background playback.
 /// Injected at the app root via @StateObject / .environmentObject().
@@ -24,6 +34,7 @@ class WatchAudioManager: NSObject, ObservableObject {
     @Published private(set) var playbackSource: PlaybackSource = .none
     @Published private(set) var statusText: String = "No episode"
     @Published private(set) var hasSetupAudio = false
+    @Published private(set) var capturedMoments: [CapturedMoment] = []
 
     /// Watch-local speed override. nil = follow the phone's synced speed.
     @Published private(set) var speedOverride: Double? =
@@ -50,6 +61,8 @@ class WatchAudioManager: NSObject, ObservableObject {
     private var cachedArtworkUrl: String?
     private var artworkFetchTask: Task<Void, Never>?
     private var endOfTrackObserver: Any?
+    private static let capturedMomentsKey = "watch_captured_moments_v1"
+    private static let capturedMomentsLimit = 200
 
     /// Observers for background/foreground lifecycle notifications.
     private var backgroundObserver: Any?
@@ -70,11 +83,58 @@ class WatchAudioManager: NSObject, ObservableObject {
 
     override init() {
         super.init()
+        capturedMoments = Self.loadCapturedMoments()
         // Enable once — the computed property above is a pure read. Re-enabling
         // on every check was redundant (and each call briefly wakes the battery
         // sensor on watchOS).
         WKInterfaceDevice.current().isBatteryMonitoringEnabled = true
         setupLifecycleObservers()
+    }
+
+    private static func loadCapturedMoments() -> [CapturedMoment] {
+        guard let data = UserDefaults.standard.data(forKey: capturedMomentsKey),
+              let decoded = try? JSONDecoder().decode([CapturedMoment].self, from: data) else {
+            return []
+        }
+        return decoded
+    }
+
+    private func persistCapturedMoments() {
+        guard let data = try? JSONEncoder().encode(capturedMoments) else {
+            logger.error("Failed to encode captured podcast moments")
+            return
+        }
+        UserDefaults.standard.set(data, forKey: Self.capturedMomentsKey)
+    }
+
+    /// Capture the current podcast/episode and exact playback position without
+    /// seeking or interrupting playback. Used by AirPods previous-track gesture.
+    @discardableResult
+    func captureCurrentMoment() -> Bool {
+        guard let episode = currentEpisode, let player else { return false }
+
+        let timestamp = CMTimeGetSeconds(player.currentTime())
+        guard timestamp.isFinite, timestamp >= 0 else { return false }
+
+        let moment = CapturedMoment(
+            id: UUID(),
+            episodeId: episode.id,
+            podcastTitle: episode.podcastTitle ?? episode.album,
+            episodeTitle: episode.title,
+            timestampSec: timestamp,
+            capturedAt: Date()
+        )
+
+        capturedMoments.append(moment)
+        if capturedMoments.count > Self.capturedMomentsLimit {
+            capturedMoments.removeFirst(capturedMoments.count - Self.capturedMomentsLimit)
+        }
+        persistCapturedMoments()
+
+        // Immediate confirmation while running; playback is untouched.
+        WKInterfaceDevice.current().play(.success)
+        logger.info("Captured podcast moment at \(Int(timestamp))s in \(episode.title)")
+        return true
     }
     
     deinit {
@@ -635,6 +695,7 @@ class WatchAudioManager: NSObject, ObservableObject {
         commandCenter.skipBackwardCommand.removeTarget(nil)
         commandCenter.skipForwardCommand.removeTarget(nil)
         commandCenter.nextTrackCommand.removeTarget(nil)
+        commandCenter.previousTrackCommand.removeTarget(nil)
         commandCenter.changePlaybackPositionCommand.removeTarget(nil)
         
         commandCenter.playCommand.isEnabled = true
@@ -678,6 +739,16 @@ class WatchAudioManager: NSObject, ObservableObject {
         commandCenter.nextTrackCommand.isEnabled = true
         commandCenter.nextTrackCommand.addTarget { [weak self] _ in
             self?.handleTrackEnd(reason: .skipped)
+            return .success
+        }
+
+        // AirPods triple-press is Previous Track by default. Repurpose it as a
+        // hands-free podcast marker. We intentionally do not seek or change track.
+        commandCenter.previousTrackCommand.isEnabled = true
+        commandCenter.previousTrackCommand.addTarget { [weak self] _ in
+            guard self?.captureCurrentMoment() == true else {
+                return .commandFailed
+            }
             return .success
         }
         
