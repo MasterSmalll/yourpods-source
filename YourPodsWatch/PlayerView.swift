@@ -32,6 +32,10 @@ struct PlayerView: View {
         audioManager.currentEpisode?.id == episode.id
     }
 
+    private var capturedMomentsForEpisode: [CapturedMoment] {
+        audioManager.capturedMoments.filter { $0.episodeId == episode.id }
+    }
+
     var body: some View {
         ScrollView {
             VStack(spacing: 8) {
@@ -86,6 +90,18 @@ struct PlayerView: View {
                 Text(isCurrentEpisode ? audioManager.statusText : statusTextForIdle())
                     .font(.system(size: 10))
                     .foregroundColor(.gray)
+
+                // Prototype verification: show how many hands-free moments were
+                // captured for this episode and the most recent timestamp.
+                if let lastMoment = capturedMomentsForEpisode.last {
+                    HStack(spacing: 4) {
+                        Image(systemName: "bookmark.fill")
+                        Text("\(capturedMomentsForEpisode.count) · \(formatChapterTime(lastMoment.timestampSec))")
+                    }
+                    .font(.caption2)
+                    .foregroundColor(.accentColor)
+                    .accessibilityLabel("\(capturedMomentsForEpisode.count) captured moments. Latest at \(formatChapterTime(lastMoment.timestampSec))")
+                }
                 
                 // Playback Controls
                 HStack(spacing: 20) {
@@ -121,6 +137,17 @@ struct PlayerView: View {
                     .accessibilityLabel("Skip forward \(sessionManager.skipForwardSeconds) seconds")
                 }
                 .padding(.vertical, 4)
+
+                // Manual fallback for first-device testing. The AirPods gesture
+                // calls the same captureCurrentMoment() method.
+                Button(action: {
+                    _ = audioManager.captureCurrentMoment()
+                }) {
+                    Label("Mark Moment", systemImage: "bookmark")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .disabled(!isCurrentEpisode || !audioManager.hasSetupAudio)
 
                 // Playback speed (watch-local override; long-press to follow iPhone)
                 Button(action: {
