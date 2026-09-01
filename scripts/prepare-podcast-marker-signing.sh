@@ -6,8 +6,11 @@ cd "$(git rev-parse --show-toplevel)"
 SPEC="project.yml"
 BACKUP="project.yml.podcast-marker-backup"
 
+# Always regenerate from the untouched upstream spec so the script is idempotent.
 if [[ ! -f "$BACKUP" ]]; then
   cp "$SPEC" "$BACKUP"
+else
+  cp "$BACKUP" "$SPEC"
 fi
 
 python3 <<'PY'
@@ -23,8 +26,24 @@ text = text.replace("com.asecretcompany.yourpods", "com.mastersmall.podcastmarke
 # selected locally in Signing & Capabilities.
 text = text.replace('    DEVELOPMENT_TEAM: YOUR_TEAM_ID\n', '')
 
-# The podcast-marker prototype does not need the watch complication or an App Group.
-# Removing them makes Personal Team / local-device signing substantially simpler.
+# ---------------------------------------------------------------------------
+# iPhone prototype: remove capabilities that are irrelevant to Podcast Marker
+# and commonly fail on a Personal Team (CarPlay/Siri/App Groups/widgets).
+# WatchConnectivity itself does not require these entitlements.
+# ---------------------------------------------------------------------------
+phone_entitlements = '''    entitlements:\n      path: YourPods/YourPods.entitlements\n      properties:\n        com.apple.developer.carplay-audio: true\n        com.apple.developer.siri: true\n        com.apple.security.application-groups:\n          - group.com.mastersmall.podcastmarker\n'''
+text = text.replace(phone_entitlements, '')
+
+phone_extra_dependencies = '''      - target: YourPodsWidgets\n        embed: true\n        codeSign: true\n        copy:\n          destination: plugins\n      - target: YourPodsWatch\n        embed: true\n        codeSign: true\n'''
+text = text.replace(phone_extra_dependencies, '')
+
+main_scheme = '''  YourPods:\n    build:\n      targets:\n        YourPods: all\n        YourPodsTests: [test]\n        YourPodsWidgets: all\n        YourPodsWatch: all\n        YourPodsComplication: all\n'''
+main_scheme_replacement = '''  YourPods:\n    build:\n      targets:\n        YourPods: all\n        YourPodsTests: [test]\n'''
+text = text.replace(main_scheme, main_scheme_replacement)
+
+# ---------------------------------------------------------------------------
+# Watch prototype: complication/App Group are unnecessary for marker testing.
+# ---------------------------------------------------------------------------
 watch_entitlements = '''    entitlements:\n      path: YourPodsWatch/YourPodsWatch.entitlements\n      properties:\n        com.apple.security.application-groups:\n          - group.com.mastersmall.podcastmarker.watch\n'''
 text = text.replace(watch_entitlements, '')
 
@@ -35,7 +54,9 @@ watch_scheme = '''  YourPodsWatch:\n    build:\n      targets:\n        YourPods
 watch_scheme_replacement = '''  YourPodsWatch:\n    build:\n      targets:\n        YourPodsWatch: all\n'''
 text = text.replace(watch_scheme, watch_scheme_replacement)
 
-# Give the local watch build a distinct display name.
+# Distinct prototype display names.
+text = text.replace('        CFBundleDisplayName: YourPods\n        CFBundleName: YourPods\n',
+                    '        CFBundleDisplayName: Podcast Marker\n        CFBundleName: PodcastMarker\n', 1)
 text = text.replace('        CFBundleDisplayName: YourPods\n        CFBundleName: YourPodsWatch\n',
                     '        CFBundleDisplayName: Podcast Marker\n        CFBundleName: PodcastMarkerWatch\n')
 
@@ -46,4 +67,5 @@ xcodegen generate
 
 echo
 echo "Podcast Marker signing prep complete."
-echo "Open YourPods.xcodeproj, select the YourPodsWatch target, choose your Apple Team, then Run."
+echo "For Watch: select YourPodsWatch, choose your Apple Team, Run on Apple Watch."
+echo "For iPhone: select YourPods, choose the same Apple Team, Run on iPhone."
