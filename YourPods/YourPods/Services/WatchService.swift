@@ -464,6 +464,13 @@ extension WatchService: WCSessionDelegate {
                         "position": position,
                     ])
                 }
+
+            case "captured_moment":
+                if CapturedMomentStore.shared.ingest(message) {
+                    self.logger.info("Stored captured podcast moment from Watch")
+                } else {
+                    self.logger.warning("Dropped malformed captured-moment payload")
+                }
                 
             case "request_library":
                 self.onCustomCommand?("request_library", [:])
