@@ -16,6 +16,7 @@ final class CapturedMomentSyncCoordinator {
     private let enqueuedKey = "watch_captured_moments_enqueued_v1"
     private var observer: NSObjectProtocol?
     private var enqueuedIds: Set<String>
+    private var inFlightIds: Set<String> = []
     private var started = false
 
     private init() {
@@ -31,7 +32,7 @@ final class CapturedMomentSyncCoordinator {
 
         observer = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification,
-            object: UserDefaults.standard,
+            object: nil,
             queue: .main
         ) { [weak self] _ in
             self?.flushPendingMoments()
@@ -55,13 +56,17 @@ final class CapturedMomentSyncCoordinator {
             return
         }
 
-        for moment in moments where !enqueuedIds.contains(moment.id.uuidString) {
+        for moment in moments {
+            let id = moment.id.uuidString
+            guard !enqueuedIds.contains(id), !inFlightIds.contains(id) else { continue }
             send(moment, via: session)
         }
     }
 
     private func send(_ moment: CapturedMoment, via session: WCSession) {
         let id = moment.id.uuidString
+        inFlightIds.insert(id)
+
         let payload: [String: Any] = [
             "command": "captured_moment",
             "id": id,
@@ -74,19 +79,25 @@ final class CapturedMomentSyncCoordinator {
 
         if session.isReachable {
             session.sendMessage(payload, replyHandler: { [weak self] reply in
-                guard (reply["status"] as? String) == "ok" else { return }
                 DispatchQueue.main.async {
-                    self?.markEnqueued(id)
+                    guard let self else { return }
+                    self.inFlightIds.remove(id)
+                    if (reply["status"] as? String) == "ok" {
+                        self.markEnqueued(id)
+                    }
                 }
             }, errorHandler: { [weak self] error in
                 self?.logger.error("Live captured-moment send failed: \(error.localizedDescription); queueing durable transfer")
                 _ = session.transferUserInfo(payload)
                 DispatchQueue.main.async {
-                    self?.markEnqueued(id)
+                    guard let self else { return }
+                    self.inFlightIds.remove(id)
+                    self.markEnqueued(id)
                 }
             })
         } else {
             _ = session.transferUserInfo(payload)
+            inFlightIds.remove(id)
             markEnqueued(id)
         }
     }
