@@ -47,12 +47,18 @@ struct ContentView: View {
                         tabLabel("Add Podcasts", systemImage: "plus.circle")
                     }
                     .tag(3)
+
+                CapturedMomentsView()
+                    .tabItem {
+                        tabLabel("Moments", systemImage: "bookmark.fill")
+                    }
+                    .tag(4)
                 
                 SettingsView()
                     .tabItem {
                         tabLabel("Settings", systemImage: "gear")
                     }
-                    .tag(4)
+                    .tag(5)
             }
             .id(settingsManager.tabBarDisplayMode)
             #if os(iOS)
