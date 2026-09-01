@@ -40,6 +40,9 @@ struct YourPodsWatch_Watch_AppApp: App {
                     // isn't ready — WCSession can deliver pending data that mutates
                     // @Published properties on an un-wired publisher → crash.
                     sessionManager.activate()
+                    // Start durable Watch → iPhone capture delivery. Existing local
+                    // captures are flushed as soon as the companion app is installed.
+                    CapturedMomentSyncCoordinator.shared.start()
                     // CAROUSEL FIX: Load persisted data only once per process.
                     // Without this guard, background wakes re-decode large JSON
                     // payloads, adding main-thread work during the critical
@@ -59,6 +62,7 @@ struct YourPodsWatch_Watch_AppApp: App {
                         // delivery time — if we were suspended, the @Published
                         // properties were never updated → stale/frozen UI.
                         sessionManager.refreshFromApplicationContext()
+                        CapturedMomentSyncCoordinator.shared.flushPendingMoments()
                         backgroundRefresh.scheduleNextRefresh()
                     }
                 }
@@ -70,6 +74,7 @@ struct YourPodsWatch_Watch_AppApp: App {
                     // Cold background launch: onAppear has NOT run. activate() is
                     // idempotent — make sure WCSession is live before refreshing.
                     WatchSessionManager.shared.activate()
+                    CapturedMomentSyncCoordinator.shared.start()
                     BackgroundRefreshManager.shared.handleRefresh {
                         continuation.resume()
                     }
