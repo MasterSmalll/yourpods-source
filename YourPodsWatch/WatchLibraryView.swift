@@ -1,8 +1,10 @@
 import SwiftUI
 import Foundation
+import WatchConnectivity
 
 struct WatchLibraryView: View {
     @EnvironmentObject var sessionManager: WatchSessionManager
+    @EnvironmentObject var audioManager: WatchAudioManager
 
     /// Network-free test episode. The WAV file is generated locally on the Watch
     /// the first time this view is rendered, so marker testing never depends on
@@ -40,6 +42,30 @@ struct WatchLibraryView: View {
                                 .lineLimit(2)
                         }
                     }
+                }
+            }
+
+            Section("Moment Sync Debug") {
+                TimelineView(.periodic(from: .now, by: 2)) { _ in
+                    let session = WCSession.default
+                    let coordinator = CapturedMomentSyncCoordinator.shared
+                    VStack(alignment: .leading, spacing: 5) {
+                        debugRow("Session", activationLabel(session.activationState))
+                        debugRow("Companion", session.isCompanionAppInstalled ? "Yes" : "No")
+                        debugRow("Reachable", session.isReachable ? "Yes" : "No")
+                        debugRow("Local", "\(coordinator.localMomentCount)")
+                        debugRow("Pending", "\(coordinator.pendingMomentCount)")
+                        debugRow("Queued", "\(session.outstandingUserInfoTransfers.count)")
+                    }
+                    .font(.caption2)
+                }
+
+                Button("Force Sync") {
+                    CapturedMomentSyncCoordinator.shared.flushPendingMoments()
+                }
+
+                Button("Retry All Moments") {
+                    CapturedMomentSyncCoordinator.shared.retryAllLocalMoments()
                 }
             }
 
@@ -103,10 +129,35 @@ struct WatchLibraryView: View {
         }
         .navigationTitle("Library")
         .onAppear {
+            CapturedMomentSyncCoordinator.shared.start()
             // A failed library request must never block the local marker test.
             if sessionManager.library.isEmpty {
                 sessionManager.requestLibrary()
             }
+        }
+        .onChange(of: audioManager.capturedMoments.count) { _, _ in
+            // Do not depend solely on UserDefaults notifications: a new marker
+            // triggers an explicit delivery attempt immediately.
+            CapturedMomentSyncCoordinator.shared.flushPendingMoments()
+        }
+    }
+
+    @ViewBuilder
+    private func debugRow(_ label: String, _ value: String) -> some View {
+        HStack {
+            Text(label)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Text(value)
+        }
+    }
+
+    private func activationLabel(_ state: WCSessionActivationState) -> String {
+        switch state {
+        case .notActivated: return "Not Active"
+        case .inactive: return "Inactive"
+        case .activated: return "Activated"
+        @unknown default: return "Unknown"
         }
     }
 }
