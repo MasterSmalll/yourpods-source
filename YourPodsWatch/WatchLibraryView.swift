@@ -116,7 +116,7 @@ struct WatchLibraryView: View {
 /// keeping the fixture tiny (~720 KB). The file is generated once and reused.
 private enum MarkerTestAudio {
     static let filename = "podcast-marker-local-test.wav"
-    static let duration: Double = 45
+    static let duration: Int = 45
     private static let sampleRate = 8_000
     private static let channels: UInt16 = 1
     private static let bitsPerSample: UInt16 = 16
@@ -129,7 +129,7 @@ private enum MarkerTestAudio {
             return filename
         }
 
-        let sampleCount = Int(duration * Double(sampleRate))
+        let sampleCount = duration * sampleRate
         let bytesPerSample = Int(bitsPerSample / 8)
         let dataByteCount = sampleCount * Int(channels) * bytesPerSample
         let byteRate = UInt32(sampleRate * Int(channels) * bytesPerSample)
