@@ -65,6 +65,11 @@ PY
 
 xcodegen generate
 
+# XcodeGen writes the Watch plist from project.yml, but keep this explicit guard
+# so a future upstream/project-spec change cannot silently reconnect the Watch
+# target to the original YourPods iPhone bundle.
+/usr/libexec/PlistBuddy -c "Set :WKCompanionAppBundleIdentifier com.mastersmall.podcastmarker" YourPodsWatch/Info.plist
+
 echo
 echo "Podcast Marker signing prep complete."
 echo "For Watch: select YourPodsWatch, choose your Apple Team, Run on Apple Watch."
