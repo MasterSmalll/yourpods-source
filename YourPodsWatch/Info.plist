@@ -27,6 +27,6 @@
 	<key>WKApplication</key>
 	<true/>
 	<key>WKCompanionAppBundleIdentifier</key>
-	<string>com.asecretcompany.yourpods</string>
+	<string>com.mastersmall.podcastmarker</string>
 </dict>
 </plist>
