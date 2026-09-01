@@ -43,6 +43,15 @@ struct YourPodsWatch_Watch_AppApp: App {
                     // Start durable Watch → iPhone capture delivery. Existing local
                     // captures are flushed as soon as the companion app is installed.
                     CapturedMomentSyncCoordinator.shared.start()
+                    // WCSession activation is asynchronous. Retry pending marker
+                    // delivery a few times after launch so captures made before the
+                    // companion app was installed are not left waiting indefinitely.
+                    Task { @MainActor in
+                        for delay in [1, 3, 8] {
+                            try? await Task.sleep(for: .seconds(delay))
+                            CapturedMomentSyncCoordinator.shared.flushPendingMoments()
+                        }
+                    }
                     // CAROUSEL FIX: Load persisted data only once per process.
                     // Without this guard, background wakes re-decode large JSON
                     // payloads, adding main-thread work during the critical
