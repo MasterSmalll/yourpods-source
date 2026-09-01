@@ -15,7 +15,6 @@ struct SyncedCapturedMoment: Codable, Identifiable, Hashable {
 ///
 /// UUID-based deduplication makes delivery idempotent: the Watch may retry via
 /// both live messages and durable transferUserInfo without creating duplicates.
-@MainActor
 final class CapturedMomentStore: ObservableObject {
     static let shared = CapturedMomentStore()
 
