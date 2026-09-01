@@ -29,16 +29,17 @@ text = text.replace('    DEVELOPMENT_TEAM: YOUR_TEAM_ID\n', '')
 # ---------------------------------------------------------------------------
 # iPhone prototype: remove capabilities that are irrelevant to Podcast Marker
 # and commonly fail on a Personal Team (CarPlay/Siri/App Groups/widgets).
-# WatchConnectivity itself does not require these entitlements.
+# Keep the Watch app embedded in the iPhone app: that companion relationship is
+# required for reliable WatchConnectivity routing between these prototype builds.
 # ---------------------------------------------------------------------------
 phone_entitlements = '''    entitlements:\n      path: YourPods/YourPods.entitlements\n      properties:\n        com.apple.developer.carplay-audio: true\n        com.apple.developer.siri: true\n        com.apple.security.application-groups:\n          - group.com.mastersmall.podcastmarker\n'''
 text = text.replace(phone_entitlements, '')
 
-phone_extra_dependencies = '''      - target: YourPodsWidgets\n        embed: true\n        codeSign: true\n        copy:\n          destination: plugins\n      - target: YourPodsWatch\n        embed: true\n        codeSign: true\n'''
-text = text.replace(phone_extra_dependencies, '')
+phone_widget_dependency = '''      - target: YourPodsWidgets\n        embed: true\n        codeSign: true\n        copy:\n          destination: plugins\n'''
+text = text.replace(phone_widget_dependency, '')
 
 main_scheme = '''  YourPods:\n    build:\n      targets:\n        YourPods: all\n        YourPodsTests: [test]\n        YourPodsWidgets: all\n        YourPodsWatch: all\n        YourPodsComplication: all\n'''
-main_scheme_replacement = '''  YourPods:\n    build:\n      targets:\n        YourPods: all\n        YourPodsTests: [test]\n'''
+main_scheme_replacement = '''  YourPods:\n    build:\n      targets:\n        YourPods: all\n        YourPodsTests: [test]\n        YourPodsWatch: all\n'''
 text = text.replace(main_scheme, main_scheme_replacement)
 
 # ---------------------------------------------------------------------------
@@ -72,5 +73,5 @@ xcodegen generate
 
 echo
 echo "Podcast Marker signing prep complete."
-echo "For Watch: select YourPodsWatch, choose your Apple Team, Run on Apple Watch."
-echo "For iPhone: select YourPods, choose the same Apple Team, Run on iPhone."
+echo "For iPhone: select YourPods, choose your Apple Team, Run on iPhone."
+echo "For Watch: select YourPodsWatch, choose the same Apple Team if needed."
