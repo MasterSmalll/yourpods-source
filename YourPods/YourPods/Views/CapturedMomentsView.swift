@@ -38,7 +38,7 @@ struct CapturedMomentsView: View {
             .navigationTitle("Moments")
             .toolbar {
                 if !store.moments.isEmpty {
-                    ToolbarItem(placement: .topBarTrailing) {
+                    ToolbarItem(placement: .primaryAction) {
                         Button("Clear", role: .destructive) {
                             showingClearConfirmation = true
                         }
