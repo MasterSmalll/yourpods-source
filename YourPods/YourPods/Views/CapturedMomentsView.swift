@@ -1,8 +1,12 @@
 import SwiftUI
+#if os(iOS) && canImport(WatchConnectivity)
+import WatchConnectivity
+#endif
 
 /// Phone history for hands-free podcast moments captured on Apple Watch.
 struct CapturedMomentsView: View {
     @ObservedObject private var store = CapturedMomentStore.shared
+    @Environment(\.scenePhase) private var scenePhase
     @State private var showingClearConfirmation = false
 
     var body: some View {
@@ -55,6 +59,30 @@ struct CapturedMomentsView: View {
                 }
             }
         }
+        .onAppear {
+            ensureWatchReceiverIsActive()
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .active {
+                ensureWatchReceiverIsActive()
+            }
+        }
+    }
+
+    /// Recovery guard for the prototype's Watch → iPhone delivery path.
+    ///
+    /// WCSession has exactly one delegate. If another startup path replaced it,
+    /// the Watch can still report the phone as reachable while every marker sits
+    /// indefinitely in `outstandingUserInfoTransfers`. Re-assert ownership when
+    /// the Moments screen becomes active so queued transfers have a live receiver.
+    /// This is deliberately iPhone-only and does not alter or clear Watch data.
+    private func ensureWatchReceiverIsActive() {
+        #if os(iOS) && canImport(WatchConnectivity)
+        guard WCSession.isSupported() else { return }
+        let session = WCSession.default
+        session.delegate = WatchService.shared
+        session.activate()
+        #endif
     }
 
     private func formatTimestamp(_ value: Double) -> String {
