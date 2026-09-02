@@ -55,11 +55,15 @@ final class WatchService: NSObject, ObservableObject {
     private override init() {
         super.init()
         #if os(iOS)
-        activateIfSupported()
+        ensureReceiverActive()
         #endif
     }
-    
-    private func activateIfSupported() {
+
+    /// Re-assert this singleton as the sole WCSession delegate and activate the
+    /// session. WCSession can report the counterpart as reachable even when a
+    /// stale/replaced delegate means incoming transferUserInfo payloads have no
+    /// live receiver. This method is idempotent and safe to call on foregrounding.
+    func ensureReceiverActive() {
         #if os(iOS)
         #if canImport(WatchConnectivity)
         guard WCSession.isSupported() else {
@@ -68,7 +72,7 @@ final class WatchService: NSObject, ObservableObject {
         }
         session.delegate = self
         session.activate()
-        logger.info("WCSession activated")
+        logger.info("WCSession receiver ownership asserted and activation requested")
         #endif
         #endif
     }
@@ -383,7 +387,17 @@ extension WatchService: WCSessionDelegate {
     
     func sessionDidDeactivate(_ session: WCSession) {
         logger.info("WCSession deactivated — reactivating")
+        session.delegate = self
         session.activate()
+    }
+
+    func sessionReachabilityDidChange(_ session: WCSession) {
+        logger.info("WCSession reachability changed: \(session.isReachable)")
+        // Defensive: keep receiver ownership pinned to the singleton whenever
+        // WatchConnectivity tells us the route changed.
+        if session.delegate !== self {
+            session.delegate = self
+        }
     }
     
     func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
@@ -391,6 +405,22 @@ extension WatchService: WCSessionDelegate {
     }
     
     func session(_ session: WCSession, didReceiveMessage message: [String: Any], replyHandler: @escaping ([String: Any]) -> Void) {
+        if message["command"] as? String == "captured_moment" {
+            // The Watch treats status=ok as a durable delivery acknowledgement.
+            // Never acknowledge before the iPhone has actually persisted the marker.
+            DispatchQueue.main.async {
+                let stored = CapturedMomentStore.shared.ingest(message)
+                if stored {
+                    self.logger.info("Stored and acknowledged captured podcast moment from Watch")
+                    replyHandler(["status": "ok"])
+                } else {
+                    self.logger.warning("Rejected malformed captured-moment payload")
+                    replyHandler(["status": "invalid"])
+                }
+            }
+            return
+        }
+
         if message["command"] as? String == "refresh_queue" {
             Task { @MainActor [weak self] in
                 guard let self else {
@@ -409,14 +439,17 @@ extension WatchService: WCSessionDelegate {
         }
     }
 
-    /// Durable delivery path: progress sent via `transferUserInfo` arrives here even when the app was
-    /// backgrounded/unreachable when the watch sent it. Routes through the same handler as live messages.
-    func session(_ session: WCSession, didReceiveUserInfo userInfo: [String: Any] = [:]) {
+    /// Durable delivery path: captures/progress sent via `transferUserInfo` arrive here even when the app was
+    /// backgrounded/unreachable when the watch sent them. Routes through the same handler as live messages.
+    func session(_ session: WCSession, didReceiveUserInfo userInfo: [String: Any]) {
         handleMessage(userInfo)
     }
     
     private func handleMessage(_ message: [String: Any]) {
-        guard let command = message["command"] as? String else { return }
+        guard let command = message["command"] as? String else {
+            logger.warning("Dropped Watch payload without command")
+            return
+        }
         logger.info("Received command from watch: \(command)")
         
         DispatchQueue.main.async { [weak self] in
