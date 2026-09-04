@@ -32,7 +32,7 @@ final class BGTaskCompleter: @unchecked Sendable {
 final class BackgroundRefreshService {
     static let shared = BackgroundRefreshService()
     #if os(iOS)
-    static let refreshTaskId = "com.asecretcompany.yourpods.refresh"
+    static let refreshTaskId = "com.mastersmall.podcastmarker.refresh"
     #endif
     
     private let logger = Logger(subsystem: "com.yourpods", category: "BackgroundRefresh")
